@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ...audiomodels import (
+    HEADER_PARAMS,
     KIND_WORDS,
     NEGATIVE_BRANCH_PARAMS,
     OPTIONAL_PARAMS,
@@ -15,7 +16,7 @@ from ...audiomodels import (
 )
 from ...errors import ApiError
 from ..base import validate_member_name
-from . import planning
+from . import planning, scoreheader
 
 MAX_SEED = 2**32 - 1
 
@@ -160,6 +161,28 @@ class AudioParams(BaseModel):
         "the accompaniment free). Null keeps them for an instrumental cover and strips "
         "them for a sung one, as YuE2's own skill does.",
     )
+    key: str | None = Field(
+        default=None,
+        description="Songs (YuE2), planned only (never beside `score`): the key the score "
+        "is written in, fixed as its `K:` line before YuE2 plans the rest - one of ABC's 15 "
+        "major keys (Cb Gb Db Ab Eb Bb F C G D A E B F# C#) or 15 minor keys (Abm Ebm Bbm "
+        "Fm Cm Gm Dm Am Em Bm F#m C#m G#m D#m A#m); no modes. Null: YuE2 chooses "
+        "(docs/AUDIO.md \"Key, meter and tempo\").",
+    )
+    meter: str | None = Field(
+        default=None,
+        description="Songs (YuE2), planned only: the meter, fixed as the score's `M:` line - "
+        f"a fraction such as \"4/4\", \"3/4\" or \"6/8\", 1 to {scoreheader.MAX_BEATS} "
+        "beats over 2, 4, 8 or 16. Null: YuE2 chooses.",
+    )
+    bpm: int | None = Field(
+        default=None,
+        ge=scoreheader.MIN_BPM,
+        le=scoreheader.MAX_BPM,
+        description="Songs (YuE2), planned only: the tempo in quarter notes a minute, "
+        f"{scoreheader.MIN_BPM} to {scoreheader.MAX_BPM}, fixed as the score's `Q:1/4=` "
+        "line. Null: YuE2 chooses.",
+    )
     format: Literal["flac", "wav", "mp3"] = Field(
         default="flac",
         description="The artifact: `flac` (24-bit), `wav` (24-bit PCM) or `mp3` "
@@ -178,6 +201,25 @@ class AudioParams(BaseModel):
     def names_an_input(cls, value: str | None) -> str | None:
         if value is not None:
             validate_member_name(value)
+        return value
+
+    @field_validator("key")
+    @classmethod
+    def is_a_key(cls, value: str | None) -> str | None:
+        return None if value is None else scoreheader.check_key(value)
+
+    @field_validator("meter")
+    @classmethod
+    def is_a_meter(cls, value: str | None) -> str | None:
+        return None if value is None else scoreheader.check_meter(value)
+
+    @field_validator("bpm", mode="before")
+    @classmethod
+    def is_whole(cls, value: Any) -> Any:
+        # 76.0 or "76" would be read as 76 by pydantic's lax mode; a tempo is sent as the
+        # integer the score writes, so anything else is refused rather than rounded.
+        if value is not None and type(value) is not int:
+            raise ValueError(f"must be an integer number of quarter notes a minute, not {value!r}")
         return value
 
     @field_validator("planning_lyrics")
@@ -302,6 +344,18 @@ def _refuse_score(params: AudioParams, manifest: AudioManifest, spec: AudioBacke
             spec,
             param="chords",
         )
+    for param in HEADER_PARAMS:
+        if getattr(params, param) is not None:
+            raise _refusal(
+                "audio_param_conflict",
+                f"a cover renders the score it is given, and that score's header already "
+                f"states its key (K:), meter (M:) and tempo (Q:); {param} fixes the header of "
+                f"a score YuE2 plans and means nothing beside `score`. Drop {param!r}, or "
+                "write it into the score's own header",
+                manifest,
+                spec,
+                param=param,
+            )
     for param in PLANNING_ONLY:
         if getattr(params, param) is not None:
             raise _refusal(
@@ -510,6 +564,9 @@ class Settled:
     # The song's CFG negative branch as the client wrote it ({tags, lyrics}; the one not
     # sent is ""); None for YuE2's stock negative (docs/AUDIO.md "The negative branch").
     negative: dict[str, str] | None = None
+    # The planned score's header fields the client fixed ({key, meter, bpm}, null where
+    # not sent); None when none was (docs/AUDIO.md "Key, meter and tempo").
+    header: dict[str, Any] | None = None
 
 
 def settle(params: AudioParams, spec: AudioBackendSpec, seed: int) -> Settled:
@@ -535,6 +592,11 @@ def settle(params: AudioParams, spec: AudioBackendSpec, seed: int) -> Settled:
             )
         ),
         negative=_negative(params),
+        header=(
+            None
+            if all(getattr(params, name) is None for name in HEADER_PARAMS)
+            else {name: getattr(params, name) for name in HEADER_PARAMS}
+        ),
     )
 
 

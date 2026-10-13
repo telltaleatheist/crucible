@@ -247,7 +247,7 @@ def yue2(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
 
 def _load_worker(monkeypatch: pytest.MonkeyPatch) -> Any:
-    from crucible.jobs.audio import planning, scorelength
+    from crucible.jobs.audio import planning, scoreheader, scorelength
 
     workerio = types.ModuleType("workerio")
     workerio.claim_stdout = lambda: None
@@ -257,7 +257,8 @@ def _load_worker(monkeypatch: pytest.MonkeyPatch) -> Any:
     spec = importlib.util.spec_from_file_location("audiocore_under_test", AUDIOCORE)
     audiocore = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(audiocore)
-    siblings = {"planning": planning, "scorelength": scorelength, "audiocore": audiocore}
+    siblings = {"planning": planning, "scorelength": scorelength, "audiocore": audiocore,
+                "scoreheader": scoreheader}
     workerio.load_sibling = lambda name, _file: siblings[name]
     spec = importlib.util.spec_from_file_location("yue2_worker_under_test", WORKER)
     module = importlib.util.module_from_spec(spec)
@@ -281,7 +282,7 @@ class Progress:
 def _job(tmp_path: Path, **fields: Any) -> SimpleNamespace:
     base = dict(tags=SUNG_TAGS, lyrics=WORDS, planning_lyrics=None, instrumental=False, seed=7,
                 cfg=2.0, min_duration_s=None, max_duration_s=None, longest_s=360,
-                planning_resizable=False, cover=None, negative=None,
+                planning_resizable=False, cover=None, negative=None, header=None,
                 output_path=str(tmp_path / "audio.flac"))
     return SimpleNamespace(**{**base, **fields})
 

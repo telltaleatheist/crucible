@@ -19,6 +19,7 @@ from .jobs import audio as audio_job
 from .jobs import disabled_error
 from .jobs import image as image_job
 from .jobs import video as video_job
+from .jobs.audio import scoreheader
 from .jobs.audio.params import FORMATS, MIN_SONG_SECONDS, planning_pool
 from .jobs.template import ManifestCatalog
 from .jobtypes import spec_of
@@ -38,6 +39,9 @@ NUMBER = "number"
 BOOLEAN = "boolean"
 CHOICE = "choice"
 TAGS = "tags"
+
+# The meters the song form offers for `meter`; the param takes any the score can write.
+COMMON_METERS: tuple[str, ...] = ("4/4", "3/4", "6/8", "2/4", "12/8", "2/2", "5/4", "7/8", "9/8")
 
 # One-click style chips for a song model's `tags` (crucible/audio/tags/song.toml). Read on
 # every page build so an edit to the file shows without a restart.
@@ -219,6 +223,19 @@ def audio_fields(manifest: Any, spec: Any) -> list[dict[str, Any]]:
     if "steps" in spec.takes:
         fields.append(field("steps", "Steps", INTEGER, default=spec.default_steps, min=1,
                             max=spec.max_steps, step=1))
+    # The planned score's header, fixed before YuE2 plans the rest (docs/AUDIO.md "Key,
+    # meter and tempo"); blank leaves each to YuE2. The meter list is the common ones; the
+    # API takes any n/d the score's M: line can write.
+    if "key" in spec.takes:
+        fields.append(field("key", "Key", CHOICE, default=None, options=["", *scoreheader.KEYS],
+                            hint="the score's K: line; blank lets YuE2 choose (never beside a cover's score)"))
+    if "meter" in spec.takes:
+        fields.append(field("meter", "Meter", CHOICE, default=None, options=["", *COMMON_METERS],
+                            hint="the score's M: line; blank lets YuE2 choose"))
+    if "bpm" in spec.takes:
+        fields.append(field("bpm", "Tempo (BPM)", INTEGER, min=scoreheader.MIN_BPM,
+                            max=scoreheader.MAX_BPM, step=1,
+                            hint="quarter notes a minute, the score's Q:1/4= line; blank lets YuE2 choose"))
     if "cfg" in spec.takes:
         fields.append(field("cfg", "Guidance (cfg)", NUMBER, default=spec.default_cfg, min=0,
                             max=spec.max_cfg, step=0.1))

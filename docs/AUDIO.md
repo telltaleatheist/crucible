@@ -519,6 +519,77 @@ one. **BB**: sung words with the stock negative became humming with the written 
 `scripts/check-yue2-negative-live.py` renders one song stock and written at cfg 2.0 through a
 server, for the first run through Crucible.
 
+### Key, meter and tempo: `key`, `meter`, `bpm`
+
+YuE2 chooses a song's key, meter and tempo itself when it plans the score, and its style tags
+only nudge it. Measured on Victoria's laptop (2026-10-13): minor-key tags came out major about
+half the time (the planner favours Eb, Bb and D), 3/4 tags gave 6/8 in 5 of 22, and 76-84 BPM
+tags gave `Q:` 124-145. `key`, `meter` and `bpm` (yue2-3b, any alone, a planned song only)
+**fix the score's header** before YuE2 plans the rest of it:
+
+```json
+{"type": "audio",
+ "model": "yue2-3b",
+ "params": {"tags": "English, slow waltz in E minor, warm piano, expressive female voice, 76 BPM",
+            "lyrics": "[Verse]\n…",
+            "key": "Em", "meter": "3/4", "bpm": 76,
+            "seed": 3}}
+```
+
+| param | the score's line | takes |
+|---|---|---|
+| `key` | `K:<key>` | one of ABC's 15 major keys (`Cb Gb Db Ab Eb Bb F C G D A E B F# C#`) or 15 minor keys (`Abm Ebm Bbm Fm Cm Gm Dm Am Em Bm F#m C#m G#m D#m A#m`), spelled as the K: field spells them. No modes: YuE2's dialect writes none and the yue2-music skill's tools refuse them. |
+| `meter` | `M:<meter>` | `n/d`: 1 to 16 beats over 2, 4, 8 or 16 (`4/4`, `3/4`, `6/8`, `12/8`, `7/8`, …) |
+| `bpm` | `Q:1/4=<bpm>` | an integer, quarter notes a minute, 40 to 240 (YuE2 writes every tempo as a quarter-note rate) |
+
+**Crucible reads no style text.** What key or tempo a song's tags ask for is the client's to
+work out (B-Sides parses its own tags) and send as explicit values; Crucible exposes the knob.
+
+- **Bad syntax is refused by name**, `400 invalid_params` naming the field (`"E minor"`,
+  `"Edor"`, `"3:4"`, `76.5` and `"76"` are all refused, never read as something close).
+- **Never beside a score.** A cover's score already states its key, meter and tempo; `key`,
+  `meter` or `bpm` beside `score` is refused `400 audio_param_conflict` with `{param}` - edit
+  the score's own header instead.
+- **Stable Audio refuses them** `audio_param_unsupported` (it writes no score; describe a key
+  and tempo in its prompt).
+- **An instrumental takes them**: the planned score is constrained, then its Vocal melody moves
+  to the instrument as ever, under the fixed header, and the length (`audio.length`) is read
+  at the fixed tempo.
+- **None sent is exactly as before**: the scoring pass runs untouched.
+
+**How it is done: one pass, the header written in.** YuE2 writes every score's header in one
+layout (the native dialect the yue2-music skill parses), a field a line: `X:1`, `T:`, `M:`,
+`L:`, `Q:`, the two `V:` voice lines, `K:`, then the body. The worker
+(`yue2_worker.forced_header`) sits in front of the distribution yue2-infer draws each scoring
+token from (`yue2.sampling.distribution`; it takes no logits processor from its caller, so -
+as for the negative branch - that one name is replaced for the one scoring call and put back
+however it ends; the package is never edited). As line 2, 4 or 7 begins, the fixed line and
+its newline - YuE2's tokenizer's own encoding of them - become the only tokens those steps may
+draw, so the model's cache holds them exactly as if it had written them, and it carries on
+from there: `L:`, the voices and the whole body are the model's own, written after the fixed
+fields. The draw itself is still the stock one (the vocabulary, penalty, temperature, top-k,
+top-p and the seeded sampler), handed logits where only the fixed token is finite. One
+prefix, one prefill, one decode: forcing is not re-planning, and nothing retries (Owen,
+2026-10-10: "strictly one pass"). `pipe.plan` builds the SymbolicPlan from the drawn tokens as
+for any score, so its prefix is `token_prefixes(request, tokenizer, abc_ids)` and
+`generate_semantic`'s own check holds. A yue2-infer that draws its tokens some other way is
+refused before a token is written. With `[audio] low_vram` the scoring stage is the same
+call (the halves only move around synthesis), so the header is written the same way.
+
+If a score ends, runs to its cap, or lays its header out differently before a fixed line
+begins, that line is not written - recorded (a progress note, and `audio.header.score`
+says what the score does state), never retried.
+
+**The record.** `audio.header` is `{key, meter, bpm, score}`: the three as the client fixed
+them (null where not sent) and under `score` the `K:`, `M:` and `Q:` the rendered score
+states (scoreheader.read: the first of each before the body; `bpm` is the integer of
+`Q:1/4=<BPM>`). Every YuE2 song carries it - a song with nothing fixed shows what YuE2
+chose, and a cover what its score says - and it is null for Stable Audio. A kept request
+carries `header` under `settled`. `GET /v1/playground` lists `key` (a choice of the 30
+keys), `meter` (the common meters) and `bpm` on yue2-3b's page, and its manifest's `takes`
+lists all three. `scripts/check-yue2-header-live.py` renders one song with `key=Em`,
+`meter=3/4`, `bpm=76` through a server and reports the score's K, M and Q.
+
 ## The result
 
 One artifact, `audio.flac` (or `audio.wav`); a song adds `score.abc`, the chord-annotated ABC
@@ -548,6 +619,8 @@ effective parameter, so a sound can be made again:
            "versions": {"yue2-infer": "0.1.6", "torch": "2.10.0", "transformers": "4.57.6"},
            "notes": null,
            "negative": null, "negative_prefix_tokens": null,
+           "header": {"key": null, "meter": null, "bpm": null,
+                      "score": {"key": "D", "meter": "4/4", "bpm": 88}},
            "decode_stages": {
              "scoring": {"tokens": 1180, "cap": 4096, "ended": "eos", "execution": "cuda_graph",
                          "attention": "sdpa", "low_vram": false, "prefix_tokens": 212,

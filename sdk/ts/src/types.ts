@@ -2244,6 +2244,40 @@ export interface AudioOptions {
   readonly negativeTags?: string;
   /** With `cfg` above 1: the negative branch's lyrics, sections tagged `[Verse]` and so on. See {@link negativeTags}. */
   readonly negativeLyrics?: string;
+  /**
+   * A song model only (YuE2), a planned song only (refused `audio_param_conflict` beside a
+   * score): the key the score is written in, fixed as its `K:` line before YuE2 plans the
+   * rest - one of ABC's 15 major keys (`Cb Gb Db Ab Eb Bb F C G D A E B F# C#`) or 15 minor
+   * keys (`Abm Ebm Bbm Fm Cm Gm Dm Am Em Bm F#m C#m G#m D#m A#m`); no modes. The client reads
+   * its own tags; the server reads no style text (docs/AUDIO.md "Key, meter and tempo").
+   */
+  readonly key?: string;
+  /** A planned song only: the meter, fixed as the score's `M:` line - `"4/4"`, `"3/4"`, `"6/8"`, 1 to 16 beats over 2, 4, 8 or 16. See {@link key}. */
+  readonly meter?: string;
+  /** A planned song only: the tempo in quarter notes a minute (an integer, 40 to 240), fixed as the score's `Q:1/4=` line. See {@link key}. */
+  readonly bpm?: number;
+}
+
+/** The key, meter and tempo a YuE2 score states in its header (`K:`, `M:`, `Q:1/4=`). */
+export interface AudioScoreHeader {
+  /** The `K:` value; null when the header has none. */
+  readonly key: string | null;
+  /** The `M:` value; null when the header has none. */
+  readonly meter: string | null;
+  /** The integer of `Q:1/4=<BPM>`; null for any other tempo line or none. */
+  readonly bpm: number | null;
+}
+
+/** A YuE2 song's header (`audio.header`): the fields the client fixed and what the rendered score states. */
+export interface AudioHeader {
+  /** The `key` sent; null when YuE2 chose it. */
+  readonly key: string | null;
+  /** The `meter` sent; null when YuE2 chose it. */
+  readonly meter: string | null;
+  /** The `bpm` sent; null when YuE2 chose it. */
+  readonly bpm: number | null;
+  /** The `K:`, `M:` and `Q:` the rendered score states; null when there was no score. */
+  readonly score: AudioScoreHeader | null;
 }
 
 /** The CFG negative branch a YuE2 song was composed against, as the client wrote it (`audio.negative`). */
@@ -2364,6 +2398,11 @@ export interface AudioResult {
    * ran (cfg 1), for Stable Audio, and from a server older than the knob.
    */
   readonly negativePrefixTokens: number | null;
+  /**
+   * A song's key, meter and tempo: the ones the client fixed and the ones its score states;
+   * null for a sound model and from a server older than the fixed header.
+   */
+  readonly header: AudioHeader | null;
   readonly audioSeconds: number | null;
   readonly sampleRate: number | null;
   readonly channels: number | null;

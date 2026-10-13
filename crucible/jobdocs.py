@@ -601,6 +601,17 @@ JOB_DOCS: dict[str, JobDoc] = {
             "`audio.negative` is `{tags, lyrics}`, or null for the stock negative, and "
             "`audio.negative_prefix_tokens` that branch's length (null at cfg 1) "
             "(docs/AUDIO.md \"The negative branch\").",
+            "`key`, `meter` and `bpm` (YuE2, any alone, a planned song only) fix the score's "
+            "header before YuE2 plans the rest: its `K:` line (one of the 15 major and 15 "
+            "minor keys ABC spells, e.g. `Em`, `F#m`, `Bb`, `D`; no modes), `M:` line (`n/d`, "
+            "1 to 16 beats over 2, 4, 8 or 16) and `Q:1/4=` line (40 to 240). They are "
+            "written into the one scoring pass as those lines begin, and YuE2 writes "
+            "everything else - one pass, never a re-plan. Invalid syntax is "
+            "`invalid_params`; beside `score` (a cover's score has its own header) "
+            "`audio_param_conflict`. The client parses its own tags; Crucible reads no style "
+            "text. `audio.header` is `{key, meter, bpm}` as fixed (null where not sent) with "
+            "`score`: the `K:`, `M:` and `Q:` the rendered score states "
+            "(docs/AUDIO.md \"Key, meter and tempo\").",
             "Past a model's ceiling: `audio_too_long` (120 s sfx, 380 s music), "
             "`audio_param_out_of_range`. A song's length follows its lyrics; "
             "`min_duration_s` and `max_duration_s` (YuE2, either alone, 30 to 360 s) are a "

@@ -15,6 +15,7 @@ import gc
 audiocore = workerio.load_sibling("audiocore", __file__)
 planning = workerio.load_sibling("planning", __file__)
 scorelength = workerio.load_sibling("scorelength", __file__)
+scoreheader = workerio.load_sibling("scoreheader", __file__)
 
 LABEL = "yue2"
 
@@ -486,6 +487,130 @@ def written_negative(plan, negative: dict, tokenizer):
         )
 
 
+class HeaderForcer:
+    """Writes a planned score's fixed header lines (scoreheader.lines: {line index: text})
+    into the one scoring pass, token by token, and leaves every other token to YuE2.
+
+    It sits in front of yue2-infer's own `distribution` (forced_header) and so sees each
+    step's logits before the token is drawn, with every token drawn so far (`history`). It
+    follows the score line by line; when a fixed line is about to begin, the line and its
+    newline - the tokenizer's own encoding of them - become the only tokens the step may
+    draw, one a step, so the model's cache holds them exactly as if it had written them
+    and it continues from there. YuE2 begins every header line with its field letter at a
+    token boundary (the tokenizer never joins a newline to the letter after it), so a fixed
+    line always starts where the model would start that line itself.
+
+    Every other step goes to the stock `distribution` unchanged. A forced step goes to it
+    too, with every logit but the forced token's at -inf, so the stock sampling (the ABC
+    vocabulary, the end-token floor, the penalty, temperature, top-k, top-p and the seeded
+    draw) runs as ever and can only draw that token.
+
+    `written` lists the line indexes it wrote; `missed` the ones the score passed without
+    that line beginning at a token boundary (never seen in YuE2's dialect); a fixed line
+    the score ended before is in neither."""
+
+    def __init__(self, lines: dict, tokenizer, torch, end_of_text: int) -> None:
+        self._pending = {}
+        for index, line in sorted(lines.items()):
+            ids = list(tokenizer.encode(line + "\n"))
+            if tokenizer.decode(ids) != line + "\n" or not all(0 <= t < end_of_text for t in ids):
+                raise RuntimeError(
+                    f"YuE2's tokenizer does not encode the header line {line!r} as ordinary "
+                    "score text; the scoring pass draws only from that vocabulary"
+                )
+            self._pending[index] = ids
+        self._tokenizer = tokenizer
+        self._torch = torch
+        self._queue: list = []
+        self._forced = None
+        self._seen = 0
+        self._line = 0
+        self._begun = False
+        self.calls = 0
+        self.written: list = []
+        self.missed: list = []
+
+    def _follow(self, history) -> None:
+        if self._forced is not None:
+            if not history or history[-1] != self._forced:
+                raise RuntimeError(
+                    "the scoring pass drew a token other than the header token it was "
+                    "limited to; yue2-infer's sampling no longer draws only from what "
+                    "its distribution leaves"
+                )
+            self._forced = None
+        for token in history[self._seen:]:
+            for character in self._tokenizer.decode([token]):
+                if character == "\n":
+                    self._line += 1
+                    self._begun = False
+                else:
+                    self._begun = True
+        self._seen = len(history)
+        for index in [i for i in self._pending if i < self._line or (i == self._line and self._begun)]:
+            del self._pending[index]
+            self.missed.append(index)
+
+    def __call__(self, stock, logits, sampling, history, step, phase, legacy_off=False):
+        self.calls += 1
+        if phase != "abc":
+            raise RuntimeError(f"the header is fixed in the scoring pass, not in {phase!r}")
+        self._follow(history)
+        if not self._queue and not self._begun and self._line in self._pending:
+            self._queue = self._pending.pop(self._line)
+            self.written.append(self._line)
+        if not self._queue:
+            return stock(logits, sampling, history, step, phase, legacy_off)
+        token = self._queue.pop(0)
+        self._forced = token
+        only = self._torch.full_like(logits, float("-inf"))
+        only[..., token] = logits[..., token]
+        return stock(only, sampling, history, step, phase, legacy_off)
+
+
+@contextlib.contextmanager
+def forced_header(pipe, lines: dict):
+    """While the body runs, YuE2's scoring pass writes the header lines `lines` fixes
+    (HeaderForcer) and plans the rest of the score itself: still one pass over one prefix,
+    one prefill, one decode - forcing is not re-planning. Yields the forcer.
+
+    yue2-infer's `generate_tokens` draws every token through the module-level
+    `distribution` of `yue2.sampling` and takes no logits processor from its caller, so -
+    as written_negative does for the negative branch - that one name is replaced, for this
+    one call, in `yue2.sampling` only, and put back however the body ends. The installed
+    package is never edited, and `pipe.plan` builds the SymbolicPlan from the tokens drawn
+    exactly as it does for any score, so its prefix is token_prefixes(request, tokenizer,
+    abc_ids) and generate_semantic's check holds. A yue2-infer that draws its tokens some
+    other way (or the vLLM backend, which samples in its own process) is refused before a
+    token is written, and one whose pass never asked is refused after it."""
+    import yue2.sampling as sampling
+    from yue2.protocol import EOD
+
+    stock = sampling.distribution
+    if pipe.backend == "vllm" or "distribution" not in sampling.generate_tokens.__code__.co_names:
+        raise RuntimeError(
+            "the worker fixes a score's header through the distribution yue2-infer's "
+            "yue2.sampling.generate_tokens draws each token from, on the torch backend; this "
+            f"yue2-infer (backend {pipe.backend!r}) draws its tokens some other way. Bring "
+            "the env to its recipe (`crucible install audio`)"
+        )
+    forcer = HeaderForcer(lines, pipe.tokenizer, sampling.torch, EOD)
+
+    def distribution(logits, sampling_config, history, step, phase, legacy_off=False):
+        return forcer(stock, logits, sampling_config, history, step, phase, legacy_off)
+
+    sampling.distribution = distribution
+    try:
+        yield forcer
+    finally:
+        sampling.distribution = stock
+    if forcer.calls == 0:
+        raise RuntimeError(
+            "YuE2 planned the score without drawing a token through yue2.sampling.distribution, "
+            "so the header was not fixed; bring the env to its recipe (`crucible install audio`)"
+        )
+
+
 def _version_of(distribution: str):
     from importlib import metadata
 
@@ -574,6 +699,10 @@ class YuE2Engine:
     # The composing pass's CFG negative branch in tokens, stock or written by the client
     # (_compose); None when cfg 1 ran no negative branch.
     negative_prefix_tokens = None
+    # The key, meter and tempo the rendered score states (scoreheader.read), set by every
+    # song; the fields the client fixed are the server's record (docs/AUDIO.md "Key, meter
+    # and tempo").
+    score_header = None
 
     def __init__(self, request: dict) -> None:
         import torch
@@ -741,6 +870,9 @@ class YuE2Engine:
         lyrics, its own planning_lyrics, section-tag lyrics - are planned from as sent, and
         the range is only recorded against what the score measured (a `note` says so).
 
+        A key, meter or tempo the client fixed (job.header) is written into this same one
+        pass as its header line begins (forced_header); the rest of the score is YuE2's.
+
         Returns the plan to compose from, and sets self.length (the done record's
         `audio.length`) and self.decode_stages["scoring"]."""
         pipe = self._pipe
@@ -772,14 +904,33 @@ class YuE2Engine:
                 "change a song planned from the client's own words"
             )
         ticks = audiocore.Throttled(progress, TOKENS_PER_REPORT)
-        plan = pipe.plan(
-            job.tags,
-            text,
-            seed=job.seed,
-            cfg_scale=job.cfg,
-            cancelled=lambda: progress.asked_to_stop,
-            on_token=lambda *_: ticks.tick(),
-        )
+        fixed = scoreheader.lines(job.header)
+
+        def plan_score():
+            return pipe.plan(
+                job.tags,
+                text,
+                seed=job.seed,
+                cfg_scale=job.cfg,
+                cancelled=lambda: progress.asked_to_stop,
+                on_token=lambda *_: ticks.tick(),
+            )
+
+        if not fixed:
+            plan = plan_score()
+        else:
+            progress.note(f"the score's header is fixed: {', '.join(fixed.values())}")
+            with forced_header(pipe, fixed) as forcer:
+                plan = plan_score()
+            unwritten = [fixed[index] for index in sorted(fixed) if index not in forcer.written]
+            if unwritten:
+                # Recorded, never retried: the score's own header (audio.header.score)
+                # says what it states instead.
+                progress.note(
+                    f"YuE2's score did not reach a header line where {', '.join(unwritten)} "
+                    "is written (it ended, ran to its cap, or laid its header out "
+                    "differently); audio.header.score says what the score states"
+                )
         # The score YuE2 decoded. An instrumental then re-plans from a fixed score, which
         # decodes nothing, so this is the scoring stage's one decode either way.
         self.decode_stages["scoring"] = decode_facts(
@@ -847,12 +998,19 @@ class YuE2Engine:
         self.decode_stages = {}
         self.score_tokens = None
         self.negative_prefix_tokens = None
+        self.score_header = None
         if job.cover is not None:
+            if job.header is not None:
+                raise RuntimeError(
+                    "a cover renders the score it is given, whose header is its own; the "
+                    "server refuses key, meter and bpm beside a score"
+                )
             plan = self._given_plan(job, progress)
         else:
             plan = self._score(job, progress)
             if job.instrumental:
                 plan = self._instrumental_plan(job, plan)
+        self.score_header = scoreheader.read(plan.abc)
         self._close_stage(peaks, "scoring")
         progress.enter("composing", caps.semantic.max_tokens)
         ticks = audiocore.Throttled(progress, TOKENS_PER_REPORT)

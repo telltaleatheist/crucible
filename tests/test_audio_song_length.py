@@ -342,7 +342,8 @@ def _job(tmp_path: Path, **fields: Any) -> SimpleNamespace:
     return SimpleNamespace(**{
         "tags": INSTRUMENTAL_TAGS, "lyrics": None, "planning_lyrics": None, "seed": 7, "cfg": 1.0,
         "instrumental": False, "min_duration_s": None, "max_duration_s": None, "longest_s": 360,
-        "planning_resizable": False, "output_path": str(tmp_path / "audio.flac"), **fields,
+        "planning_resizable": False, "output_path": str(tmp_path / "audio.flac"),
+        "header": None, **fields,
     })
 
 

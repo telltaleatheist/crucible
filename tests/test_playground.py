@@ -124,8 +124,12 @@ def test_an_installed_model_is_ready_and_a_missing_one_downloads_its_weights(
 
     song = _fields(pages[SONG])
     assert list(song) == ["tags", "lyrics", "instrumental", "planning_set", "min_duration_s",
-                          "max_duration_s", "cfg", "negative_tags", "negative_lyrics", "format",
-                          "seed"]
+                          "max_duration_s", "key", "meter", "bpm", "cfg", "negative_tags",
+                          "negative_lyrics", "format", "seed"]
+    assert song["key"]["kind"] == song["meter"]["kind"] == "choice"
+    assert song["key"]["options"][0] == "" and {"Em", "F#m", "Bb", "D"} <= set(song["key"]["options"])
+    assert {"3/4", "6/8", "4/4"} <= set(song["meter"]["options"])
+    assert song["bpm"]["kind"] == "integer" and (song["bpm"]["min"], song["bpm"]["max"]) == (40, 240)
     assert song["negative_tags"]["kind"] == song["negative_lyrics"]["kind"] == "text"
     assert not song["negative_tags"]["required"] and "cfg above 1" in song["negative_tags"]["hint"]
     assert not song["lyrics"]["required"], "an instrumental needs none; the server refuses a sung song without"

@@ -77,6 +77,8 @@ import {
   type ImageResult,
   type AudioCover,
   type AudioNegative,
+  type AudioHeader,
+  type AudioScoreHeader,
   type AudioDecodeStage,
   type AudioLength,
   type AudioPlanningLyrics,
@@ -2076,6 +2078,9 @@ export class CrucibleClient {
       ['chords', 'chords'],
       ['negativeTags', 'negative_tags'],
       ['negativeLyrics', 'negative_lyrics'],
+      ['key', 'key'],
+      ['meter', 'meter'],
+      ['bpm', 'bpm'],
     ];
     for (const [key, wire] of optional) {
       const value = given[key];
@@ -3822,6 +3827,8 @@ export function readAudioResult(done: DoneData): AudioResult {
     // the stock negative.
     negative: readAudioNegative(optObject(audio, 'negative', at), `${at}.negative`),
     negativePrefixTokens: optNum(audio, 'negative_prefix_tokens', at),
+    // Absent from a server older than the fixed header, and null for a sound model.
+    header: readAudioHeader(optObject(audio, 'header', at), `${at}.header`),
     audioSeconds: nullableNum(audio, 'audio_seconds', at),
     sampleRate: nullableNum(audio, 'sample_rate', at),
     channels: nullableNum(audio, 'channels', at),
@@ -3852,6 +3859,25 @@ function readPlanningLyrics(planning: Json | null, where: string): AudioPlanning
 function readAudioNegative(negative: Json | null, where: string): AudioNegative | null {
   if (negative === null) return null;
   return { tags: str(negative, 'tags', where), lyrics: str(negative, 'lyrics', where) };
+}
+
+function readAudioHeader(header: Json | null, where: string): AudioHeader | null {
+  if (header === null) return null;
+  return {
+    key: nullableStr(header, 'key', where),
+    meter: nullableStr(header, 'meter', where),
+    bpm: nullableNum(header, 'bpm', where),
+    score: readAudioScoreHeader(nullableObject(header, 'score', where), `${where}.score`),
+  };
+}
+
+function readAudioScoreHeader(score: Json | null, where: string): AudioScoreHeader | null {
+  if (score === null) return null;
+  return {
+    key: nullableStr(score, 'key', where),
+    meter: nullableStr(score, 'meter', where),
+    bpm: nullableNum(score, 'bpm', where),
+  };
 }
 
 function readAudioCover(cover: Json | null, where: string): AudioCover | null {
