@@ -67,7 +67,7 @@ def _ps_call(argv: Sequence[str]) -> str:
 def elevated_argv(commands: Sequence[Sequence[str]]) -> list[str]:
     script = "$ErrorActionPreference='Continue';" + ";".join(_ps_call(c) for c in commands)
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-    return runas_argv([POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded])
+    return runas_argv([POWERSHELL, "-NoProfile", "-EncodedCommand", encoded])
 
 
 def _write(home: Path, data: dict[str, Any]) -> None:
