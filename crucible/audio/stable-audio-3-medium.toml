@@ -43,6 +43,8 @@ min_duration_s = "Stable Audio makes exactly the seconds asked for; send the len
 max_duration_s = "Stable Audio makes exactly the seconds asked for; send the length you want as duration_s"
 negative_prompt = "Stability's inference guide says negative_prompt has no effect on the post-trained Medium checkpoint (only the -base checkpoints read it); describe what you want instead"
 cfg = "Stability's inference guide says cfg has no effect on the post-trained Medium checkpoint (it samples at cfg 1.0 in 8 steps)"
+negative_tags = "the post-trained Medium checkpoint samples at cfg 1.0, so there is no CFG negative branch to write; negative_tags and negative_lyrics are YuE2's"
+negative_lyrics = "the post-trained Medium checkpoint samples at cfg 1.0, so there is no CFG negative branch to write; negative_tags and negative_lyrics are YuE2's"
 
 [backends.mlx-darwin]
 engine = "stable-audio-3"
@@ -80,3 +82,5 @@ min_duration_s = "Stable Audio makes exactly the seconds asked for; send the len
 max_duration_s = "Stable Audio makes exactly the seconds asked for; send the length you want as duration_s"
 negative_prompt = "Stability's inference guide says negative_prompt has no effect on the post-trained Medium checkpoint (only the -base checkpoints read it); describe what you want instead"
 cfg = "Stability's inference guide says cfg has no effect on the post-trained Medium checkpoint (it samples at cfg 1.0 in 8 steps)"
+negative_tags = "the post-trained Medium checkpoint samples at cfg 1.0, so there is no CFG negative branch to write; negative_tags and negative_lyrics are YuE2's"
+negative_lyrics = "the post-trained Medium checkpoint samples at cfg 1.0, so there is no CFG negative branch to write; negative_tags and negative_lyrics are YuE2's"

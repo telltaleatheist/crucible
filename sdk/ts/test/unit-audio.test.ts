@@ -245,6 +245,37 @@ test('a song asks a length range and a planning set, and reads back what its sco
   assert.equal(readAudioResult({ artifacts: [], extra: { audio: { ...DONE_SONG, length: null } } }).length, null);
 });
 
+test('a song writes its CFG negative branch and reads back which one it composed against', async () => {
+  answer(200, { job_id: 'job-negative' });
+  await client().audio({
+    model: 'yue2-3b', tags: 'Instrumental, piano', instrumental: true, cfg: 2.0,
+    negativeTags: 'lead vocals, singing, choir', negativeLyrics: '[Verse]\nla la\n',
+  });
+  assert.deepEqual(JSON.parse(lastBody).params, {
+    tags: 'Instrumental, piano', instrumental: true, cfg: 2.0,
+    negative_tags: 'lead vocals, singing, choir', negative_lyrics: '[Verse]\nla la\n',
+  });
+  const written = readAudioResult({
+    artifacts: [],
+    extra: { audio: { ...DONE_SONG, negative: { tags: 'singing', lyrics: '' }, negative_prefix_tokens: 640 } },
+  });
+  assert.deepEqual(written.negative, { tags: 'singing', lyrics: '' });
+  assert.equal(written.negativePrefixTokens, 640);
+  const stock = readAudioResult({
+    artifacts: [], extra: { audio: { ...DONE_SONG, negative: null, negative_prefix_tokens: 610 } },
+  });
+  assert.equal(stock.negative, null);
+  assert.equal(stock.negativePrefixTokens, 610);
+  // A server older than the knob sends neither field.
+  const older = readAudioResult({ artifacts: [], extra: { audio: DONE_SONG } });
+  assert.equal(older.negative, null);
+  assert.equal(older.negativePrefixTokens, null);
+  assert.throws(
+    () => readAudioResult({ artifacts: [], extra: { audio: { ...DONE_SONG, negative: { tags: 'x' } } } }),
+    CrucibleProtocolError,
+  );
+});
+
 const NL = String.fromCharCode(10);
 const ABC = ['X:1', 'T:', 'M:4/4', 'L:1/32', 'Q:1/4=66', 'V:Vocal', '% verse', 'C8D8E8F8|', ''].join(NL);
 

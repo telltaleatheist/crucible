@@ -451,6 +451,74 @@ planned instrumental's does. `audio.planning_lyrics` is null, and `audio.decode_
 no `scoring` stage: nothing decoded a score. A kept request (`request`, "A sound that did not
 finish") carries the same `cover` under `settled`, with `score_tokens` null.
 
+### The negative branch: `negative_tags`, `negative_lyrics`
+
+With `cfg` above 1, YuE2 composes each codec token twice - once from the song's own prompt
+(the positive branch) and once from a negative one - and steers the song away from the
+negative by `cfg`. YuE2's **stock negative** is its instruction and the score alone:
+`[EOD]` + the cot instruction + the score's exact ABC tokens, no tags and no lyrics
+(`yue2.protocol.negative_prefix`). So stock guidance pulls toward "these tags and these
+lyrics", not away from anything in particular.
+
+`negative_tags` and `negative_lyrics` (yue2-3b; either alone or both) **write the negative
+branch instead**: it becomes the song's own request with those tags as its style and those
+lyrics as its lyrics, and everything else the same - the same score (the plan's exact ABC
+token ids on both branches), cot, seed and cfg. The one not sent is empty: the negative
+holds only what the client wrote against, never a copy of the song's own text. The
+positive branch is unchanged. Crucible composes none of the words: what to steer away
+from is the client's to write (B-Sides writes them), as YuE2 takes them - comma-separated
+tags, and lyrics in sections tagged `[Verse]`, `[Chorus]` and so on.
+
+```json
+{"type": "audio",
+ "model": "yue2-3b",
+ "params": {"tags": "Instrumental, slow somber piano and strings, 66 BPM",
+            "instrumental": true, "cfg": 2.0,
+            "negative_tags": "lead vocals, female vocals, male vocals, singing, choir, spoken word, slow somber piano and strings, 66 BPM.",
+            "negative_lyrics": "[Verse]\nA lantern burning by the gate\nThe evening settles on the stone\n",
+            "seed": 3}}
+```
+
+- **cfg above 1 is required.** At cfg 1 YuE2 runs no negative branch, so the words would be
+  ignored; sent with cfg 1 (or without cfg, whose yue2-3b default is 1.0) they are refused
+  `400 audio_param_conflict` with `{param, cfg}`.
+- **Any YuE2 song takes them**: a planned song, a planned instrumental (the negative is
+  built for the composing pass, after the melody moved to the instrument, from the fixed
+  score), and a cover, sung or instrumental. The knob is generic; nothing in the model ties
+  a written negative to instrumentals.
+- **Stable Audio refuses them** `audio_param_unsupported` (its post-trained checkpoints sample
+  at cfg 1.0 and have no negative branch to write). A model takes them only when its
+  manifest's `takes` lists them; `GET /v1/playground` lists them as the `negative_tags` and
+  `negative_lyrics` fields of a model that takes them, beside `cfg` and `instrumental`.
+- **Neither sent is YuE2's stock negative, exactly as before**: older clients and sung songs
+  render as they did.
+- **A negative that leaves the song no room** - longer, in YuE2's tokens, than its
+  24,576-token context less the 9,000 tokens a song may run to - fails the job
+  `negative_too_long` before composing, and the worker stays loaded (the server has no
+  tokenizer to count it at the door).
+
+How the worker does it (`yue2_worker.written_negative`): yue2-infer builds the negative inside
+`YuE2Pipeline.generate_semantic` and takes none from its caller, so for that one call the
+worker replaces the `negative_prefix` name `yue2.pipeline` calls with one that answers with the
+written prefix, only for this plan's request and abc ids, and puts the original back however
+the call ends. The installed package is never edited, and generate_semantic's own check that
+the plan's prefix is the request's still runs. The positive and negative prefixes may differ in
+length: yue2-infer prefills the two branches separately.
+
+**The record.** `audio.negative` is `{tags, lyrics}` as the branch was written (the one not sent
+is `""`), or null for the stock negative; `audio.negative_prefix_tokens` is the length of the
+negative branch that ran, stock or written, and null at cfg 1 (no negative branch) and for
+Stable Audio. A kept request (`request`) carries `negative` under `settled`.
+
+**What was measured** (2026-10-12, on the 3090 Ti, outside Crucible with the same
+substitution in-process; one seed each, so a direction, not a rate): two planned instrumentals
+after the Vocal-to-Ins transfer, at cfg 2.0, with a negative of vocal tags in front of the
+song's own tags (its "instrumental"/"no vocals" words removed) and the first four lines of its
+planning lyrics. **Tool**: it hummed with the stock negative and still hummed with the written
+one. **BB**: sung words with the stock negative became humming with the written one.
+`scripts/check-yue2-negative-live.py` renders one song stock and written at cfg 2.0 through a
+server, for the first run through Crucible.
+
 ## The result
 
 One artifact, `audio.flac` (or `audio.wav`); a song adds `score.abc`, the chord-annotated ABC
@@ -479,6 +547,7 @@ effective parameter, so a sound can be made again:
            "low_vram": false,
            "versions": {"yue2-infer": "0.1.6", "torch": "2.10.0", "transformers": "4.57.6"},
            "notes": null,
+           "negative": null, "negative_prefix_tokens": null,
            "decode_stages": {
              "scoring": {"tokens": 1180, "cap": 4096, "ended": "eos", "execution": "cuda_graph",
                          "attention": "sdpa", "low_vram": false, "prefix_tokens": 212,

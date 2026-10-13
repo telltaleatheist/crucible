@@ -22,6 +22,9 @@ FAKE_SCORE = "X:1\nT:fake song\nM:4/4\nK:C\n\"C\"CDEF|\"G\"GABc|\n"
 # The nominal length the fake says its score has (a song's `audio.length.score_seconds`).
 FAKE_SCORE_SECONDS = 150.0
 
+# The fake's stock CFG negative prefix, in tokens (a song's `audio.negative_prefix_tokens`).
+FAKE_STOCK_NEGATIVE_TOKENS = 600
+
 SPANS = (("encoding", 0.1), ("denoising", 0.7), ("decoding", 0.1), ("saving", 0.1))
 
 
@@ -112,6 +115,7 @@ class FakeEngine:
         self.decode_stages = None
         self.host_homes = None
         self.score_tokens = None
+        self.negative_prefix_tokens = None
 
     def _decode_stages(self, job) -> dict | None:
         """A song's two token stages as yue2_worker.decode_facts words them; a stage named
@@ -138,8 +142,16 @@ class FakeEngine:
                      "planning_lyrics": job.planning_lyrics,
                      "min_duration_s": job.min_duration_s, "max_duration_s": job.max_duration_s,
                      "longest_s": job.longest_s, "planning_resizable": job.planning_resizable,
-                     "cover": job.cover, "tags": job.tags, "cfg": job.cfg})
+                     "cover": job.cover, "tags": job.tags, "cfg": job.cfg,
+                     "negative": job.negative})
         self.score_tokens = None
+        # yue2_worker's negative branch prefix: none at cfg 1, FAKE_STOCK_NEGATIVE_TOKENS for
+        # YuE2's stock one, and more for one the client wrote.
+        self.negative_prefix_tokens = None
+        if job.kind == "song" and job.cfg != 1:
+            self.negative_prefix_tokens = FAKE_STOCK_NEGATIVE_TOKENS + (
+                0 if job.negative is None
+                else len(job.negative["tags"]) + len(job.negative["lyrics"]))
         if job.cover is not None:
             # yue2_worker._given_plan's budget check, at the count the test writes to the
             # file $CRUCIBLE_FAKE_AUDIO_SCORE_TOKENS names (read per song: the worker

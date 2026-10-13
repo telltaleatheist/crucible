@@ -2233,6 +2233,25 @@ export interface AudioOptions {
    * keeps them and a sung cover strips them.
    */
   readonly chords?: 'keep' | 'strip';
+  /**
+   * A song model only (YuE2), with `cfg` above 1 (refused `audio_param_conflict` otherwise):
+   * the style of the song's CFG negative branch - what guidance steers AWAY from, e.g.
+   * `"lead vocals, singing, choir"`. The negative becomes the song's own request with these
+   * tags and {@link negativeLyrics} in place of its own (same score, cot and seed); the one
+   * not sent is empty. Neither sent is YuE2's stock negative (docs/AUDIO.md "The negative
+   * branch"). The words are the client's; the server composes none.
+   */
+  readonly negativeTags?: string;
+  /** With `cfg` above 1: the negative branch's lyrics, sections tagged `[Verse]` and so on. See {@link negativeTags}. */
+  readonly negativeLyrics?: string;
+}
+
+/** The CFG negative branch a YuE2 song was composed against, as the client wrote it (`audio.negative`). */
+export interface AudioNegative {
+  /** The `negativeTags` sent; `""` when only lyrics were. */
+  readonly tags: string;
+  /** The `negativeLyrics` sent; `""` when only tags were. */
+  readonly lyrics: string;
 }
 
 /** A cover's score as the server read it (`scorelength.read`): its bars at its tempo. */
@@ -2335,6 +2354,16 @@ export interface AudioResult {
    * without a score, and a server older than covers.
    */
   readonly cover: AudioCover | null;
+  /**
+   * The CFG negative branch the client wrote (`negativeTags`, `negativeLyrics`); null for
+   * YuE2's stock negative, a sound model, and a server older than the knob.
+   */
+  readonly negative: AudioNegative | null;
+  /**
+   * The negative branch's prefix in tokens, stock or written; null when no negative branch
+   * ran (cfg 1), for Stable Audio, and from a server older than the knob.
+   */
+  readonly negativePrefixTokens: number | null;
   readonly audioSeconds: number | null;
   readonly sampleRate: number | null;
   readonly channels: number | null;

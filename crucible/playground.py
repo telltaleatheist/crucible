@@ -222,6 +222,18 @@ def audio_fields(manifest: Any, spec: Any) -> list[dict[str, Any]]:
     if "cfg" in spec.takes:
         fields.append(field("cfg", "Guidance (cfg)", NUMBER, default=spec.default_cfg, min=0,
                             max=spec.max_cfg, step=0.1))
+    # The song's CFG negative branch, which the client writes (docs/AUDIO.md "The negative
+    # branch"); where a client finds that this server takes it. No placeholder: the form's
+    # cfg starts at 1, where these are refused, so nothing here suggests a value to send.
+    if "negative_tags" in spec.takes:
+        fields.append(field("negative_tags", "Steer away from (tags)", TEXT,
+                            hint="cfg above 1 only: the style guidance steers away from, e.g. "
+                                 "\"lead vocals, singing, choir\"; both blank is YuE2's stock "
+                                 "negative"))
+    if "negative_lyrics" in spec.takes:
+        fields.append(field("negative_lyrics", "Steer away from (lyrics)", TEXT,
+                            hint="cfg above 1 only: lyrics guidance steers away from, in "
+                                 "sections like [Verse]"))
     if "negative_prompt" in spec.takes:
         fields.append(field("negative_prompt", "Leave out", TEXT))
     fields.append(field("format", "File", CHOICE, default=FORMATS[0], options=list(FORMATS)))

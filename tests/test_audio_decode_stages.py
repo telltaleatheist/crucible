@@ -82,7 +82,9 @@ def _job(**overrides: Any) -> SimpleNamespace:
                               "max_duration_s": None, "longest_s": 360,
                               "planning_resizable": False,
                               # Not a cover: the worker plans the score itself.
-                              "cover": None, **overrides})
+                              "cover": None,
+                              # YuE2's stock CFG negative (docs/AUDIO.md "The negative branch").
+                              "negative": None, **overrides})
 
 
 def test_each_token_stage_says_how_it_ended_from_yue2s_own_account(monkeypatch: pytest.MonkeyPatch) -> None:

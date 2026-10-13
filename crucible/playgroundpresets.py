@@ -28,7 +28,8 @@ MODEL = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
 # What a preset may hold: the form's own params, as JSON scalars. Seeds are not kept - a
 # preset is a sound, not one take of it.
 PARAMS = frozenset({
-    "prompt", "tags", "lyrics", "negative_prompt", "duration_s", "steps", "cfg",
+    "prompt", "tags", "lyrics", "negative_prompt", "negative_tags", "negative_lyrics",
+    "duration_s", "steps", "cfg",
     "instrumental", "format", "width", "height", "num_frames", "fps",
 })
 MAX_BYTES = 64 * 1024

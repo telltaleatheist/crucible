@@ -177,6 +177,9 @@ class Job:
         # A cover's score, ready to render ({kind, abc, cot, lyrics}: the server checked it
         # and made any transfer, crucible/jobs/audio/cover.py); null for a planned song.
         self.cover = nullable("cover", dict)
+        # The song's CFG negative branch as the client wrote it ({tags, lyrics}); null for
+        # the engine's stock negative.
+        self.negative = nullable("negative", dict)
         self.sample_rate = required("sample_rate", int)
         self.channels = required("channels", int)
         self.format = required("format", str)
@@ -271,6 +274,9 @@ class Worker:
             # A cover's score in YuE2's own tokens (yue2_worker._given_plan); None for a
             # song the engine planned, or an engine that takes no score.
             "score_tokens": self.engine.score_tokens,
+            # The CFG negative branch's prefix in tokens, stock or written by the client
+            # (yue2_worker.YuE2Engine._compose); None when no negative branch ran.
+            "negative_prefix_tokens": self.engine.negative_prefix_tokens,
             # This worker's host memory as the song began and once it was saved, with the
             # peak between (audiocore.host_memory); `host_homes_bytes` is what the engine
             # keeps in host memory on purpose (yue2_worker.HostHomes), None for an engine
