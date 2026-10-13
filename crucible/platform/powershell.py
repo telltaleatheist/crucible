@@ -14,7 +14,11 @@ def query_argv(script: str) -> list[str]:
 
 
 def script_argv(script: str) -> list[str]:
-    return [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script]
+    # No `-ExecutionPolicy Bypass`: execution policy governs script FILES, never `-Command`
+    # text, so it did nothing here - and on owens-pc (2026-10-12) Windows began refusing to
+    # start powershell.exe with it beside a shortcut-writing script ([WinError 5] at
+    # CreateProcess), which failed every Start Menu write and with it the 2.0.11 deploy.
+    return [POWERSHELL, "-NoProfile", "-Command", script]
 
 
 def runas_argv(argv: Sequence[str]) -> list[str]:
