@@ -11,6 +11,7 @@ workerio.claim_stdout()
 
 import contextlib
 import gc
+import inspect
 
 audiocore = workerio.load_sibling("audiocore", __file__)
 planning = workerio.load_sibling("planning", __file__)
@@ -587,7 +588,11 @@ def forced_header(pipe, lines: dict):
     from yue2.protocol import EOD
 
     stock = sampling.distribution
-    if pipe.backend == "vllm" or "distribution" not in sampling.generate_tokens.__code__.co_names:
+    # generate_tokens is wrapped (torch.no_grad, functools.wraps), so the wrapper's own code
+    # names nothing of the body's; the body is what draws through `distribution`. Read the
+    # wrapper's code instead and every real yue2-infer is refused (Mac and PC, 2026-10-13).
+    drawer = inspect.unwrap(sampling.generate_tokens)
+    if pipe.backend == "vllm" or "distribution" not in drawer.__code__.co_names:
         raise RuntimeError(
             "the worker fixes a score's header through the distribution yue2-infer's "
             "yue2.sampling.generate_tokens draws each token from, on the torch backend; this "

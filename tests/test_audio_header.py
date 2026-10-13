@@ -219,6 +219,20 @@ class Tokenizer:
 
 
 SAMPLING_SOURCE = '''
+import functools
+
+
+def _no_grad(function):
+    # The real generate_tokens is wrapped by torch.no_grad (functools.wraps), so its own
+    # __code__ is the wrapper's; the worker's check must look through it (2026-10-13: it did
+    # not, and refused every real yue2-infer).
+    @functools.wraps(function)
+    def wrapper(*args, **kwargs):
+        return function(*args, **kwargs)
+
+    return wrapper
+
+
 def distribution(logits, sampling, history, step, phase, legacy_off=False):
     scores = logits.astype(float)
     if step < sampling.min_tokens:
@@ -226,6 +240,7 @@ def distribution(logits, sampling, history, step, phase, legacy_off=False):
     return scores
 
 
+@_no_grad
 def generate_tokens(model, prefix, sampling, seed, phase, negative=None, cfg_scale=1.0,
                     legacy_off=False, cancelled=None, on_token=None, use_cuda_graph=True):
     history, eos = [], False
