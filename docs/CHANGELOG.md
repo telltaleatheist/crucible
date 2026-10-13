@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 2.0.14 — 2026-10-13
+
 - `key` / `meter` / `bpm` (2.0.13) refused every real yue2-infer: the worker's check for how tokens are drawn read `generate_tokens.__code__`, which on a real install is torch.no_grad's wrapper, not the body that calls `distribution`. It now reads the unwrapped function (`inspect.unwrap`), and the test stand-in is wrapped the same way, so the check is tested as it runs. Found on the first live run (the Mac, 2026-10-13: jobs 20aa3ef6, 53f7b49a).
 
 ## 2.0.13 — 2026-10-13
