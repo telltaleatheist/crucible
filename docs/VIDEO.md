@@ -190,17 +190,9 @@ seed, say) starts at denoising. Closing the session (or `unload-video`) frees th
 
 ## Writing a prompt
 
-From the Diffusers model card: LTX-2.5 "was trained on long, single-paragraph audio-visual
-captions and degrades on short prompts. Describe the shot, the motion, the light and the sound
-in one paragraph." So:
+How to word a prompt for LTX-2.5, with a start picture and without, is in its guide:
+`GET /v1/prompting/ltx-2.5-distilled.md` (`crucible/prompting/ltx-2.5-distilled.md`).
 
-- one paragraph of plain sentences, the way a shot list reads, not a list of tags;
-- what is in the frame and what moves, and how the camera moves (tracking, a slow push in,
-  handheld, a static wide shot);
-- the light and the look (dawn, overcast, neon, film grain);
-- the sound, as concretely as the picture: speech in quotation marks with who says it, the
-  effects that go with the motion, the ambience, any music;
-- for a start picture, describe what happens next rather than re-describing the picture.
 
 ## Licences
 

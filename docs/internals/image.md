@@ -215,8 +215,8 @@ both are (`imageweights`, through `companionweights`, the owner of the main-repo
 companions shape that audio and video use too).
 
 **The recipe** (measured, below): the whole pipeline resident, the UNet stored as fp8 and
-computed in fp16 (`enable_layerwise_casting`), the VAE tiled, DPM++ SDE with Karras sigmas
-(`scheduler = "dpmpp-sde-karras"`), 6 steps, guidance 2.0, the default negative prompt above.
+computed in fp16 (`enable_layerwise_casting`), the VAE tiled, DPM++ 2M SDE with Karras sigmas
+(diffusers' multistep `sde-dpmsolver++`; the manifest names it `scheduler = "dpmpp-sde-karras"`), 6 steps, guidance 2.0, the default negative prompt above.
 The worker (`DiffusersSdxlEngine`) builds it once on `load` and keeps it on the card: a
 picture is `encoding` (both CLIP encoders, resident, a fraction of a second; the prompt
 cache still applies), `denoising` (the pipeline's own loop, the step callback reporting
@@ -258,7 +258,7 @@ by name (`image_to_image_unsupported`, `inpaint_unsupported`, naming the models 
 The existing CUDA path does not carry over with little code: it is written for Qwen-Image
 2.1's flow-matching schedule (the blend `(1 - sigma) * clean + sigma * noise`, a sigma tail
 handed to the pipeline), its packed 16-pixel latent grid and its VAE's normalisation.
-SDXL under DPM++ SDE noises as `alpha_t * clean + sigma_t * noise` from Karras sigmas, keeps
+SDXL under DPM++ 2M SDE noises as `alpha_t * clean + sigma_t * noise` from Karras sigmas, keeps
 a multistep history, packs nothing, works on an 8-pixel grid and scales latents by 0.13025;
 the start step would need a custom timestep tail for a Karras schedule. Each part is
 buildable (diffusers' own SDXL img2img and inpaint pipelines do it), but none of it can be

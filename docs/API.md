@@ -81,6 +81,8 @@ Every route this server answers and every job type it runs, one line each. The s
 | `GET /v1/playground/presets/{model}` | The presets saved for `model` on this server, by name: each a form's params (no seed) and when it was saved. |
 | `PUT /v1/playground/presets/{model}/{name}` | Save (or replace) the preset `name` for `model`: `{"params": {...}}` with the form's own fields - text, numbers and true/false; a seed is refused by name. |
 | `DELETE /v1/playground/presets/{model}/{name}` | Remove the preset `name` of `model`; 404 when there is none. |
+| `GET /v1/prompting` | Every prompting guide this server carries: what the trainers and users say each model expects, cited. |
+| `GET /v1/prompting/{name}.md` | One prompting guide as markdown, by guide name or by any model id it covers. |
 | `GET /v1/queue` | What waits for the lane, in the order it will be offered it: the open queue session's items first, then first come, first served. |
 | `GET /v1/queue/events` | Every change to the queue, for a dashboard: a `snapshot` first, then `added`, `moved`, `started` and `removed` as they happen. |
 | `POST /v1/queue/sessions` | Ask for the server for a run of requests you cannot know in advance. |
@@ -421,7 +423,7 @@ Every model this build has a manifest for, and where it stands here.
 
 ## Jobs
 
-The work. Every job type is created, polled and cancelled through the same routes. The `image` job's params, its result and how to prompt it are in docs/IMAGE.md; the `audio` job's (sound effects, music and songs) are in docs/AUDIO.md; the `segment` job's (subject cutouts and point-and-box selections, as masks) are in docs/SEGMENT.md; the `video` job's (clips with sound from words or a start picture) are in docs/VIDEO.md; the `score` job's (a recorded song transcribed into a YuE2-native ABC score) are in docs/SCORE.md.
+The work. Every job type is created, polled and cancelled through the same routes. The `image` job's params, its result and how to prompt it are in docs/IMAGE.md; the `audio` job's (sound effects, music and songs) are in docs/AUDIO.md; the `segment` job's (subject cutouts and point-and-box selections, as masks) are in docs/SEGMENT.md; the `video` job's (clips with sound from words or a start picture) are in docs/VIDEO.md; the `score` job's (a recorded song transcribed into a YuE2-native ABC score) are in docs/SCORE.md. How to word a prompt for a given model is in its guide, `GET /v1/prompting`.
 
 ### `POST /v1/jobs`
 
@@ -1354,6 +1356,30 @@ The orchestrator releases its claim; releasing when nothing is claimed succeeds.
 *Door:* open
 
 *Answers:* `200`
+
+## How to prompt each model
+
+What each model's trainers and users say it expects, every claim cited and marked official or community: one guide per model or family. The prompts themselves are the app's; these say what the model was trained to see.
+
+### `GET /v1/prompting`
+
+Every prompting guide this server carries: what the trainers and users say each model expects, cited. One entry per guide, with the model ids it covers and where to read it; a guide covering no ids (higgs-v3) is an engine's, for all its voices.
+
+*Door:* open
+
+*Answers:* `200`
+
+### `GET /v1/prompting/{name}.md`
+
+One prompting guide as markdown, by guide name or by any model id it covers.
+
+*Door:* open
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `name` | path | yes | string |  |
+
+*Answers:* `200`, `422` HTTPValidationError
 
 ## Everything else
 
@@ -3442,6 +3468,8 @@ The states after which a job or a task never changes again.
 | `loc` | array of string or integer | yes | — |  |
 | `msg` | string | yes | — |  |
 | `type` | string | yes | — |  |
+| `input` | Input | no | — |  |
+| `ctx` | object | no | — |  |
 
 ### `VoiceInfo`
 

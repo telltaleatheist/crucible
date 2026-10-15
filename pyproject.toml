@@ -56,6 +56,7 @@ crucible = [
   "segment/*.toml",
   "video/*.toml",
   "score/*.toml",
+  "prompting/*.md",
   "envs/**/*",
   "desktop_app/assets/*",
 ]

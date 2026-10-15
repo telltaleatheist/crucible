@@ -51,7 +51,7 @@ MAX_CANDIDATES = 256
 letters (26); a candidate needs no letter, so the cap is what one question costs:
 256 short candidates (a client's whole tag set) are 256 rows over the state read
 once on the Mac, 256 prompts on vLLM and 256 forced continuations on llama-server
-(docs/internals/engines-and-capability.md, "Likelihood questions")."""
+(docs/internals/engines-and-capability.md, "The decision door", its likelihood questions)."""
 
 MAX_CANDIDATE_TOKENS = 256
 
