@@ -18,7 +18,8 @@ The `image` verb has two rungs, and each server uses the biggest its card holds:
   a model to get exactly that one; one the card cannot hold is refused before anything
   loads (`insufficient_memory`), and DreamShaper on a Mac is refused by name.
 - **Leave `width` and `height` out** and the picture is the model's native size. Both
-  models draw best near one megapixel; render at the native size and downscale in the app.
+  models are capped near one megapixel, the size their memory was measured at (Qwen-Image's
+  own native size is larger; see its guide); render at the native size and downscale in the app.
   DreamShaper below about 768 a side is visibly worse and hardly faster (512x512 saves
   1.6 s of 3.2). Qwen-Image holds up small: B-Sides' covers at 256x256 (about 16 times
   faster than 1024) and Owen's 384x512 thumbnails are in use.
@@ -320,24 +321,9 @@ PC it is declared until measured. A card without that much room is refused befor
 loads, by name and with the numbers (`insufficient_memory`); on the Mac, where one model runs at
 a time, a resident LLM or voice is unloaded first.
 
-## Writing a prompt (Owen, 2026-09-28)
+## Writing a prompt
 
-These are Owen's lessons from making thumbnails and card art with this model on the Mac.
-
-- **Describe the picture, never the genre.** "YouTube thumbnail", "poster" or a quoted title make
-  it copy the genre, including gibberish text.
-- **Always add "No text, no letters, no numbers, no logos."** Genre words can still override it.
-- **Fewer objects, fewer tells.** Every extra prop is another chance of a mangled one.
-- **It is weak at spatial layout: spell out angle and scale.** For example "low angle,
-  eight-foot ceiling, sofa below for scale".
-- **Avoid the AI look.** "ordinary documentary photograph, natural light, muted colours, film
-  grain, real imperfections, not glossy, not CGI", or a plain style (flat graphic, linocut,
-  simple editorial cartoon).
-- **Painted card art drifts between images.** Repeat strong style wording in every prompt
-  ("gouache, visible brushstrokes, not photorealistic").
-- **Short text renders well, paragraphs do not.** A sign reading "THE LAST CHAPTER" works;
-  a paragraph turns to nonsense.
-- **Sizes that work:** 3:4 portrait 384x512 or 768x1024, a thumbnail 1280x720 (on the CUDA
-  arm use 1280x704 or 1280x736: 720 is not a multiple of 32).
-- **Timing on the Mac Studio (M1 Ultra):** 512x512 is about a minute, 1280x720 at 40 steps
-  about five.
+How to word a prompt for each model is in its guide: `GET /v1/prompting/qwen-image-2.1.md` and
+`GET /v1/prompting/dreamshaper-xl-lightning.md` (`crucible/prompting/`). Owen's own lessons
+from making thumbnails and card art (2026-09-28) are in the Qwen-Image guide, beside what
+Qwen says.

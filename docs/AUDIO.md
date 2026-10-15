@@ -9,7 +9,7 @@ back, and how to write a prompt each model understands.
 | --- | --- | --- | --- | --- | --- | --- |
 | `stable-audio-3-small-sfx` | sound effects | `sfx` | yes | yes | 120 s | Stability AI Community (gated) |
 | `stable-audio-3-medium` | instrumental music, stems, also effects | `music` | yes | yes | 380 s (6 min 20 s) | Stability AI Community (gated) |
-| `yue2-3b` | songs with vocals, from lyrics and style tags | `song` | yes | **no** (below) | about 6 min, set by the lyrics | CC BY-NC 4.0 + creator addendum |
+| `yue2-3b` | songs with vocals, from lyrics and style tags | `song` | yes | yes (below) | about 6 min, set by the lyrics | CC BY-NC 4.0 + creator addendum |
 
 `GET /v1/capability` has one row per class: "can make sound effects, using
 stable-audio-3-small-sfx", "can make music, using stable-audio-3-medium", "can make songs with
@@ -335,7 +335,7 @@ in-range rate and the mean distance from the range of the ones that missed.
 | `chords` | song, with `score` | `keep` for an instrumental cover, `strip` for a sung one | `keep` or `strip` the score's chord symbols: cot `full` (harmony fixed) or `melody` (accompaniment free) |
 | `duration_s` | sfx, music | sfx 10, music 60 | above 0, at most 120 (sfx) or 380 (music): `audio_too_long`. A song refuses it: its length follows its lyrics |
 | `steps` | sfx, music | 8 | 1 to 50. Stability: 8 is what the post-trained models were made for, and more does not necessarily sound better |
-| `cfg` | song | 1.0 | 0 to 20; above 1 guides harder towards the tags and lyrics and runs the model twice per token (YuE2 suggests trying 1.2). Stable Audio refuses it: its post-trained checkpoints ignore guidance |
+| `cfg` | song | 1.0 | 0 to 20; above 1 guides harder towards the tags and lyrics and runs the model twice per token (YuE2's docs offer 1.2 as an experiment, not a recommendation). Stable Audio refuses it: its post-trained checkpoints ignore guidance |
 | `negative_prompt` | nobody yet | | refused by name: the post-trained Stable Audio checkpoints ignore it (only Stability's `-base` checkpoints read it) and YuE2 has none |
 | `seed` | all | chosen and reported | 0 to 4294967295; the same seed and params on the same model and machine give the same sound |
 | `format` | all | `flac` | `flac` (24-bit) or `wav` (24-bit PCM) |
@@ -677,7 +677,7 @@ than the model meant. The last progress event says it in words too ("…; compos
 9000-token cap without ending"). An instrumental reports the score YuE2 decoded, not the fixed
 score it re-plans from (which decodes nothing).
 
-(The numbers above show the shape; no audio model has been measured through Crucible yet.)
+(The numbers above show the shape, not a measurement.)
 `steps`, `duration_s` and `cfg` are `null` where the model does not take them. Stable Audio
 reports stages `encoding`, `denoising` (one progress event per step), `decoding`, `saving`;
 YuE2 reports `scoring` and `composing` (every 64 tokens), `synthesizing`, `decoding`, `saving`.
@@ -729,32 +729,11 @@ the session keeps the model loaded between them and nothing from another app com
 
 ## Writing a prompt
 
-### Stable Audio 3 (Stability's own prompting guide, `docs/guides/prompting.md` in their repo)
+How to word `tags`, `lyrics` and `prompt` for each model is in that model's guide, served at
+`GET /v1/prompting/<model>.md` and kept in `crucible/prompting/`: `yue2-3b.md`,
+`stable-audio-3-medium.md` and `stable-audio-3-small-sfx.md`. Each cites its sources and marks
+them official or community.
 
-- **Say what makes the sound, how it is triggered and how long it lasts, and how it was
-  recorded.** Source, action, production: "a heavy oak door, pushed open slowly, close mic in a
-  stone hallway".
-- **Sound effects: start with `TrackType: SFX`** for more semantically sensible effects, and
-  ask for a short duration.
-- **Music: name the genre, the instruments, the mood and energy, and the tempo in BPM**
-  ("124 BPM"). `TrackType: Music, VocalType: Instrumental` gives higher quality, more coherent
-  music; tags like `Genre: Funk, Genre: Jazz` and `Instruments: Guitar, Saxophone` help.
-- **Stems:** start with `TrackType: Instrument` (add `Format: Duo` for two).
-- **Write like the training metadata:** the models learned from Freesound and AudioSparx
-  descriptions, so plain descriptive phrases work better than instructions.
-- **Set a realistic duration** for what you describe: a door slam is 2 s, not 60.
-- **No intelligible vocals.** Stable Audio does not sing words; use `yue2-3b` for songs.
-
-### YuE2 (the YuE2 model card and `protocol.py`)
-
-- **Tags are comma-separated** and cover genre, instruments, vocal character, language and
-  tempo, e.g. "English, warm piano pop, expressive female voice, acoustic piano, rounded bass
-  and light drums, lyrical memorable melody, unhurried phrasing, 88 BPM".
-- **Lyrics are sections**: `[Verse]`, `[Chorus]`, `[Bridge]`, `[Outro]` and so on, each block
-  separated by a blank line. The number and length of the sections set the song's length.
-- **English and Chinese** are the languages it was trained for.
-- **The score comes first.** YuE2 writes `score.abc` (melody and chords) and then composes the
-  audio from it; read the score to see what it planned.
 
 ## Licences
 

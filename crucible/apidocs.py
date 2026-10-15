@@ -70,7 +70,8 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
         "the `segment` job's (subject cutouts and point-and-box selections, as masks) "
         "are in docs/SEGMENT.md; the `video` job's (clips with sound from words or a "
         "start picture) are in docs/VIDEO.md; the `score` job's (a recorded song "
-        "transcribed into a YuE2-native ABC score) are in docs/SCORE.md.",
+        "transcribed into a YuE2-native ABC score) are in docs/SCORE.md. How to word "
+        "a prompt for a given model is in its guide, `GET /v1/prompting`.",
     ),
     (
         "/queue",
@@ -149,6 +150,13 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
         "Peers",
         "Orchestrator and engine talking to each other (docs/internals/host-and-platform.md). Not an "
         "app-facing surface.",
+    ),
+    (
+        "/prompting",
+        "How to prompt each model",
+        "What each model's trainers and users say it expects, every claim cited and marked "
+        "official or community: one guide per model or family. The prompts themselves are "
+        "the app's; these say what the model was trained to see.",
     ),
     ("", "Everything else", ""),
 )

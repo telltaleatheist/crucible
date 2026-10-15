@@ -135,7 +135,7 @@ Every arm is `memory_basis = "declared"`: nothing has run through Crucible yet.
 | arm | estimate | basis |
 | --- | --- | --- |
 | small-sfx cuda | 3.5 GB | 3.45 GB float32 files cast to float16 (1.73 GB); Stability's README: 2.40 GB peak at 120 s on an H200 |
-| medium cuda | 8.0 GB | 10.4 GB float32 files cast to float16 (5.2 GB); Stability's README: 6.52 GB peak at 380 s with flash-attn, unchunked decode |
+| medium cuda | 6.8 GB (measured 2026-10-09; the manifest) | 10.4 GB float32 files cast to float16 (5.2 GB); Stability's README: 6.52 GB peak at 380 s with flash-attn, unchunked decode |
 | small-sfx mps | 6.0 GB | float32 weights 3.45 GB plus float32 activations, one unified pool |
 | medium mps | 16.0 GB | float32 weights 10.4 GB plus float32 activations without flash-attn |
 | yue2 cuda | 16.0 GB | YuE2 README: 11.18 GiB on an RTX 4090 with the full score, 14.08 GiB at the full 24,576-token context |

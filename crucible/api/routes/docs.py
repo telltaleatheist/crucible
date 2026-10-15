@@ -2,7 +2,8 @@
 
 `GET /docs` is the page, `GET /v1/docs.md` the same text as markdown, `GET /v1/docs` the
 index as JSON (every route and every job type, with its params schema), and
-`GET /v1/openapi.json` the OpenAPI document. All are open: reading how to call a server
+`GET /v1/openapi.json` the OpenAPI document. `GET /v1/prompting` lists the per-model
+prompting guides and `GET /v1/prompting/{name}.md` serves one. All are open: reading how to call a server
 grants nothing, and the token is still what every working route needs.
 """
 from __future__ import annotations
@@ -12,9 +13,10 @@ from typing import Any
 from fastapi import Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
-from ... import VERSION
+from ... import VERSION, prompting
 from ...apidocs import auth_scopes, door_of, first_sentence, render, to_html
 from ...jobdocs import JOB_DOCS
+from ...errors import ApiError
 from ..context import AppContext, Routers
 
 MARKDOWN = "text/markdown; charset=utf-8"
@@ -65,6 +67,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
             "page": "/docs",
             "markdown": "/v1/docs.md",
             "openapi": "/v1/openapi.json",
+            "prompting": "/v1/prompting",
             "routes": routes,
             "job_types": job_types,
         }
@@ -73,6 +76,36 @@ def register(routers: Routers, ctx: AppContext) -> None:
     async def docs_markdown() -> PlainTextResponse:
         """The whole API reference as markdown: every route, every job type, every model."""
         return PlainTextResponse(render(app, _enabled(ctx)), media_type=MARKDOWN)
+
+    @public.get("/prompting")
+    async def prompting_index() -> dict[str, Any]:
+        """Every prompting guide this server carries: what the trainers and users say each
+        model expects, cited. One entry per guide, with the model ids it covers and where
+        to read it; a guide covering no ids (higgs-v3) is an engine's, for all its voices."""
+        return {
+            "guides": [
+                {
+                    "name": name,
+                    "title": prompting.title(name),
+                    "models": list(models),
+                    "markdown": f"/v1/prompting/{name}.md",
+                }
+                for name, models in prompting.GUIDES.items()
+            ]
+        }
+
+    @public.get("/prompting/{name}.md", response_class=PlainTextResponse)
+    async def prompting_guide(name: str) -> PlainTextResponse:
+        """One prompting guide as markdown, by guide name or by any model id it covers."""
+        guide = prompting.guide_for(name)
+        if guide is None:
+            raise ApiError(
+                404,
+                "prompting_guide_not_found",
+                f"no prompting guide covers {name!r}; GET /v1/prompting lists them",
+                {"name": name},
+            )
+        return PlainTextResponse(prompting.text(guide), media_type=MARKDOWN)
 
     @app.get("/docs", include_in_schema=False)
     async def docs_page(request: Request) -> HTMLResponse:
