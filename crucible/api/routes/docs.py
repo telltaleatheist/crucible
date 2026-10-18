@@ -88,7 +88,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                     "name": name,
                     "title": prompting.title(name),
                     "models": list(models),
-                    "markdown": f"/v1/prompting/{name}.md",
+                    "markdown": prompting.url(name),
                 }
                 for name, models in prompting.GUIDES.items()
             ]

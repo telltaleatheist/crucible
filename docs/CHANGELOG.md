@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- The API reference makes the prompting guides obvious: a "How to prompt each model" section near the top lists every guide with its models and link, and every job type and model route (chat, decide, embed, rerank, the TTS stream) says which guide is its own (**How to prompt it:**). The `/docs` page follows those links. The Jobs section no longer says the image job's prompting lives in docs/IMAGE.md.
+
 ## 2.0.15 — 2026-10-15
 
 - Prompting guides, one per model or family (15): what each model's trainers and users say it expects, every claim cited and marked official or community. `GET /v1/prompting` lists them and `GET /v1/prompting/{name}.md` serves one, by guide name or any model id it covers; the files are `crucible/prompting/*.md`. The job docs' "Writing a prompt" sections now point at them (Owen's 2026-09-28 image lessons moved into the Qwen-Image guide). Doc fixes the research found: YuE2 runs on the Mac (AUDIO.md's table said no); YuE2's cfg 1.2 is an experiment, not a recommendation; the SDXL sampler is DPM++ 2M SDE Karras, as the code builds, not DPM++ SDE; Stable Audio Medium's cuda figure is the measured 6.8 GB; Qwen-Image's 1 MP cap is a memory budget, not where it draws best.

@@ -58,3 +58,34 @@ def test_an_unknown_name_is_refused_by_name(client: TestClient) -> None:
     response = client.get("/v1/prompting/no-such-model.md")
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "prompting_guide_not_found"
+
+
+def test_every_guide_is_linked_where_its_models_are_called(client: TestClient) -> None:
+    from crucible.jobdocs import JOB_DOCS
+
+    assert set(prompting.JOB_TYPE_GUIDES) <= set(JOB_DOCS)
+    paths = client.get("/v1/openapi.json").json()["paths"]
+    for path in prompting.ROUTE_GUIDES:
+        assert "post" in paths.get(path, {}), path
+    placed = {
+        guide
+        for guides in (*prompting.JOB_TYPE_GUIDES.values(), *prompting.ROUTE_GUIDES.values())
+        for guide in guides
+    }
+    assert placed == set(prompting.GUIDES)
+
+
+def test_the_reference_points_at_every_guide(client: TestClient) -> None:
+    text = client.get("/v1/docs.md").text
+    assert "## How to prompt each model" in text
+    for guide in prompting.GUIDES:
+        assert f"[/v1/prompting/{guide}.md](/v1/prompting/{guide}.md)" in text, guide
+    image = text.split("### `image`", 1)[1].split("\n### ", 1)[0]
+    assert "**How to prompt it:**" in image and "/v1/prompting/qwen-image-2.1.md" in image
+    chat = text.split("### `POST /v1/openai/chat/completions`", 1)[1].split("\n### ", 1)[0]
+    assert "/v1/prompting/qwen3.5.md" in chat
+
+
+def test_the_docs_page_follows_the_links(client: TestClient) -> None:
+    page = client.get("/docs").text
+    assert '<a href="/v1/prompting/qwen-image-2.1.md">' in page

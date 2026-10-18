@@ -33,6 +33,28 @@ show a person the `message`.
 The prose for WHY a field exists lives in the internals docs (`docs/internals/*.md`); what
 is here is what you may send and what comes back.
 
+## How to prompt each model
+
+What each model's trainers and users say it expects, every claim cited and marked official or community. One guide per model or family; open it by its name or by any model id it covers (`GET /v1/prompting/<model>.md`), or list them all with `GET /v1/prompting`. Each job type and model route below links its own.
+
+| guide | models | read it |
+| --- | --- | --- |
+| YuE2 3B: how to prompt it | `yue2-3b` | [/v1/prompting/yue2-3b.md](/v1/prompting/yue2-3b.md) |
+| Stable Audio 3.0 Medium: how to prompt it | `stable-audio-3-medium` | [/v1/prompting/stable-audio-3-medium.md](/v1/prompting/stable-audio-3-medium.md) |
+| Stable Audio 3.0 Small SFX: how to prompt it | `stable-audio-3-small-sfx` | [/v1/prompting/stable-audio-3-small-sfx.md](/v1/prompting/stable-audio-3-small-sfx.md) |
+| Qwen-Image 2.1: how to prompt it | `qwen-image-2.1` | [/v1/prompting/qwen-image-2.1.md](/v1/prompting/qwen-image-2.1.md) |
+| DreamShaper XL Lightning: how to prompt it | `dreamshaper-xl-lightning` | [/v1/prompting/dreamshaper-xl-lightning.md](/v1/prompting/dreamshaper-xl-lightning.md) |
+| LTX-2.5 Distilled: how to prompt it | `ltx-2.5-distilled` | [/v1/prompting/ltx-2.5-distilled.md](/v1/prompting/ltx-2.5-distilled.md) |
+| Higgs TTS v3: how to feed it text | every voice it serves | [/v1/prompting/higgs-v3.md](/v1/prompting/higgs-v3.md) |
+| Qwen 3.5 (0.8B, 2B, 4B, 4B 8-bit, 9B, 9B with vision): how to prompt it | `qwen3.5-0.8b`, `qwen3.5-2b`, `qwen3.5-4b`, `qwen3.5-4b-8bit`, `qwen3.5-9b`, `qwen3.5-9b-vl` | [/v1/prompting/qwen3.5.md](/v1/prompting/qwen3.5.md) |
+| Qwen 3.8 27B (4-bit, 4-bit with vision, 8-bit): how to prompt it | `qwen3.8-27b-4bit`, `qwen3.8-27b-4bit-vl`, `qwen3.8-27b-8bit` | [/v1/prompting/qwen3.8-27b.md](/v1/prompting/qwen3.8-27b.md) |
+| Qwen3 Embedding 8B: how to use it | `qwen3-embedding-8b` | [/v1/prompting/qwen3-embedding-8b.md](/v1/prompting/qwen3-embedding-8b.md) |
+| Qwen3 Reranker 8B: how to use it | `qwen3-reranker-8b` | [/v1/prompting/qwen3-reranker-8b.md](/v1/prompting/qwen3-reranker-8b.md) |
+| dots.ocr: how to use it | `dots-ocr` | [/v1/prompting/dots-ocr.md](/v1/prompting/dots-ocr.md) |
+| Qwen3-ASR (0.6B, 1.7B): how to use it | `qwen3-asr-0.6b`, `qwen3-asr-0.6b-mlx`, `qwen3-asr-1.7b`, `qwen3-asr-1.7b-mlx` | [/v1/prompting/qwen3-asr.md](/v1/prompting/qwen3-asr.md) |
+| Whisper (large-v3-turbo, tiny): how to use it | `whisper-large-v3-turbo`, `whisper-tiny` | [/v1/prompting/whisper.md](/v1/prompting/whisper.md) |
+| SAM 2.1 Hiera Large: how to use it | `sam2.1-hiera-large` | [/v1/prompting/sam2.1-hiera-large.md](/v1/prompting/sam2.1-hiera-large.md) |
+
 ## Every command
 
 Every route this server answers and every job type it runs, one line each. The sections below give each one in full.
@@ -423,7 +445,7 @@ Every model this build has a manifest for, and where it stands here.
 
 ## Jobs
 
-The work. Every job type is created, polled and cancelled through the same routes. The `image` job's params, its result and how to prompt it are in docs/IMAGE.md; the `audio` job's (sound effects, music and songs) are in docs/AUDIO.md; the `segment` job's (subject cutouts and point-and-box selections, as masks) are in docs/SEGMENT.md; the `video` job's (clips with sound from words or a start picture) are in docs/VIDEO.md; the `score` job's (a recorded song transcribed into a YuE2-native ABC score) are in docs/SCORE.md. How to word a prompt for a given model is in its guide, `GET /v1/prompting`.
+The work. Every job type is created, polled and cancelled through the same routes. The `image` job's params and its result are in docs/IMAGE.md; the `audio` job's (sound effects, music and songs) are in docs/AUDIO.md; the `segment` job's (subject cutouts and point-and-box selections, as masks) are in docs/SEGMENT.md; the `video` job's (clips with sound from words or a start picture) are in docs/VIDEO.md; the `score` job's (a recorded song transcribed into a YuE2-native ABC score) are in docs/SCORE.md. How to word a prompt for each model is in its guide: see "How to prompt each model" above, and the line under each job type.
 
 ### `POST /v1/jobs`
 
@@ -964,6 +986,8 @@ Open the one streaming session this server will hold at a time, inside a queue s
 
 *Door:* token + `X-Crucible-Api: 1`
 
+**How to prompt it:** [Higgs TTS v3: how to feed it text](/v1/prompting/higgs-v3.md).
+
 **Body** (`application/json`)
 
 | field | type | required | default | what it is |
@@ -1179,6 +1203,8 @@ An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/
 
 *Door:* token + `X-Crucible-Api: 1`
 
+**How to prompt it:** [Qwen 3.5 (0.8B, 2B, 4B, 4B 8-bit, 9B, 9B with vision): how to prompt it](/v1/prompting/qwen3.5.md); [Qwen 3.8 27B (4-bit, 4-bit with vision, 8-bit): how to prompt it](/v1/prompting/qwen3.8-27b.md); [dots.ocr: how to use it](/v1/prompting/dots-ocr.md).
+
 **Body** (`application/json`)
 
 | field | type | required | default | what it is |
@@ -1202,6 +1228,8 @@ An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/
 OpenAI's embeddings: `{object: "list", data: [{embedding, index}], model, usage}`, unit-length vectors, with what wrote them under `crucible` (its `model.fingerprint` is what to store beside them; docs/internals/api.md "Embed"). `input_type` defaults to `document`; a search query is sent with `"input_type": "query"`, which OpenAI's API does not have.
 
 *Door:* token + `X-Crucible-Api: 1`
+
+**How to prompt it:** [Qwen3 Embedding 8B: how to use it](/v1/prompting/qwen3-embedding-8b.md).
 
 **Body** (`application/json`)
 
@@ -1235,6 +1263,8 @@ Cohere's and Jina's rerank: `{results: [{index, relevance_score, document?}], mo
 
 *Door:* token + `X-Crucible-Api: 1`
 
+**How to prompt it:** [Qwen3 Reranker 8B: how to use it](/v1/prompting/qwen3-reranker-8b.md).
+
 **Body** (`application/json`)
 
 | field | type | required | default | what it is |
@@ -1256,6 +1286,8 @@ Cohere's and Jina's rerank: `{results: [{index, relevance_score, document?}], mo
 An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream. A chat whose model is not resident, or whose engine has every slot taken, waits in the server's line (up to an hour, or `queue.max_wait_s`) and its model is loaded for it; with `"queue": false` it is refused at once instead. An upstream chat never waits. An `anthropic/<id>` chat is translated to the Messages API member by member, and a member with no faithful form there, or one the named model does not take, is refused by name before anything is sent (`upstream_field_unsupported`, `upstream_param_unsupported`; docs/API-CLI.md, "The anthropic upstream"). A `"prefill": "<text>"` member starts the answer with that text and the model writes on from it; the reply's content is what it wrote after the prefill (vLLM and llama-server; thinking stated off; no response_format or other grammar; refused by name otherwise: docs/internals/engines-and-capability.md, "Prefill"). A `response_format` or other grammar is enforced by the engine or refused `structured_output_not_served` before anything is sent: vLLM, llama-server and mlx-lm enforce a JSON schema, mlx-vlm enforces none ("Structured output"). A `"json_whitespace": "compact"` member, beside a JSON schema or json_object, keeps the answer's JSON free of whitespace between tokens (inside strings only); `"flexible"` is the default. vLLM, mlx-lm and llama-server on cuda-linux keep it (there the schema is sent as an llguidance grammar, and a JSON constraint needs thinking stated off: `structured_output_with_thinking`); llama-server on llama-windows and mlx-vlm are refused `json_whitespace_not_served`, and without a JSON constraint it is `json_whitespace_without_json`. A `"form": "<name>"` member names which form of a model that comes in more than one serves the chat (GET /v1/models, the row's `forms`); without it the resident form answers, and a load made for the chat loads the form this card takes. Another form on the card is a reload; an unknown name is refused `unknown_form` (docs/FITS-AND-THE-CARD.md section 8). It is never forwarded. A chat may leave `model` out and be served by a verb's model instead: `verb` (default `generate`) and `max_params_b`, a ceiling on this server's own pick for the verb that never raises it (docs/VERB-SIZING.md rule 8); the reply's `model` names the model chosen. The same choice opens a queue session (`max_params_b` beside `act`) and loads a model (`load-model`'s `params.verb`, `params.max_params_b`).
 
 *Door:* token + `X-Crucible-Api: 1`
+
+**How to prompt it:** [Qwen 3.5 (0.8B, 2B, 4B, 4B 8-bit, 9B, 9B with vision): how to prompt it](/v1/prompting/qwen3.5.md); [Qwen 3.8 27B (4-bit, 4-bit with vision, 8-bit): how to prompt it](/v1/prompting/qwen3.8-27b.md); [dots.ocr: how to use it](/v1/prompting/dots-ocr.md).
 
 **Body** (`application/json`)
 
@@ -1280,6 +1312,8 @@ An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/
 OpenAI's embeddings: `{object: "list", data: [{embedding, index}], model, usage}`, unit-length vectors, with what wrote them under `crucible` (its `model.fingerprint` is what to store beside them; docs/internals/api.md "Embed"). `input_type` defaults to `document`; a search query is sent with `"input_type": "query"`, which OpenAI's API does not have.
 
 *Door:* token + `X-Crucible-Api: 1`
+
+**How to prompt it:** [Qwen3 Embedding 8B: how to use it](/v1/prompting/qwen3-embedding-8b.md).
 
 **Body** (`application/json`)
 
@@ -1312,6 +1346,8 @@ The resident model in OpenAI's list shape, plus every upstream model a route nam
 Cohere's and Jina's rerank: `{results: [{index, relevance_score, document?}], model, usage}`, most relevant first, `top_n` of them, with what judged them and every score in document order under `crucible`.
 
 *Door:* token + `X-Crucible-Api: 1`
+
+**How to prompt it:** [Qwen3 Reranker 8B: how to use it](/v1/prompting/qwen3-reranker-8b.md).
 
 **Body** (`application/json`)
 
@@ -1357,7 +1393,7 @@ The orchestrator releases its claim; releasing when nothing is claimed succeeds.
 
 *Answers:* `200`
 
-## How to prompt each model
+## Prompting guides (the routes)
 
 What each model's trainers and users say it expects, every claim cited and marked official or community: one guide per model or family. The prompts themselves are the app's; these say what the model was trained to see.
 
@@ -1388,6 +1424,8 @@ One prompting guide as markdown, by guide name or by any model id it covers.
 One answer distribution per question, read off the resident model's next-token logprobs; with `items`, one choice answer per item in one request. Every refusal a caller can cause is made before anything is decided. A decision whose model is not resident, or whose engine has every slot taken, waits in the server's line and its model is loaded for it; with `"queue": false` it is refused at once instead. With no `model`, the decision is served by the model this server registered for decide, or with `images`, the one it registered for a decision with images (`GET /v1/capability`, the decide row's `with_images`).
 
 *Door:* token + `X-Crucible-Api: 1`
+
+**How to prompt it:** [Qwen 3.5 (0.8B, 2B, 4B, 4B 8-bit, 9B, 9B with vision): how to prompt it](/v1/prompting/qwen3.5.md); [Qwen 3.8 27B (4-bit, 4-bit with vision, 8-bit): how to prompt it](/v1/prompting/qwen3.8-27b.md).
 
 **Body** (`application/json`)
 
@@ -1428,6 +1466,8 @@ Unit-length vectors for a list of texts, each answer naming exactly what wrote t
 
 *Door:* token + `X-Crucible-Api: 1`
 
+**How to prompt it:** [Qwen3 Embedding 8B: how to use it](/v1/prompting/qwen3-embedding-8b.md).
+
 **Body** (`application/json`)
 
 | field | type | required | default | what it is |
@@ -1464,6 +1504,8 @@ Unit-length vectors for a list of texts, each answer naming exactly what wrote t
 A relevance probability per document for one query: P(yes) normalised against P(no) under the model's prompt (how to use it, with examples: docs/RETRIEVAL.md in the server's repo), so the same model's scores compare across calls and a fixed cutoff means the same thing every time. `scores` are in document order; `results` the same, most relevant first. The prompt is Crucible's: a dedicated reranker's own (its manifest's [rerank]), or for any decide model Crucible's general template; the instruction and the query are read once and shared by every document where the engine keeps a cache (llama-server, mlx-lm). The model is the request's `model`, else what this server registered for rerank, capped by `max_params_b` (kept at or below it, else the biggest that fits under it); the dedicated rerankers are the optional retrieval package (`crucible install retrieval`, refused `package_not_installed` where it is not installed), and a decide model named in the request reranks wherever it decides. A request whose model is not resident waits in the server's line and the model is loaded for it; with `"queue": false` it is refused at once instead.
 
 *Door:* token + `X-Crucible-Api: 1`
+
+**How to prompt it:** [Qwen3 Reranker 8B: how to use it](/v1/prompting/qwen3-reranker-8b.md).
 
 **Body** (`application/json`)
 
@@ -1578,6 +1620,8 @@ Starts an LLM engine for a model and leaves it resident, so the chat door (POST 
 
 *Model:* An LLM id (GET /v1/catalog, or GET /v1/models for the ones this server holds), e.g. `qwen3.5-9b`.
 
+**How to prompt it:** [Qwen 3.5 (0.8B, 2B, 4B, 4B 8-bit, 9B, 9B with vision): how to prompt it](/v1/prompting/qwen3.5.md); [Qwen 3.8 27B (4-bit, 4-bit with vision, 8-bit): how to prompt it](/v1/prompting/qwen3.8-27b.md); [dots.ocr: how to use it](/v1/prompting/dots-ocr.md); [Qwen3 Embedding 8B: how to use it](/v1/prompting/qwen3-embedding-8b.md); [Qwen3 Reranker 8B: how to use it](/v1/prompting/qwen3-reranker-8b.md).
+
 **Params**
 
 | field | type | required | default | what it is |
@@ -1639,6 +1683,8 @@ Starts narrator with a TTS voice and leaves it resident, for `tts` jobs and seri
 
 *Model:* A voice id (GET /v1/voices; each row gives its `kind` and `takes`), e.g. `deathstalker`.
 
+**How to prompt it:** [Higgs TTS v3: how to feed it text](/v1/prompting/higgs-v3.md).
+
 **Params**
 
 | field | type | required | default | what it is |
@@ -1693,6 +1739,8 @@ Renders a batch of text chunks with a TTS voice, one FLAC per chunk. It loads th
 
 *Model:* A voice id (GET /v1/voices), e.g. `deathstalker`. For Higgs a voice is the merged checkpoint, so the voice id is the model.
 
+**How to prompt it:** [Higgs TTS v3: how to feed it text](/v1/prompting/higgs-v3.md).
+
 **Params**
 
 | field | type | required | default | what it is |
@@ -1744,6 +1792,8 @@ Renders a batch of text chunks with a TTS voice, one FLAC per chunk. It loads th
 Transcribes one audio file to timed text with Whisper (faster-whisper on cuda-linux, mlx-whisper on a Mac) or Qwen3-ASR.
 
 *Model:* An ASR id (GET /v1/catalog), e.g. `qwen3-asr-1.7b`, `whisper-large-v3-turbo`, or `qwen3-asr-1.7b-mlx` on a Mac.
+
+**How to prompt it:** [Qwen3-ASR (0.6B, 1.7B): how to use it](/v1/prompting/qwen3-asr.md); [Whisper (large-v3-turbo, tiny): how to use it](/v1/prompting/whisper.md).
 
 **Params**
 
@@ -2044,6 +2094,8 @@ Makes one picture from a prompt (text-to-image), redraws an input picture (image
 
 *Model:* An image model id (GET /v1/catalog): `qwen-image-2.1`, or `dreamshaper-xl-lightning` (CUDA, 8 GiB cards). Leave it out for the model this server registered for the verb, the biggest its card holds.
 
+**How to prompt it:** [Qwen-Image 2.1: how to prompt it](/v1/prompting/qwen-image-2.1.md); [DreamShaper XL Lightning: how to prompt it](/v1/prompting/dreamshaper-xl-lightning.md).
+
 **Params**
 
 | field | type | required | default | what it is |
@@ -2138,6 +2190,8 @@ Puts an image model on the card and leaves it there, so the first job that uses 
 Makes sound from words: sound effects and instrumental music with Stable Audio 3, songs with sung vocals (or instrumentals) with YuE2.
 
 *Model:* An audio model id (GET /v1/catalog): `stable-audio-3-small-sfx` (sound effects), `stable-audio-3-medium` (music), `yue2-3b` (songs).
+
+**How to prompt it:** [YuE2 3B: how to prompt it](/v1/prompting/yue2-3b.md); [Stable Audio 3.0 Medium: how to prompt it](/v1/prompting/stable-audio-3-medium.md); [Stable Audio 3.0 Small SFX: how to prompt it](/v1/prompting/stable-audio-3-small-sfx.md).
 
 **Params**
 
@@ -2247,6 +2301,8 @@ Makes a mask from a picture: the main subject by itself (`birefnet`, background 
 
 *Model:* A segment model id (GET /v1/catalog): `birefnet` or `sam2.1-hiera-large`.
 
+**How to prompt it:** [SAM 2.1 Hiera Large: how to use it](/v1/prompting/sam2.1-hiera-large.md).
+
 **Params**
 
 | field | type | required | default | what it is |
@@ -2337,6 +2393,8 @@ Puts a segment model on the card and leaves it there, so the first job that uses
 Makes a video clip with its own sound from a prompt (text-to-video), or brings a start picture to life (image-to-video), with LTX-2.5.
 
 *Model:* A video model id (GET /v1/catalog): `ltx-2.5-distilled`.
+
+**How to prompt it:** [LTX-2.5 Distilled: how to prompt it](/v1/prompting/ltx-2.5-distilled.md).
 
 **Params**
 
@@ -3468,6 +3526,8 @@ The states after which a job or a task never changes again.
 | `loc` | array of string or integer | yes | — |  |
 | `msg` | string | yes | — |  |
 | `type` | string | yes | — |  |
+| `input` | Input | no | — |  |
+| `ctx` | object | no | — |  |
 
 ### `VoiceInfo`
 

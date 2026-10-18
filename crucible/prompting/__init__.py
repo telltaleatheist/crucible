@@ -45,6 +45,45 @@ GUIDES: dict[str, tuple[str, ...]] = {
     "sam2.1-hiera-large": ("sam2.1-hiera-large",),
 }
 
+# Where a client meets each guide's models, so the API reference can name the guide at
+# that place: the job types of crucible/jobdocs.py, and the routes that take a model's
+# prompt directly. tests/test_prompting_guides.py holds both to what the build has.
+_LLM = ("qwen3.5", "qwen3.8-27b")
+JOB_TYPE_GUIDES: dict[str, tuple[str, ...]] = {
+    "load-model": (*_LLM, "dots-ocr", "qwen3-embedding-8b", "qwen3-reranker-8b"),
+    "load-voice": ("higgs-v3",),
+    "tts": ("higgs-v3",),
+    "asr": ("qwen3-asr", "whisper"),
+    "image": ("qwen-image-2.1", "dreamshaper-xl-lightning"),
+    "audio": ("yue2-3b", "stable-audio-3-medium", "stable-audio-3-small-sfx"),
+    "segment": ("sam2.1-hiera-large",),
+    "video": ("ltx-2.5-distilled",),
+}
+ROUTE_GUIDES: dict[str, tuple[str, ...]] = {
+    "/v1/openai/chat/completions": (*_LLM, "dots-ocr"),
+    "/openai/v1/chat/completions": (*_LLM, "dots-ocr"),
+    "/v1/decide": _LLM,
+    "/v1/embed": ("qwen3-embedding-8b",),
+    "/v1/openai/embeddings": ("qwen3-embedding-8b",),
+    "/openai/v1/embeddings": ("qwen3-embedding-8b",),
+    "/v1/rerank": ("qwen3-reranker-8b",),
+    "/v1/openai/rerank": ("qwen3-reranker-8b",),
+    "/openai/v1/rerank": ("qwen3-reranker-8b",),
+    "/v1/tts/stream": ("higgs-v3",),
+}
+
+
+def url(guide: str) -> str:
+    return f"/v1/prompting/{guide}.md"
+
+
+def pointer(guides: tuple[str, ...]) -> str:
+    """The API reference's line naming each guide, as a link the /docs page follows."""
+    return "**How to prompt it:** " + "; ".join(
+        f"[{title(guide)}]({url(guide)})" for guide in guides
+    ) + "."
+
+
 _BY_MODEL: dict[str, str] = {model: guide for guide, models in GUIDES.items() for model in models}
 
 
