@@ -1,4 +1,4 @@
-VERSION = "2.0.15"
+VERSION = "2.0.16"
 
 from .protocol import API_HEADER, API_VERSION
 

@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 2.0.16 — 2026-10-18
+
 - The API reference makes the prompting guides obvious: a "How to prompt each model" section near the top lists every guide with its models and link, and every job type and model route (chat, decide, embed, rerank, the TTS stream) says which guide is its own (**How to prompt it:**). The `/docs` page follows those links. The Jobs section no longer says the image job's prompting lives in docs/IMAGE.md.
 
 ## 2.0.15 — 2026-10-15
