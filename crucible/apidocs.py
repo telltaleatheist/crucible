@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import prompting
 from .protocol import API_HEADER, API_VERSION
 
 # The version header as a protected route needs it, spelled from the protocol.
@@ -65,13 +66,14 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
         "/jobs",
         "Jobs",
         "The work. Every job type is created, polled and cancelled through the same routes. "
-        "The `image` job's params, its result and how to prompt it are in docs/IMAGE.md; "
+        "The `image` job's params and its result are in docs/IMAGE.md; "
         "the `audio` job's (sound effects, music and songs) are in docs/AUDIO.md; "
         "the `segment` job's (subject cutouts and point-and-box selections, as masks) "
         "are in docs/SEGMENT.md; the `video` job's (clips with sound from words or a "
         "start picture) are in docs/VIDEO.md; the `score` job's (a recorded song "
         "transcribed into a YuE2-native ABC score) are in docs/SCORE.md. How to word "
-        "a prompt for a given model is in its guide, `GET /v1/prompting`.",
+        "a prompt for each model is in its guide: see \"How to prompt each model\" "
+        "above, and the line under each job type.",
     ),
     (
         "/queue",
@@ -153,7 +155,7 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "/prompting",
-        "How to prompt each model",
+        "Prompting guides (the routes)",
         "What each model's trainers and users say it expects, every claim cited and marked "
         "official or community: one guide per model or family. The prompts themselves are "
         "the app's; these say what the model was trained to see.",
@@ -478,6 +480,30 @@ def render_index(spec: dict[str, Any]) -> list[str]:
     return out + [""]
 
 
+def render_prompting() -> list[str]:
+    """How to prompt each model: every guide this build carries, before the routes, so a
+    client looking for how to word a request finds it before it finds the door."""
+    out = [
+        "## How to prompt each model",
+        "",
+        "What each model's trainers and users say it expects, every claim cited and marked "
+        "official or community. One guide per model or family; open it by its name or by "
+        "any model id it covers (`GET /v1/prompting/<model>.md`), or list them all with "
+        "`GET /v1/prompting`. Each job type and model route below links its own.",
+        "",
+        "| guide | models | read it |",
+        "| --- | --- | --- |",
+    ]
+    for guide, models in prompting.GUIDES.items():
+        covered = ", ".join("`" + model + "`" for model in models) or "every voice it serves"
+        out.append(
+            "| " + prompting.title(guide) + " | " + covered + " | ["
+            + prompting.url(guide) + "](" + prompting.url(guide) + ") |"
+        )
+    out.append("")
+    return out
+
+
 def render_job_types(enabled: frozenset[str] | None) -> list[str]:
     """Every job type in full, from crucible/jobdocs.py and its params model."""
     import json
@@ -507,6 +533,8 @@ def render_job_types(enabled: frozenset[str] | None) -> list[str]:
             title += " (not enabled on this server)"
         out += [title, "", cell(doc.summary), ""]
         out += ["*Model:* " + (cell(doc.model) if doc.model else "none"), ""]
+        if name in prompting.JOB_TYPE_GUIDES:
+            out += [prompting.pointer(prompting.JOB_TYPE_GUIDES[name]), ""]
         if doc.params is None:
             out += ["*Params:* none (`{}`).", ""]
         else:
@@ -568,6 +596,7 @@ def render(app: Any, enabled: frozenset[str] | None = None) -> str:
         "",
     ]
 
+    out += render_prompting()
     out += render_index(spec)
     out += render_throughput()
 
@@ -604,6 +633,8 @@ def render(app: Any, enabled: frozenset[str] | None = None) -> str:
             elif summary:
                 out += [summary, ""]
             out += ["*Door:* " + door, ""]
+            if method == "POST" and path in prompting.ROUTE_GUIDES:
+                out += [prompting.pointer(prompting.ROUTE_GUIDES[path]), ""]
 
             wanted = [
                 param
@@ -731,6 +762,8 @@ def _inline(text: str) -> str:
             out.append("<code>" + html.escape(piece[1:-1]) + "</code>")
             continue
         piece = html.escape(piece)
+        # A link to this server's own pages only (a path, never a scheme).
+        piece = re.sub(r"\[([^\]]+)\]\((/[^)\s]+)\)", r'<a href="\2">\1</a>', piece)
         piece = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", piece)
         piece = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"<em>\1</em>", piece)
         out.append(piece)
