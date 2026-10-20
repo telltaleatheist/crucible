@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 2.0.18 — 2026-10-19
+
 - Lip-dub on the Mac: `ltx-2.3-dubit` (Lightricks' Dub-It IC-LoRA on LTX-2.3, beta) re-makes a `video` job's one input, a reference video of a person talking, so they say the line the prompt quotes in a voice like theirs; the clip is the reference's length (rounded down to 8k+1, at most 193 frames, longer refused `video_reference_too_long`, never cut) at its exact frame rate, `reference_strength` sets how strongly it holds the picture, and `done.video` reports `reference` (frames used, rate, sound level) and `lora`. The transformer always streams. The PC refuses it `backend_unsupported`; references are sniffed (MP4, MOV, WebM/Matroska) and one without sound or picture is refused by name. A companion file already in place with its pinned sha256 is now kept by a pull rather than fetched again. The TypeScript SDK takes `reference` and reads `VideoResult.reference`/`lora`; prompting guide `ltx-2.3-dubit`.
 
 ## 2.0.17 — 2026-10-19
