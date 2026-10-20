@@ -1,0 +1,150 @@
+[model]
+id = "ltx-2.3-dubit"
+family = "ltx-2.3"
+display = "LTX-2.3 Dub-It (lip-dub, beta)"
+pipeline = "lip-dub"
+licence = "LTX-2 Community License Agreement (licence date 2026-01-05), which covers the Lightricks weights, the Dub-It IC-LoRA and the MLX int8 conversion Crucible pulls; the Gemma 3 text encoder is under Google's Gemma Terms of Use"
+licence_url = "https://huggingface.co/dgrauet/ltx-2.3-mlx-q8/blob/6671a7572a530862d1d60ce393b5d93491e3f76b/LICENSE"
+commercial_use = "free, commercial use included, for an entity whose annual revenue is under US$10,000,000; at or above that, a paid Commercial Use Agreement from Lightricks. The Gemma 3 text encoder adds Google's Gemma Terms of Use and its prohibited-use policy. Dubbing a real person's face and voice is yours to have the right to do"
+
+[backends.mlx-darwin]
+engine = "ltx-2-mlx"
+hf_repo = "dgrauet/ltx-2.3-mlx-q8"
+revision = "6671a7572a530862d1d60ce393b5d93491e3f76b"
+gated = false
+dtype = "bfloat16"
+memory_bytes_estimate = 35000000000
+memory_basis = "declared"
+memory_note = "declared 2026-10-19 from one run of the pinned port's own lipdub CLI on the M1 Ultra (64 GB), not through Crucible: a 6.5 s 29.97 fps reference to 193 frames at 768x448 with the transformer streamed block by block (--low-ram), 8 half-size steps then 3 full-size steps over 16,800 video tokens (the clip's 8,400 and the reference's 8,400). /usr/bin/time -l read a maximum resident set of 14.1 GB and a peak memory footprint of 34.4 GB; a 10 s sampler read 13 to 16 GB through both passes and one 22 GB sample at the half-to-full handoff. The run's footprint could not be split by stage, so both passes declare all of it, and the encoding stage (Gemma 3 12B at 4 bits, 8.0 GB, plus the 6.3 GB connector) its file sizes with headroom; a first run through Crucible reports stage_peak_bytes to replace these. Without block streaming the same clip reached a 67 GB footprint and swapped, which is why this model always streams. Needs a Mac with 35 GB left after the 16 GB desktop allowance"
+files = [
+  "LICENSE",
+  "README.md",
+  "config.json",
+  "embedded_config.json",
+  "quantize_config.json",
+  "split_model.json",
+  "connector.safetensors",
+  "transformer-distilled-1.1.safetensors",
+  "spatial_upscaler_x2_v1_1.safetensors",
+  "spatial_upscaler_x2_v1_1_config.json",
+  "vae_encoder.safetensors",
+  "vae_decoder.safetensors",
+  "audio_vae.safetensors",
+  "vocoder.safetensors",
+]
+size_multiple = 64
+min_side = 256
+max_side = 768
+max_pixels = 344064
+default_width = 768
+default_height = 448
+max_frames = 193
+max_video_tokens = 8400
+steps = 8
+refine_steps = 3
+audio_sample_rate = 48000
+mlx_cache_limit_bytes = 4000000000
+
+[backends.mlx-darwin.stage_memory_bytes]
+encoding = 16000000000
+denoising = 35000000000
+refining = 35000000000
+decoding = 16000000000
+audio_decoding = 3000000000
+
+[backends.mlx-darwin.not_taken]
+negative_prompt = "the distilled transformer runs at CFG 1 in both passes (Lightricks' Dub-It recipe), so the pipeline never encodes a negative prompt; describe the speaker and the line in the prompt instead"
+
+[[backends.mlx-darwin.companions]]
+name = "ic-lora"
+hf_repo = "Lightricks/LTX-2.3-22b-IC-LoRA-DubIt"
+revision = "1456334c3d69924de5083e553733b108ed1147f2"
+
+[[backends.mlx-darwin.companions.files]]
+source = "ltx-2.3-22b-ic-lora-dubit-0.9.safetensors"
+target = "ltx-2.3-22b-ic-lora-dubit-0.9.safetensors"
+sha256 = "fc415b12cb639e78511bc264f85080c2f7b188e334c1d9fade76b310e2bc419c"
+bytes = 2466665072
+
+[[backends.mlx-darwin.companions]]
+name = "text-encoder"
+hf_repo = "mlx-community/gemma-3-12b-it-4bit"
+revision = "86cc6a8dedbc456dd0e4af01a9d09f396f77e558"
+
+[[backends.mlx-darwin.companions.files]]
+source = "config.json"
+target = "config.json"
+sha256 = "73ed96a3f1d596fcf3c07f17ed7e4358fd99be688c97da45f2464fd48dd069ed"
+bytes = 1141
+
+[[backends.mlx-darwin.companions.files]]
+source = "generation_config.json"
+target = "generation_config.json"
+sha256 = "e04ecb65db447404710114fb282baaac482d22a95e2244ecaab428b81672ba78"
+bytes = 192
+
+[[backends.mlx-darwin.companions.files]]
+source = "model.safetensors.index.json"
+target = "model.safetensors.index.json"
+sha256 = "788cc42a1a92835df62d9a3791f47105f63504c7c404637a73288e9b11bc7b82"
+bytes = 108605
+
+[[backends.mlx-darwin.companions.files]]
+source = "model-00001-of-00002.safetensors"
+target = "model-00001-of-00002.safetensors"
+sha256 = "995cbd05b7bfd8f5ab5307b476eb5496b5ec3f5256a9dd26366236ce8816c93f"
+bytes = 5367455313
+
+[[backends.mlx-darwin.companions.files]]
+source = "model-00002-of-00002.safetensors"
+target = "model-00002-of-00002.safetensors"
+sha256 = "8b7af7eb5ff32109fc65cbcd0af5b8016ac0de46df17f40705f043f899495333"
+bytes = 2661219935
+
+[[backends.mlx-darwin.companions.files]]
+source = "tokenizer.json"
+target = "tokenizer.json"
+sha256 = "4667f2089529e8e7657cfb6d1c19910ae71ff5f28aa7ab2ff2763330affad795"
+bytes = 33384568
+
+[[backends.mlx-darwin.companions.files]]
+source = "tokenizer.model"
+target = "tokenizer.model"
+sha256 = "1299c11d7cf632ef3b4e11937501358ada021bbdf7c47638d13c0ee982f2e79c"
+bytes = 4689074
+
+[[backends.mlx-darwin.companions.files]]
+source = "tokenizer_config.json"
+target = "tokenizer_config.json"
+sha256 = "0d95398b39395e5cfb290683a78f3fb0551223c672d8b033333c1a5307473760"
+bytes = 1157007
+
+[[backends.mlx-darwin.companions.files]]
+source = "special_tokens_map.json"
+target = "special_tokens_map.json"
+sha256 = "2f7b0adf4fb469770bb1490e3e35df87b1dc578246c5e7e6fc76ecf33213a397"
+bytes = 662
+
+[[backends.mlx-darwin.companions.files]]
+source = "added_tokens.json"
+target = "added_tokens.json"
+sha256 = "50b2f405ba56a26d4913fd772089992252d7f942123cc0a034d96424221ba946"
+bytes = 35
+
+[[backends.mlx-darwin.companions.files]]
+source = "chat_template.json"
+target = "chat_template.json"
+sha256 = "fe16baf728db49457cde32802cd7efc0ac8a7a9877dbe22fe3322b2d9dc6ccd9"
+bytes = 1615
+
+[[backends.mlx-darwin.companions.files]]
+source = "preprocessor_config.json"
+target = "preprocessor_config.json"
+sha256 = "f688d6bb20c5017601c4011de7ca656da8485b540b05013efdaf986c0fcc918d"
+bytes = 570
+
+[[backends.mlx-darwin.companions.files]]
+source = "processor_config.json"
+target = "processor_config.json"
+sha256 = "3ffd5f11778dc73e2b69b3c00535e4121e1badf7018136263cd17b5b34fbaa53"
+bytes = 70

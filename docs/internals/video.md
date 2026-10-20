@@ -521,6 +521,93 @@ owens-mac-studio through the installed Crucible, with nothing else resident:
    h264_videotoolbox's file plays in a browser with the sound in sync. Check the encoder opens
    from Crucible's launchd session; `-allow_sw 1` falls back to Apple's software encoder if not.
 
+## The lip-dub arm: `ltx-2.3-dubit`
+
+A second model on the Mac's engine, not a second engine: the same video env and worker
+(`ltx2mlx_worker.py`), with the manifest's `[model] pipeline = "lip-dub"` sent in the load
+request so the worker builds `LipDubEngine` over the port's `LipDubPipeline` (ltx-2-mlx
+`1724ca67`, `ltx_pipelines_mlx/lipdub.py`, a mirror of upstream `ltx_pipelines.lipdub`) instead
+of `DistilledPipeline`. Owen, 2026-10-19: keep it a downloadable model on the Mac, lean; no PC
+arm (the diffusers engine has no lip-dub pipeline, so a `cuda-linux` block would be refused by
+the loader, and the model has none: the PC refuses it `backend_unsupported` before anything
+loads).
+
+**What a lip-dub block is.** `pipeline` lives in `[model]`, because a model is a lip-dub model
+on every backend. A lip-dub block declares no `fps`, `default_fps` or `default_duration_s` (the
+clip's rate and length are the reference's) and none of the distilled-only limits
+(`max_video_tokens_image_to_video`, `audio_to_video`, the tiled pair); it must declare
+`refine_steps`, and exactly two companions in order: `ic-lora` (one `.safetensors`, fused into
+the transformer) and `text-encoder` (the Gemma 3 12B 4-bit MLX repo, which the LTX-2.3 pack
+does not carry, as the 2.5 pack carries its Gemma 4). `transformer_companion` is the PC's GGUF
+only. The `video` verb's candidates are `load_clip_manifests()`, the non-lip-dub models: a verb
+caller sends a prompt, never a reference.
+
+**The pack's files.** From `dgrauet/ltx-2.3-mlx-q8` @ `6671a757` the pipeline reads (blocks.py,
+ic_lora.py at the pinned commit): `connector.safetensors`, `embedded_config.json`,
+`quantize_config.json`, `transformer-distilled-1.1.safetensors` (`_resolve_safetensors` takes
+the highest versioned `transformer-distilled-*`; only 1.1 is pulled, so there is one to take),
+`spatial_upscaler_x2_v1_1.safetensors` and its config (named in `ICLoraPipeline.load`),
+`vae_encoder`/`vae_decoder` (the 2.3 pack has no `_conv` VAE), `audio_vae` and `vocoder`;
+`config.json`, `split_model.json`, the README and the LICENSE ride along. Not pulled:
+`transformer-dev` and `transformer-distilled` (1.0), the two distilled LoRAs (the dev path only),
+the x1.5 and temporal upscalers. The 2026-10-19 run used exactly this set.
+
+**The run.** `generate_lipdub` (one call): probe the reference, encode the prompt (Gemma 3 +
+connector, freed), encode the reference's sound (audio VAE encoder, 16 kHz stereo, negative
+RoPE time so it reads as off-screen context), load the transformer streamed and attach the
+IC-LoRA per block, encode the reference video at half size as IC-LoRA context, 8 Euler steps at
+half size over the clip's tokens and the reference's, the 2x upscale, the reference re-encoded
+at full size, 3 steps at full size with the first pass's audio frozen; it returns the video
+latent, the first pass's audio latent and the frame rate. Its only hooks are the two
+`_stepwise_hook` calls just before each loop, so the worker marks stages there: entering pass 1
+closes `encoding` (which therefore holds the text, the reference's sound and the loads) and
+opens `denoising`; entering pass 2 closes `denoising` and opens `refining`. Then the worker's
+own tiled decode (12 GB budget) and `_decode_audio`, as for the distilled model, and videocore's
+mux at the reference's exact rate (`-framerate 30000/1001`, carried as `Clip.rate`). The worker
+checks the latent against what the server settled (frames, size, rate) and fails rather than
+mux a clip of another length. The port's own `generate_and_save` is never called: its mux wants
+an ffmpeg with libx264, which Crucible's LGPL Mac ffmpeg is not.
+
+**ffmpeg and ffprobe.** Both sides probe the reference. The server reads it with ffprobe
+(`probe_reference`: streams, `nb_frames` or else the container's duration x `r_frame_rate`,
+which is the port's own rule in `probe_video_info`) to settle the clip and refuse it by name;
+the port probes it again and decodes its frames and sound through the `ffmpeg`/`ffprobe` on
+PATH, which in a worker is Crucible's tools/bin first (`hosttools.worker_path`). Decoding and
+probing only: the LGPL build has the h264, hevc, prores, vp9, aac, mp3 and opus decoders and the
+scale filter (checked on the Mac 2026-10-19).
+
+**Memory.** Measured once, through the port's CLI, not Crucible: 6.5 s 29.97 fps 1080p
+reference, 768x448 x 193 frames, `--low-ram`, `MLX_MAX_OPS_PER_BUFFER=20
+MLX_MAX_MB_PER_BUFFER=40 LTX2_DIT_EVAL_EVERY=1`: maximum resident set 14.1 GB, peak footprint
+34.4 GB (`/usr/bin/time -l`), a 10 s sampler 13 to 16 GB through both passes with one 22 GB
+sample at the handoff, 760 s wall (pass 1 about 30 s a step warm, pass 2 about 126 s a step
+over 16,800 tokens). Unstreamed, the same clip reached 67 GB and swapped. The footprint could
+not be split by stage, so `denoising` and `refining` both declare 35 GB, and the limits
+(`max_frames` 193, `max_video_tokens` 8,400 counting the clip's tokens only; the transformer
+sees twice that with the reference, `max_pixels` 344,064) are the measured run's. The worker
+streams whatever `[video_desktop] low_ram` says; the duty cycle and buffer limits still apply;
+the modality tiling does not (the lip-dub loops build their own `X0Model`).
+
+**Weights already on disk.** `weights.pull_files` (every companion) now hashes a file already at
+its target with the declared size and keeps it when the sha256 matches, so a companion moved
+in by hand is adopted rather than fetched twice; `force` still fetches everything. The main
+repo goes through `snapshot_download(local_dir=…)`, which keeps a file whose
+`.cache/huggingface/download/*.metadata` matches the revision, and re-hashes an LFS file with
+none.
+
+### What the first lip-dub run on the Mac must measure
+
+1. `crucible models pull ltx-2.3-dubit` after the files are moved in (docs/VIDEO.md): it should
+   fetch only the small files, and print `kept` for the LoRA and the Gemma weights.
+2. One job with the 2026-10-19 reference and prompt at the default size: `stage_peak_bytes`
+   per stage and the process footprint, to replace the declared 35 GB with measured stages;
+   that the port's probe and the server's agree (the worker refuses otherwise); that the port
+   decodes the reference through Crucible's own ffmpeg (the CLI run had a conda ffmpeg on
+   PATH); and the clip against the CLI's (`dubit_768x448_s42_a.mp4`).
+3. A WebM or a variable-frame-rate phone video, whose `nb_frames` is absent or approximate.
+4. A second job in the same session: the LoRA attaches again to the freshly loaded streamed
+   transformer.
+
 ## Measuring past the declared limits: `[video_trial]`
 
 The shipped clip limits are declared, and meant to be replaced by measured ones. To measure,

@@ -22,6 +22,7 @@ GUIDES: dict[str, tuple[str, ...]] = {
     "qwen-image-2.1": ("qwen-image-2.1",),
     "dreamshaper-xl-lightning": ("dreamshaper-xl-lightning",),
     "ltx-2.5-distilled": ("ltx-2.5-distilled",),
+    "ltx-2.3-dubit": ("ltx-2.3-dubit",),
     "higgs-v3": (),
     "qwen3.5": (
         "qwen3.5-0.8b",
@@ -57,7 +58,7 @@ JOB_TYPE_GUIDES: dict[str, tuple[str, ...]] = {
     "image": ("qwen-image-2.1", "dreamshaper-xl-lightning"),
     "audio": ("yue2-3b", "stable-audio-3-medium", "stable-audio-3-small-sfx"),
     "segment": ("sam2.1-hiera-large",),
-    "video": ("ltx-2.5-distilled",),
+    "video": ("ltx-2.5-distilled", "ltx-2.3-dubit"),
 }
 ROUTE_GUIDES: dict[str, tuple[str, ...]] = {
     "/v1/openai/chat/completions": (*_LLM, "dots-ocr"),

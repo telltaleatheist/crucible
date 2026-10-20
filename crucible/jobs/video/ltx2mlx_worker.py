@@ -28,6 +28,15 @@ temporal (and optional spatial) tiling of each pass through the port's modality 
 no single kernel spans the whole clip. The MLX and ltx-2-mlx env knobs of the same table
 arrive in the environment. docs/internals/video.md, "The Mac arm", has the memory arithmetic
 behind each stage, and "Keeping the desktop responsive: [video_desktop]" the knobs.
+
+A lip-dub model (the load request's `pipeline`, "lip-dub") is `LipDubEngine`: the port's
+LipDubPipeline on an LTX-2.3 pack, with the Dub-It IC-LoRA and a Gemma 3 text encoder from
+the model's companion folders. Its `generate_lipdub` runs the text, the reference's sound,
+both passes and returns the latents; the stages are marked from inside it (see
+`lip_dub_pipeline`), and the decode and mux are this worker's own, as above. The port reads
+the reference itself through the ffmpeg and ffprobe on PATH, which in a Crucible worker is
+Crucible's own tools/bin first (hosttools.worker_path): decoding and probing only, which the
+LGPL build does.
 """
 
 from __future__ import annotations
@@ -74,6 +83,12 @@ ENCODER_MARGIN_LATENTS = 2
 
 DEFAULT_REFINE_STEPS = 3
 
+LIP_DUB = "lip-dub"
+
+# The Dub-It IC-LoRA's strength when it is fused into the transformer: Lightricks' recipe and
+# the port's CLI (`--lora <file> 1.0`). The reference video's own strength is the request's.
+IC_LORA_STRENGTH = 1.0
+
 DESKTOP_ENVIRONMENT: tuple = ("MLX_MAX_OPS_PER_BUFFER", "MLX_MAX_MB_PER_BUFFER", "LTX2_DIT_EVAL_EVERY")
 
 REQUIRED_FILES: tuple = (
@@ -92,6 +107,22 @@ REQUIRED_FILES: tuple = (
 )
 
 
+# The LTX-2.3 pack's files the lip-dub pipeline reads (ltx_pipelines_mlx/utils/blocks.py and
+# ic_lora.py at the pinned commit); the text encoder and the IC-LoRA are companions.
+LIP_DUB_FILES: tuple = (
+    "embedded_config.json",
+    "quantize_config.json",
+    "connector.safetensors",
+    "transformer-distilled-1.1.safetensors",
+    "spatial_upscaler_x2_v1_1.safetensors",
+    "spatial_upscaler_x2_v1_1_config.json",
+    "vae_encoder.safetensors",
+    "vae_decoder.safetensors",
+    "audio_vae.safetensors",
+    "vocoder.safetensors",
+)
+
+
 def require(request: dict, key: str, kind):
     return workerio.require(request, key, kind, LABEL, videocore.WHY_REQUIRED)
 
@@ -105,8 +136,8 @@ def _version_of(distribution: str):
         return None
 
 
-def missing_files(model_dir: str) -> list:
-    return [name for name in REQUIRED_FILES if not os.path.isfile(os.path.join(model_dir, name))]
+def missing_files(model_dir: str, wanted: tuple = REQUIRED_FILES) -> list:
+    return [name for name in wanted if not os.path.isfile(os.path.join(model_dir, name))]
 
 
 def even(value: int) -> int:
@@ -377,6 +408,46 @@ class StepReport:
             self._progress.reached(step_index + 1)
 
         return on_step
+
+
+def level_dbfs(pcm: bytes) -> dict:
+    """The mean (RMS) and peak level of 16-bit PCM in dBFS, as ffmpeg's volumedetect reads
+    them. The lip-dub voice follows the reference recording's loudness and is not made
+    louder; this says how loud it came out."""
+    import numpy
+
+    samples = numpy.frombuffer(pcm, dtype="<i2").astype(numpy.float64) / 32768.0
+    if samples.size == 0:
+        return {"mean": None, "peak": None}
+
+    def db(value: float):
+        return None if value <= 0 else round(20 * numpy.log10(value), 1)
+
+    return {
+        "mean": db(float(numpy.sqrt(numpy.mean(samples * samples)))),
+        "peak": db(float(numpy.max(numpy.abs(samples)))),
+    }
+
+
+def lip_dub_pipeline(base):
+    """`base` (LipDubPipeline) with its stages marked from inside `generate_lipdub`.
+
+    That one call encodes the prompt and the reference's sound, loads the transformer and
+    fuses the IC-LoRA, then runs both passes. The only hooks inside it are the per-loop
+    `_stepwise_hook` calls, made just before each pass's loop starts (stage=1, stage=2), so
+    that is where the engine closes the stage before and enters the next. Built at call
+    time so this file imports without mlx.
+    """
+
+    class Marked(base):
+        marks = None
+
+        def _stepwise_hook(self, latent_frames, latent_height, latent_width, *, stage=None):
+            if self.marks is None:
+                raise RuntimeError("the lip-dub pipeline started a pass with no engine marking it")
+            return self.marks(stage)
+
+    return Marked
 
 
 class LtxMlxEngine:
@@ -746,5 +817,177 @@ class LtxMlxEngine:
         }
 
 
+class LipDubEngine(LtxMlxEngine):
+    """LTX-2.3 Dub-It: the reference video re-made so its speaker says the prompt's line."""
+
+    spans = videocore.LIP_DUB_SPANS
+
+    def __init__(self, request: dict) -> None:
+        import mlx.core as mx
+        from ltx_pipelines_mlx.lipdub import LipDubPipeline
+
+        self._mx = mx
+        self._model_dir = require(request, "model_dir", str)
+        self.device = require(request, "device", str)
+        self._lora_path = require(request, "lora_path", str)
+        text_encoder = require(request, "text_encoder_dir", str)
+        mx.set_cache_limit(require(request, "mlx_cache_limit_bytes", int))
+        absent = missing_files(self._model_dir, LIP_DUB_FILES) + [
+            path for path in (self._lora_path, os.path.join(text_encoder, "config.json"))
+            if not os.path.isfile(path)
+        ]
+        if absent:
+            raise RuntimeError(
+                f"the LTX-2.3 Dub-It weights at {self._model_dir} are incomplete: {absent} are "
+                "missing. Run `crucible models pull ltx-2.3-dubit`; it fetches only what is "
+                "missing"
+            )
+        desktop = request.get("desktop")
+        self._desktop = dict(desktop) if isinstance(desktop, dict) else None
+        # Always streamed, whatever [video_desktop] low_ram says: without it the 768x448
+        # measuring run reached a 67 GB footprint at the half-to-full handoff and swapped
+        # the 64 GB Mac; with it, 14 GB resident. The pipeline sets MLX's cache limit to 0.
+        self._pipe = lip_dub_pipeline(LipDubPipeline)(
+            self._model_dir,
+            lora_paths=[(self._lora_path, IC_LORA_STRENGTH)],
+            gemma_model_id=text_encoder,
+            low_memory=True,
+            low_ram_streaming=True,
+        )
+        self._cache_limit = 0
+        self._duty = None
+        duty = int(self._desktop.get("gpu_duty_pct", 100)) if self._desktop else 100
+        if duty < 100:
+            from ltx_core_mlx.model.transformer import model as dit
+
+            self._duty = DutyCycle(dit._mx_eval, duty)
+            dit._mx_eval = self._duty
+        self._pipe.verbose = True
+        self._prompts = OrderedDict()
+        self._prompt_bytes = 0
+        self.versions = {
+            "ltx-pipelines-mlx": _version_of("ltx-pipelines-mlx"),
+            "ltx-core-mlx": _version_of("ltx-core-mlx"),
+            "mlx": mx.__version__,
+            "mlx-lm": _version_of("mlx-lm"),
+            "av": _version_of("av"),
+        }
+
+    def _marks(self, progress, peaks: dict, job, refine_steps: int):
+        def entered(stage):
+            if stage == 1:
+                peaks["encoding"] = self._close("encoding")
+                progress.enter("denoising", job.steps)
+            elif stage == 2:
+                peaks["denoising"] = self._close("denoising")
+                progress.enter("refining", refine_steps)
+            else:
+                raise RuntimeError(f"the lip-dub pipeline started a pass marked {stage!r}")
+            return StepReport(self._mx, progress, self._duty).bind()
+
+        return entered
+
+    def _check_latent(self, job, latent, frame_rate: float) -> None:
+        frames = (int(latent.shape[2]) - 1) * 8 + 1
+        size = (int(latent.shape[4]) * 32, int(latent.shape[3]) * 32)
+        if (frames, size) != (job.num_frames, (job.width, job.height)) or abs(
+            frame_rate - job.fps
+        ) > 1e-6:
+            raise RuntimeError(
+                f"ltx-2-mlx made {frames} frames at {size[0]}x{size[1]} and {frame_rate} fps "
+                f"from the reference, but the server settled {job.num_frames} frames at "
+                f"{job.width}x{job.height} and {job.fps} fps; the two probes of the reference "
+                "must agree"
+            )
+
+    def generate(self, job, progress) -> tuple:
+        pipe = self._pipe
+        if job.reference_path is None or job.reference_strength is None:
+            raise RuntimeError(
+                "a lip-dub request needs reference_path and reference_strength; the server "
+                "sends both for a lip-dub model"
+            )
+        peaks: dict = {}
+        refine_steps = job.refine_steps if job.refine_steps is not None else DEFAULT_REFINE_STEPS
+        if self._duty is not None:
+            self._duty.reset()
+        self._release()
+        pipe.marks = self._marks(progress, peaks, job, refine_steps)
+        try:
+            progress.enter("encoding")
+            video, audio, frame_rate = pipe.generate_lipdub(
+                prompt=job.prompt,
+                reference_video_path=job.reference_path,
+                height=job.height,
+                width=job.width,
+                reference_strength=float(job.reference_strength),
+                seed=job.seed,
+                stage1_steps=job.steps,
+                stage2_steps=refine_steps,
+            )
+            self._check_latent(job, video, frame_rate)
+            self._mx.eval(video, audio)
+            pipe.dit = None
+            pipe.upsampler = None
+            pipe._loaded = False
+            peaks["refining"] = self._close("refining")
+            progress.enter("decoding")
+            frames = self._decode(job, video)
+            del video
+            peaks["decoding"] = self._close("decoding")
+            progress.enter("audio_decoding")
+            pcm, channels = self._decode_audio(audio)
+            peaks["audio_decoding"] = self._close("audio_decoding")
+            del audio
+        finally:
+            pipe.marks = None
+            self._unload()
+        clip = videocore.Clip(
+            job.width, job.height, job.fps, iter(frames), len(frames),
+            pcm=pcm, channels=channels, sample_rate=AUDIO_SAMPLE_RATE, rate=job.frame_rate,
+        )
+        return clip, peaks, {
+            "prompt_cache": None,
+            "soundtrack": None,
+            "lora_strength": IC_LORA_STRENGTH,
+            "audio_level_dbfs": level_dbfs(pcm),
+            "sampling": {
+                "passes": [
+                    {"size": "half", "steps": job.steps,
+                     "sampler": "euler, the LTX-2.3 distilled sigma schedule, CFG 1, the "
+                                "IC-LoRA fused, the reference video and its sound in context"},
+                    {"size": "full", "steps": refine_steps,
+                     "sampler": "euler, the LTX-2.3 stage-2 distilled sigmas, CFG 1, the "
+                                "IC-LoRA fused, the half-size pass's audio frozen",
+                     "upscaler": "spatial_upscaler_x2_v1_1"},
+                ],
+            },
+            "quantization": {
+                "text_encoder": "Gemma 3 12B, MLX 4-bit",
+                "transformer": "MLX int8 (group size 64), bfloat16 activations, streamed "
+                               "block by block",
+            },
+            "desktop": None if self._desktop is None else {
+                **self._desktop,
+                "low_ram": True,
+                "environment": {name: os.environ.get(name) for name in DESKTOP_ENVIRONMENT},
+                "mlx_cache_limit_bytes": self._cache_limit,
+                "synced_s": None if self._duty is None else round(self._duty.busy_s, 2),
+                "paused_s": None if self._duty is None else round(self._duty.paused_s, 2),
+                "passes": None,
+            },
+        }
+
+
+def engine_for(request: dict):
+    """The engine a load request names: the distilled pipeline unless it says lip-dub."""
+    pipeline = require(request, "pipeline", str)
+    if pipeline == LIP_DUB:
+        return LipDubEngine(request)
+    if pipeline != "distilled":
+        raise RuntimeError(f"ltx-2-mlx runs the distilled and lip-dub pipelines, not {pipeline!r}")
+    return LtxMlxEngine(request)
+
+
 if __name__ == "__main__":
-    sys.exit(videocore.Worker("video", {LtxMlxEngine.name: LtxMlxEngine}).serve())
+    sys.exit(videocore.Worker("video", {LtxMlxEngine.name: engine_for}).serve())

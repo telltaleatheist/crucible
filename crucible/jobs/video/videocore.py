@@ -44,9 +44,20 @@ SPANS: tuple[tuple[str, float], ...] = (
 # The Mac's arm (ltx2mlx_worker.py): the text encoder and connector are one stage, the start
 # picture is encoded inside denoising, and a full-size refining pass follows the half-size one.
 # A supplied soundtrack is encoded in its own stage after the text, and has no audio decoding.
+# A lip-dub job's encoding stage also encodes its reference's sound and loads the transformer
+# and the IC-LoRA, so it is the same spans without audio_encoding.
 TWO_PASS_SPANS: tuple[tuple[str, float], ...] = (
     ("encoding", 0.06),
     ("audio_encoding", 0.02),
+    ("denoising", 0.30),
+    ("refining", 0.40),
+    ("decoding", 0.12),
+    ("audio_decoding", 0.03),
+    ("muxing", 0.07),
+)
+
+LIP_DUB_SPANS: tuple[tuple[str, float], ...] = (
+    ("encoding", 0.08),
     ("denoising", 0.30),
     ("refining", 0.40),
     ("decoding", 0.12),
@@ -148,13 +159,18 @@ class Job:
         self.width = required("width", int)
         self.height = required("height", int)
         self.num_frames = required("num_frames", int)
-        self.fps = required("fps", int)
+        # A lip-dub clip has its reference's rate, which can be fractional; `frame_rate` is
+        # then that rate exactly (30000/1001), for the mux.
+        self.fps = required("fps", (int, float))
+        self.frame_rate = nullable("frame_rate", str)
         self.seed = required("seed", int)
         self.steps = required("steps", int)
         self.refine_steps = nullable("refine_steps", int)
         self.audio = required("audio", bool)
         self.image_path = nullable("image_path", str)
         self.soundtrack_path = nullable("soundtrack_path", str)
+        self.reference_path = nullable("reference_path", str)
+        self.reference_strength = nullable("reference_strength", (int, float))
         self.output_path = required("output_path", str)
         self.ffmpeg = required("ffmpeg", str)
         self.revision = required("revision", str)
@@ -173,14 +189,17 @@ class Clip:
     """What an engine hands back: raw frames and, when asked for, 16-bit PCM.
 
     `frames` yields each frame as width*height*3 bytes of RGB; `pcm` is
-    interleaved little-endian int16 with `channels` channels at `sample_rate`.
+    interleaved little-endian int16 with `channels` channels at `sample_rate`. `rate` is the
+    exact frame rate as ffmpeg writes it (30000/1001) when `fps` is not a whole number.
     """
 
-    def __init__(self, width: int, height: int, fps: int, frames, count: int,
-                 pcm: bytes | None = None, channels: int = 0, sample_rate: int = 0) -> None:
+    def __init__(self, width: int, height: int, fps, frames, count: int,
+                 pcm: bytes | None = None, channels: int = 0, sample_rate: int = 0,
+                 rate: str | None = None) -> None:
         self.width = width
         self.height = height
         self.fps = fps
+        self.rate = rate if rate is not None else str(fps)
         self.frames = frames
         self.count = count
         self.pcm = pcm
@@ -255,7 +274,7 @@ def mux_command(ffmpeg: str, encoder: str, clip: Clip, wav_path, output_path: st
     command = [
         ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
         "-f", "rawvideo", "-pix_fmt", "rgb24",
-        "-s", f"{clip.width}x{clip.height}", "-framerate", str(clip.fps),
+        "-s", f"{clip.width}x{clip.height}", "-framerate", clip.rate,
         "-i", "pipe:0",
     ]
     if wav_path is not None:

@@ -109,6 +109,11 @@ IMAGE_EXAMPLE = (
     "A lighthouse on a basalt cliff at dusk, warm light in the lantern room, long "
     "exposure sea, 35 mm photograph"
 )
+LIP_DUB_EXAMPLE = (
+    'A man in glasses sits in a leather chair and says to the camera, warmly: "Thanks for '
+    'watching, see you next week."'
+)
+
 VIDEO_EXAMPLE = (
     "A slow dolly shot along a rain-soaked neon street at night, reflections rippling in "
     "the puddles, a tram bell rings in the distance and rain patters on awnings"
@@ -168,6 +173,14 @@ def image_facts(manifest: Any, spec: Any) -> dict[str, Any]:
 
 
 def video_fields(manifest: Any, spec: Any) -> list[dict[str, Any]]:
+    if spec.lip_dub:
+        # Listed for what it takes; it cannot be made here (see `_standing`).
+        return [
+            field("prompt", "Prompt", TEXT, required=True, placeholder=LIP_DUB_EXAMPLE),
+            *side_fields(spec.default_width, spec.default_height, spec.min_side,
+                         spec.max_side, spec.size_multiple),
+            seed_field(),
+        ]
     longest = math.floor((spec.max_frames - 1) / max(spec.fps) * 10) / 10
     fields = [
         field("prompt", "Prompt", TEXT, required=True, placeholder=VIDEO_EXAMPLE),
@@ -338,6 +351,12 @@ def _standing(family: Family, manifest: Any, here: Here) -> tuple[str, str | Non
     kind = here.backend.kind
     if not manifest.supports(kind):
         return UNAVAILABLE, _no_build(manifest, kind), None
+    if getattr(manifest, "lip_dub", False):
+        return UNAVAILABLE, (
+            f"{manifest.display} re-makes a reference video, and the playground has no way "
+            "to send one yet; submit a video job with the reference as its input "
+            "(docs/VIDEO.md, \"Lip-dub\")"
+        ), None
     plugin = here.registry.get(family.job_type)
     subject = here.subjects.get(manifest.id)
     weights_missing = subject is None or subject.installed() is None

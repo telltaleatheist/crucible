@@ -45,6 +45,7 @@ What each model's trainers and users say it expects, every claim cited and marke
 | Qwen-Image 2.1: how to prompt it | `qwen-image-2.1` | [/v1/prompting/qwen-image-2.1.md](/v1/prompting/qwen-image-2.1.md) |
 | DreamShaper XL Lightning: how to prompt it | `dreamshaper-xl-lightning` | [/v1/prompting/dreamshaper-xl-lightning.md](/v1/prompting/dreamshaper-xl-lightning.md) |
 | LTX-2.5 Distilled: how to prompt it | `ltx-2.5-distilled` | [/v1/prompting/ltx-2.5-distilled.md](/v1/prompting/ltx-2.5-distilled.md) |
+| LTX-2.3 Dub-It: how to prompt it | `ltx-2.3-dubit` | [/v1/prompting/ltx-2.3-dubit.md](/v1/prompting/ltx-2.3-dubit.md) |
 | Higgs TTS v3: how to feed it text | every voice it serves | [/v1/prompting/higgs-v3.md](/v1/prompting/higgs-v3.md) |
 | Qwen 3.5 (0.8B, 2B, 4B, 4B 8-bit, 9B, 9B with vision): how to prompt it | `qwen3.5-0.8b`, `qwen3.5-2b`, `qwen3.5-4b`, `qwen3.5-4b-8bit`, `qwen3.5-9b`, `qwen3.5-9b-vl` | [/v1/prompting/qwen3.5.md](/v1/prompting/qwen3.5.md) |
 | Qwen 3.8 27B (4-bit, 4-bit with vision, 8-bit): how to prompt it | `qwen3.8-27b-4bit`, `qwen3.8-27b-4bit-vl`, `qwen3.8-27b-8bit` | [/v1/prompting/qwen3.8-27b.md](/v1/prompting/qwen3.8-27b.md) |
@@ -173,7 +174,7 @@ Job types are submitted with `POST /v1/jobs` (`{"type", "model", "params", "inpu
 | `segment` | Makes a mask from a picture: the main subject by itself (`birefnet`, background removal), or the object under your points or inside your box (`sam2.1-hiera-large`). |
 | `unload-segment` | Takes the resident segmenter off the card now, whichever job put it there (segment or load-segment). |
 | `load-segment` | Puts a segment model on the card and leaves it there, so the first job that uses it starts at once. |
-| `video` | Makes a video clip with its own sound from a prompt (text-to-video), or brings a start picture to life (image-to-video), with LTX-2.5; on a Mac also makes the picture to a supplied soundtrack (audio-to-video), lips in sync. |
+| `video` | Makes a video clip with its own sound from a prompt (text-to-video), or brings a start picture to life (image-to-video), with LTX-2.5; on a Mac also makes the picture to a supplied soundtrack (audio-to-video), lips in sync, or (`ltx-2.3-dubit`) re-makes a reference video so its speaker says a new line (lip-dub). |
 | `unload-video` | Takes the resident video generator off the card now, whichever job put it there (video or load-video). |
 | `load-video` | Puts a video model on the card and leaves it there, so the first job that uses it starts at once. |
 | `score` | Transcribes a recorded song into a YuE2-native ABC score with SheetSage2: the melodies (and, with `keep_harmony`, the chords), YuE2's section labels, and the form YuE2 plays an instrumental cover from. |
@@ -2390,11 +2391,11 @@ Puts a segment model on the card and leaves it there, so the first job that uses
 
 ### `video`
 
-Makes a video clip with its own sound from a prompt (text-to-video), or brings a start picture to life (image-to-video), with LTX-2.5; on a Mac also makes the picture to a supplied soundtrack (audio-to-video), lips in sync.
+Makes a video clip with its own sound from a prompt (text-to-video), or brings a start picture to life (image-to-video), with LTX-2.5; on a Mac also makes the picture to a supplied soundtrack (audio-to-video), lips in sync, or (`ltx-2.3-dubit`) re-makes a reference video so its speaker says a new line (lip-dub).
 
-*Model:* A video model id (GET /v1/catalog): `ltx-2.5-distilled`.
+*Model:* A video model id (GET /v1/catalog): `ltx-2.5-distilled`, or `ltx-2.3-dubit` (lip-dub, the Mac only).
 
-**How to prompt it:** [LTX-2.5 Distilled: how to prompt it](/v1/prompting/ltx-2.5-distilled.md).
+**How to prompt it:** [LTX-2.5 Distilled: how to prompt it](/v1/prompting/ltx-2.5-distilled.md); [LTX-2.3 Dub-It: how to prompt it](/v1/prompting/ltx-2.3-dubit.md).
 
 **Params**
 
@@ -2409,15 +2410,17 @@ Makes a video clip with its own sound from a prompt (text-to-video), or brings a
 | `fps` | integer or null | no | `null` | Frames per second, 24 or 25 for ltx-2.5-distilled; null is the model's default (24). |
 | `seed` | integer or null | no | `null` | 0 to 4294967295; null lets the server choose one and report it. A seed reproduces a clip on the machine that made it. |
 | `steps` | integer or null | no | `null` | Must equal the model's fixed step count (8 for the distilled checkpoint) or be left out; any other value is refused. |
-| `audio` | boolean | no | `True` | false makes a silent clip: the sound is generated with the picture but not decoded. Refused with a soundtrack input, which is the clip's sound. |
+| `audio` | boolean | no | `True` | false makes a silent clip: the sound is generated with the picture but not decoded. Refused with a soundtrack input, which is the clip's sound, and by a lip-dub model, whose sound is the new line. |
+| `reference_strength` | number or null | no | `null` | Lip-dub models only (ltx-2.3-dubit): how strongly the reference video holds the picture outside the mouth, above 0 and at most 1; null is 1.0, Lightricks' recipe. Refused by every other model. |
 
-*Inputs:* Told apart by their bytes, names free: at most one PNG, JPEG or WebP picture (the first frame, cropped to the clip's shape and resized) and at most one WAV, FLAC, MP3 or Ogg soundtrack (the clip's sound, held fixed while the picture is made to it; the Mac only). None for text-to-video.
+*Inputs:* Told apart by their bytes, names free: at most one PNG, JPEG or WebP picture (the first frame, cropped to the clip's shape and resized) and at most one WAV, FLAC, MP3 or Ogg soundtrack (the clip's sound, held fixed while the picture is made to it; the Mac only). None for text-to-video. A lip-dub model takes exactly one MP4, MOV, WebM or Matroska reference video, with its sound.
 
 *Returns:* `video.mp4`: H.264 (yuv420p) with AAC stereo at 48 kHz, faststart. The `done` event gives `video`, every effective parameter (mode, size, `num_frames`, `fps`, `duration_s`, seed, …) plus timings and GPU-busy figures, `soundtrack` (what of a supplied soundtrack the clip used: `total_s`, `used_s`; null without one), and `resident` (what is on the card as the job ends: the model while a session, a claim, a chat or a waiting call holds the card, otherwise null, because the server took it off first and said so in a `note`).
 
 - Send `width` and `height` together or neither (default 1280x704); `duration_s` or `num_frames`, not both. `num_frames` is 8k+1 (`video_frames_not_supported`).
 - Every limit is refused by name before anything loads: `video_size_not_supported` (multiples of 32, 64 on a Mac; sides 256 to 1280), `video_too_large`, `video_too_long`, and `video_param_unsupported` (`negative_prompt`, `steps` other than 8, `fps` other than 24 or 25). docs/VIDEO.md has the per-backend figures.
 - With a soundtrack and no `duration_s` or `num_frames` the clip is as long as the soundtrack, rounded down to the frame grid; a shorter clip uses its first part. Refused by name: `audio_to_video_unsupported` (the PC's arm), `video_soundtrack_too_short` (a clip longer than its soundtrack), `video_param_unsupported` (`audio` false with a soundtrack), `invalid_inputs` (two pictures, two soundtracks, or anything else).
+- Lip-dub (`ltx-2.3-dubit`): the clip is the reference's frame count rounded down to 8k+1 at its own frame rate, at most 193 frames; refused by name: `video_reference_too_long` (never cut), `video_reference_too_short`, `video_reference_no_audio`, `video_reference_no_video`, `video_param_unsupported` (`duration_s`, `num_frames`, `fps`, `audio` false), and `backend_unsupported` on the PC. `done.video.reference` and `lora` say what it kept and ran with.
 - The model repo is gated: `409 model_gated` says how to accept the licence.
 - The model comes off the card when the job ends unless something holds it. To run several jobs without a reload between them, open a queue session first (POST /v1/queue/sessions, docs/QUEUE.md) and close it at the end.
 - A model or env not installed yet is installed on submit where the server allows it: the submit answers 409 `installing`; submit again when it is done.
@@ -3527,6 +3530,8 @@ The states after which a job or a task never changes again.
 | `loc` | array of string or integer | yes | — |  |
 | `msg` | string | yes | — |  |
 | `type` | string | yes | — |  |
+| `input` | Input | no | — |  |
+| `ctx` | object | no | — |  |
 
 ### `VoiceInfo`
 

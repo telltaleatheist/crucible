@@ -77,7 +77,10 @@ const DONE_CLIP = {
   audio_seconds: 3.04,
   audio_sample_rate: 48000,
   audio_channels: 2,
+  frame_rate: null,
   soundtrack: null,
+  reference: null,
+  lora: null,
   artifact: 'video.mp4',
   bytes: 2_900_000,
   encoder: 'libopenh264',
@@ -242,4 +245,60 @@ test('readVideoResult refuses a missing video block and a mode it does not know'
     () => readVideoResult({ artifacts: [], extra: { video: { ...DONE_CLIP, mode: 'video-to-video' } } }),
     CrucibleProtocolError,
   );
+});
+
+test('a reference video goes as the one input, with its strength', async () => {
+  answer(200, { job_id: 'job-dub-1' });
+  await client().video({
+    model: 'ltx-2.3-dubit',
+    prompt: 'He says to the camera: "See you next week."',
+    reference: { blobId: 'talk-1' },
+    referenceName: 'talk.mp4',
+    referenceStrength: 0.8,
+  });
+  const sent = JSON.parse(lastBody);
+  assert.deepEqual(sent.params, {
+    prompt: 'He says to the camera: "See you next week."',
+    reference_strength: 0.8,
+  });
+  assert.deepEqual(sent.inputs, { 'talk.mp4': { blob_id: 'talk-1' } });
+  await assert.rejects(
+    client().video({ model: 'ltx-2.3-dubit', prompt: 'x', reference: { blobId: 'a' }, image: { blobId: 'b' } }),
+    CrucibleConfigError,
+  );
+});
+
+test('readVideoResult reads a lip-dub clip: its reference and its IC-LoRA', () => {
+  const dubbed = {
+    ...DONE_CLIP,
+    model: 'ltx-2.3-dubit',
+    transformer: null,
+    backend: 'mlx-darwin',
+    engine: 'ltx-2-mlx',
+    mode: 'lip-dub',
+    input: null,
+    fps: 29.97002997002997,
+    frame_rate: '30000/1001',
+    num_frames: 193,
+    reference: {
+      input: 'talk.mp4', format: 'MP4', width: 1920, height: 1080, duration_s: 6.54,
+      frame_rate: '30000/1001', fps: 29.97, frames: 195, frames_used: 193, frames_unused: 2,
+      strength: 1.0, audio_level_dbfs: { mean: -28.4, peak: -10.9 },
+    },
+    lora: {
+      hf_repo: 'Lightricks/LTX-2.3-22b-IC-LoRA-DubIt',
+      revision: '1456334c3d69924de5083e553733b108ed1147f2',
+      file: 'ltx-2.3-22b-ic-lora-dubit-0.9.safetensors',
+      sha256: 'fc415b12cb639e78511bc264f85080c2f7b188e334c1d9fade76b310e2bc419c',
+      strength: 1.0,
+    },
+    prompt_cache: null,
+  };
+  const result = readVideoResult({ artifacts: ['video.mp4'], extra: { video: dubbed } });
+  assert.equal(result.mode, 'lip-dub');
+  assert.equal(result.frameRate, '30000/1001');
+  assert.equal(result.reference?.framesUsed, 193);
+  assert.deepEqual(result.reference?.audioLevelDbfs, { mean: -28.4, peak: -10.9 });
+  assert.equal(result.lora?.file, 'ltx-2.3-22b-ic-lora-dubit-0.9.safetensors');
+  assert.equal(readVideoResult({ artifacts: [], extra: { video: DONE_CLIP } }).reference, null);
 });

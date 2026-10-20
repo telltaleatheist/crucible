@@ -10,6 +10,7 @@ what comes back, and how to write a prompt.
 | model | makes | class | PC (cuda-linux) | Mac (mlx-darwin) | longest | licence |
 | --- | --- | --- | --- | --- | --- | --- |
 | `ltx-2.5-distilled` | video with synchronized sound (speech, effects, ambience, music) from a prompt, or from a prompt and a start picture; on the Mac also a picture made to a supplied soundtrack | `video` | yes (24 GB card) | yes (48 GB or more) | 6.04 s at 1280x704 from text on both; from a picture 3.04 s on the PC, 5.04 s on the Mac | LTX-2.x Community License (gated) |
+| `ltx-2.3-dubit` | a lip-dub (beta): a video of one person talking, re-made so they say a new line in a voice like theirs; everything but the mouth kept | not a verb's pick (it needs a reference) | no (refused `backend_unsupported`) | yes (64 GB) | 193 frames at 768x448 (6.44 s at 29.97 fps) | LTX-2 Community License; the LoRA gated |
 
 `GET /v1/capability` has a `video` row: "can make video, using ltx-2.5-distilled" on a CUDA card
 with room for its largest stage and on a Mac with 48 GB or more of memory, and "cannot make
@@ -217,6 +218,77 @@ and a full-size one (3 steps, Euler, after the 2x upscale), `encoder` `h264_vide
 `conditioning`, and `memory_bytes_estimate` 29,000,000,000. Its progress runs `encoding`,
 `denoising` 1 to 8, `refining` 1 to 3, `decoding`, `audio_decoding`, `muxing`; a cancel lands
 between steps of either pass.
+
+## Lip-dub: `ltx-2.3-dubit` (Mac, beta)
+
+Lightricks' Dub-It IC-LoRA on LTX-2.3. Send a video of one person talking (with its sound) and a
+prompt that quotes the new line; the clip is the same video with the person saying that line,
+in a voice the model makes to sound like theirs from the reference's own sound. It takes no
+audio of the line, it does not translate (write the line in the language it is to be spoken
+in), and Lightricks has validated English, French, Spanish, German and Russian. How to word the
+prompt: `GET /v1/prompting/ltx-2.3-dubit.md`.
+
+```bash
+crucible models pull ltx-2.3-dubit     # the Mac only; about 41 GB
+```
+
+The pull fetches three repos: the LTX-2.3 MLX int8 pack (`dgrauet/ltx-2.3-mlx-q8`, only the
+files the lip-dub pipeline reads), the IC-LoRA (`Lightricks/LTX-2.3-22b-IC-LoRA-DubIt`, gated
+with automatic approval: accept it at its page and give the server an HF token, as above) and
+the Gemma 3 12B 4-bit text encoder (`mlx-community/gemma-3-12b-it-4bit`). The last two land in
+`ic-lora/` and `text-encoder/` beside the pack and are checked by sha256; a file already in
+place with the pinned hash is kept, not fetched again.
+
+```json
+{"type": "video", "model": "ltx-2.3-dubit",
+ "params": {"prompt": "A man in glasses sits in a leather chair and speaks to the camera in a warm, relaxed voice: \"Hey, if you like what I do, follow me on Patreon.\"",
+            "seed": 42},
+ "inputs": {"talk.mp4": {"blob_id": "…"}}}
+```
+
+- **The one input** is the reference: an MP4, MOV, WebM or Matroska file, told apart by its
+  bytes (names are free). Anything else beside it, or no reference at all, is refused
+  `invalid_inputs`. A reference with no picture is refused `video_reference_no_video`, one with
+  no sound `video_reference_no_audio` (the voice comes from it). `ltx-2.5-distilled` refuses a
+  reference video `invalid_inputs`.
+- **The length is the reference's**: its frame count (as ffprobe reads it) rounded down to 8k+1,
+  at its own frame rate, kept exactly (29.97 stays 30000/1001 in the MP4). At most **193
+  frames** (6.44 s at 29.97 fps, 8.04 s at 24), the length measured; a longer reference is
+  refused `video_reference_too_long` naming how long it may be. It is never cut: trim it to the
+  part you want dubbed. Under 9 frames is `video_reference_too_short`. `duration_s`,
+  `num_frames`, `fps` and `audio: false` are refused `video_param_unsupported`.
+- **The frame** is `width`/`height` in multiples of 64 up to 768 a side and 344,064 pixels (the
+  measured 768x448); left out, it is the largest frame within 5% of the reference's shape:
+  768x448 for 16:9, 448x768 for 9:16, 576x448 for 4:3, 576x576 square.
+- **`reference_strength`**, above 0 and at most 1, default 1.0 (Lightricks' recipe): how strongly
+  the reference holds the picture. Every other model refuses it.
+- **Steps are fixed**: 8 at half size, then 3 at full size, Euler, CFG 1 (so no
+  `negative_prompt`). `steps` other than 8 is refused.
+- The transformer always streams from disk block by block, whatever `[video_desktop] low_ram`
+  says: unstreamed, the measuring run reached a 67 GB footprint and swapped the 64 GB Mac.
+  The rest of `[video_desktop]` (the duty cycle, the MLX buffer limits) applies as for
+  `ltx-2.5-distilled`; its tiling does not (the lip-dub passes are not tiled). It declares
+  35 GB on top of the 16 GB desktop allowance.
+
+`done.video` has `mode` `lip-dub`, `frame_rate` (`"30000/1001"`), `fps` as a number, `transformer`
+null, and two blocks the other modes have as null:
+
+```json
+"reference": {"input": "talk.mp4", "format": "MP4", "width": 1920, "height": 1080,
+              "duration_s": 6.54, "frame_rate": "30000/1001", "fps": 29.97, "frames": 195,
+              "frames_used": 193, "frames_unused": 2, "strength": 1.0,
+              "audio_level_dbfs": {"mean": -28.4, "peak": -10.9}},
+"lora": {"hf_repo": "Lightricks/LTX-2.3-22b-IC-LoRA-DubIt", "revision": "1456334c…",
+         "file": "ltx-2.3-22b-ic-lora-dubit-0.9.safetensors", "sha256": "fc415b12…",
+         "strength": 1.0}
+```
+
+The sound is the model's, decoded through the audio VAE and vocoder at 48 kHz stereo, and its
+loudness follows the reference recording (a raw microphone track at −28 dB gives a clip at
+−28 dB). It is not normalized; `audio_level_dbfs` says how loud it came out. Progress runs
+`encoding` (the prompt, the reference's sound, the transformer and the LoRA), `denoising` 1 to 8,
+`refining` 1 to 3, `decoding`, `audio_decoding`, `muxing`, with a peak for each in
+`stage_peak_bytes`; a cancel lands between steps.
 
 ## Many clips in a row
 

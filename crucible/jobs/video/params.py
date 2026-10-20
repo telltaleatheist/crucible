@@ -3,12 +3,15 @@
 Every refusal here happens before a worker starts: at submit for what the
 params alone decide, and in `run` (before the session) for what needs the
 inputs: the image-to-video token ceiling, whether the arm takes a soundtrack,
-and a clip's length against the soundtrack it is made to.
+and a clip's length against the soundtrack it is made to. A lip-dub model's clip is
+its reference video's length and rate, so it is settled from the reference's
+measured facts (`settle_lip_dub`); at submit only its params are checked.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -20,6 +23,7 @@ from ...videomodels import (
     IMAGE_AUDIO_TO_VIDEO,
     IMAGE_TO_VIDEO,
     LATENT_SCALE,
+    LIP_DUB_MODE,
     PICTURE_MODES,
     SOUNDTRACK_MODES,
     TEXT_TO_VIDEO,
@@ -30,6 +34,13 @@ from ...videomodels import (
 
 MAX_SEED = 2**32 - 1
 
+# The IC-LoRA reference's conditioning strength when a lip-dub job sends none: the value
+# Lightricks' recipe and the port's CLI run at (all of the reference kept outside the lips).
+LIP_DUB_REFERENCE_STRENGTH = 1.0
+
+# How far a default lip-dub frame's shape may be from its reference's before a smaller
+# frame of a nearer shape is preferred.
+REFERENCE_SHAPE_TOLERANCE = 0.05
 
 
 class VideoParams(BaseModel):
@@ -101,7 +112,15 @@ class VideoParams(BaseModel):
         default=True,
         description="false makes a silent clip: the sound is generated with the "
         "picture but not decoded. Refused with a soundtrack input, which is the "
-        "clip's sound.",
+        "clip's sound, and by a lip-dub model, whose sound is the new line.",
+    )
+    reference_strength: float | None = Field(
+        default=None,
+        gt=0.0,
+        le=1.0,
+        description="Lip-dub models only (ltx-2.3-dubit): how strongly the reference "
+        "video holds the picture outside the mouth, above 0 and at most 1; null is 1.0, "
+        "Lightricks' recipe. Refused by every other model.",
     )
 
     @field_validator("prompt")
@@ -131,15 +150,21 @@ class VideoParams(BaseModel):
 
 @dataclass(frozen=True)
 class Settled:
+    """`fps` is a whole number for a clip the model times itself; a lip-dub clip has its
+    reference's rate, which can be fractional (29.97 is 30000/1001), so it also carries
+    that rate exactly as `frame_rate` for the mux."""
+
     mode: str
     width: int
     height: int
     num_frames: int
-    fps: int
+    fps: int | float
     steps: int
     seed: int
     video_tokens: int
     soundtrack_s: float | None = None
+    frame_rate: str | None = None
+    reference_strength: float | None = None
 
     @property
     def duration_s(self) -> float:
@@ -151,6 +176,14 @@ def _refusal(code: str, message: str, model: str, spec: VideoBackendSpec, **extr
 
 
 def _refuse_untaken(params: VideoParams, model: str, spec: VideoBackendSpec) -> None:
+    if params.reference_strength is not None and not spec.lip_dub:
+        raise _refusal(
+            "video_param_unsupported",
+            f"{model} does not take 'reference_strength': it is the strength of a lip-dub "
+            "model's reference video, and this model makes a clip from a prompt. Leave it "
+            "out, or send the job to a lip-dub model (ltx-2.3-dubit, on a Mac)",
+            model, spec, param="reference_strength",
+        )
     if params.negative_prompt is not None:
         why = spec.why_not("negative_prompt") or "this arm has no negative prompt"
         raise _refusal(
@@ -392,16 +425,141 @@ def settle(
     return settled
 
 
+def snap_frames(frames: int) -> int:
+    """A reference's frame count rounded down onto the 8k+1 grid: the frames a lip-dub clip
+    keeps (ltx_pipelines_mlx/lipdub.py, _snap_frames_to_8k1). Below 9 there is no clip."""
+    return max(0, (frames - 1) // FRAME_STRIDE) * FRAME_STRIDE + 1
+
+
+def refuse_lip_dub_params(params: VideoParams, model: str, spec: VideoBackendSpec) -> None:
+    """What a lip-dub job's params alone decide, at submit: the length, rate and sound are
+    the reference's, so asking for them is refused rather than ignored."""
+    _refuse_untaken(params, model, spec)
+    reference = "the reference video"
+    asked = {
+        "duration_s": (params.duration_s, f"the clip is as long as {reference}"),
+        "num_frames": (params.num_frames, f"the clip is as long as {reference}"),
+        "fps": (params.fps, f"the clip keeps {reference}'s frame rate"),
+    }
+    for name, (value, why) in asked.items():
+        if value is not None:
+            raise _refusal(
+                "video_param_unsupported",
+                f"{model} does not take '{name}': {why} (its frame count rounded down "
+                f"onto the {FRAME_STRIDE}k+1 grid). Trim the reference to the part you "
+                f"want and leave {name} out",
+                model, spec, param=name,
+            )
+    if not params.audio:
+        raise _refusal(
+            "video_param_unsupported",
+            f"audio false asks for a silent clip, but {model}'s clip is the new line spoken; "
+            "its sound is the point of it. Leave audio out",
+            model, spec, param="audio",
+        )
+    if params.width is not None and params.height is not None:
+        _refuse_size(params.width, params.height, model, spec)
+
+
+def reference_size(width: int, height: int, spec: VideoBackendSpec) -> tuple[int, int]:
+    """The default frame for a reference of width x height: on the block's grid and within
+    its pixel and side ceilings, the largest frame whose shape is within 5% of the
+    reference's, or failing any, the nearest shape (16:9 is 768x448 at the measured
+    ceiling, 9:16 is 448x768, 4:3 is 576x448)."""
+    aspect = width / height
+    sides = range(spec.min_side, spec.max_side + 1, spec.size_multiple)
+    frames = [
+        (across, down, abs((across / down) / aspect - 1.0))
+        for across in sides
+        for down in sides
+        if across * down <= spec.max_pixels
+    ]
+    close = [frame for frame in frames if frame[2] <= REFERENCE_SHAPE_TOLERANCE]
+    if close:
+        across, down, _ = max(close, key=lambda f: (f[0] * f[1], -f[2]))
+    else:
+        across, down, _ = min(frames, key=lambda f: (f[2], -f[0] * f[1]))
+    return across, down
+
+
+def settle_lip_dub(
+    params: VideoParams,
+    model: str,
+    spec: VideoBackendSpec,
+    seed: int,
+    *,
+    frames: int,
+    frame_rate: str,
+    width: int,
+    height: int,
+) -> Settled:
+    """The clip a lip-dub job makes from a reference of `frames` frames at `frame_rate`
+    (ffprobe's exact rate, 30000/1001 for 29.97) and width x height. The clip keeps every
+    frame of the reference it can (rounded down onto the grid), and a reference longer than
+    the block admits is refused, never cut."""
+    refuse_lip_dub_params(params, model, spec)
+    fps = float(Fraction(frame_rate))
+    if params.width is not None and params.height is not None:
+        size = (params.width, params.height)
+    else:
+        size = reference_size(width, height, spec)
+    _refuse_size(*size, model, spec)
+    kept = snap_frames(frames)
+    if kept < FRAME_STRIDE + 1:
+        raise _refusal(
+            "video_reference_too_short",
+            f"the reference video is {frames} frames ({frames / fps:.2f} s at {fps:.3g} fps); "
+            f"a clip is at least {FRAME_STRIDE + 1} frames. Send a longer reference",
+            model, spec, reference_frames=frames,
+        )
+    if kept > spec.max_frames:
+        longest = spec.max_frames / fps
+        raise _refusal(
+            "video_reference_too_long",
+            f"the reference video is {frames} frames ({frames / fps:.2f} s at {fps:.3g} fps), "
+            f"so the clip would be {kept} frames; {model} on {spec.backend} makes at most "
+            f"{spec.max_frames} frames ({longest:.2f} s at this reference's {fps:.3g} fps) "
+            f"because its memory ({spec.memory_basis}) was sized at that length. The clip "
+            f"is never cut short: trim the reference to {longest:.2f} s or less and send "
+            "the part you want dubbed",
+            model, spec, reference_frames=frames, num_frames=kept,
+            max_frames=spec.max_frames, max_seconds=round(longest, 3),
+        )
+    settled = Settled(
+        mode=LIP_DUB_MODE,
+        width=size[0],
+        height=size[1],
+        num_frames=kept,
+        fps=fps,
+        steps=spec.steps,
+        seed=seed,
+        video_tokens=video_tokens(size[0], size[1], kept),
+        frame_rate=frame_rate,
+        reference_strength=(
+            params.reference_strength
+            if params.reference_strength is not None
+            else LIP_DUB_REFERENCE_STRENGTH
+        ),
+    )
+    refuse_tokens(settled, model, spec)
+    return settled
+
+
 __all__ = [
     "AUDIO_TO_VIDEO",
     "IMAGE_AUDIO_TO_VIDEO",
     "IMAGE_TO_VIDEO",
+    "LIP_DUB_REFERENCE_STRENGTH",
     "MAX_SEED",
     "Settled",
     "TEXT_TO_VIDEO",
     "VideoParams",
     "longest_covered",
+    "reference_size",
+    "refuse_lip_dub_params",
     "refuse_mode",
     "refuse_tokens",
     "settle",
+    "settle_lip_dub",
+    "snap_frames",
 ]

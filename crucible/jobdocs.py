@@ -692,13 +692,16 @@ JOB_DOCS: dict[str, JobDoc] = {
     "video": JobDoc(
         summary="Makes a video clip with its own sound from a prompt (text-to-video), "
         "or brings a start picture to life (image-to-video), with LTX-2.5; on a Mac also "
-        "makes the picture to a supplied soundtrack (audio-to-video), lips in sync.",
-        model="A video model id (GET /v1/catalog): `ltx-2.5-distilled`.",
+        "makes the picture to a supplied soundtrack (audio-to-video), lips in sync, or "
+        "(`ltx-2.3-dubit`) re-makes a reference video so its speaker says a new line (lip-dub).",
+        model="A video model id (GET /v1/catalog): `ltx-2.5-distilled`, or `ltx-2.3-dubit` "
+        "(lip-dub, the Mac only).",
         params=VideoParams,
         inputs="Told apart by their bytes, names free: at most one PNG, JPEG or WebP "
         "picture (the first frame, cropped to the clip's shape and resized) and at most "
         "one WAV, FLAC, MP3 or Ogg soundtrack (the clip's sound, held fixed while the "
-        "picture is made to it; the Mac only). None for text-to-video.",
+        "picture is made to it; the Mac only). None for text-to-video. A lip-dub model "
+        "takes exactly one MP4, MOV, WebM or Matroska reference video, with its sound.",
         returns="`video.mp4`: H.264 (yuv420p) with AAC stereo at 48 kHz, faststart. "
         "The `done` event gives `video`, every effective parameter (mode, size, "
         "`num_frames`, `fps`, `duration_s`, seed, …) plus timings and GPU-busy "
@@ -730,6 +733,13 @@ JOB_DOCS: dict[str, JobDoc] = {
             "`video_soundtrack_too_short` (a clip longer than its soundtrack), "
             "`video_param_unsupported` (`audio` false with a soundtrack), `invalid_inputs` "
             "(two pictures, two soundtracks, or anything else).",
+            "Lip-dub (`ltx-2.3-dubit`): the clip is the reference's frame count rounded "
+            "down to 8k+1 at its own frame rate, at most 193 frames; refused by name: "
+            "`video_reference_too_long` (never cut), `video_reference_too_short`, "
+            "`video_reference_no_audio`, `video_reference_no_video`, "
+            "`video_param_unsupported` (`duration_s`, `num_frames`, `fps`, `audio` false), "
+            "and `backend_unsupported` on the PC. `done.video.reference` and `lora` say what "
+            "it kept and ran with.",
             "The model repo is gated: `409 model_gated` says how to accept the "
             "licence.",
             UNHELD_AFTER_THE_JOB,

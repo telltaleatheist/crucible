@@ -2592,6 +2592,8 @@ export interface SegmentResult {
  * What a `video` job makes: a clip with sound from `prompt`, or from `prompt` and a start `image`;
  * or, with a `soundtrack`, a picture made to that sound (lips in sync with speech), alone or from
  * a start `image`. The soundtrack is the clip's sound, held fixed; only the Mac's arm takes one.
+ * A lip-dub model (`ltx-2.3-dubit`, Mac only) takes a `reference` video instead and nothing else:
+ * the person in it says the line the prompt quotes, in a voice like theirs.
  */
 export interface VideoOptions {
   readonly model: string;
@@ -2619,6 +2621,44 @@ export interface VideoOptions {
    */
   readonly soundtrack?: JobInput | null;
   readonly soundtrackName?: string;
+  /**
+   * A lip-dub model's reference: an MP4, MOV, WebM or Matroska video of the person talking, with
+   * its sound. The clip is as long as it (rounded down to the frame grid) at its frame rate, so
+   * not with `durationS`, `numFrames`, `fps`, `image` or `soundtrack`.
+   */
+  readonly reference?: JobInput | null;
+  readonly referenceName?: string;
+  /** How strongly the reference holds the picture outside the mouth, above 0 and at most 1 (1). */
+  readonly referenceStrength?: number;
+}
+
+/** What a lip-dub clip kept of its reference video. */
+export interface VideoReference {
+  readonly input: string;
+  /** `MP4`, `MOV` or `WebM/Matroska`, as its bytes said. */
+  readonly format: string;
+  readonly width: number;
+  readonly height: number;
+  readonly durationS: number;
+  /** The exact rate the clip keeps, as ffprobe says it (`30000/1001`), and as a number. */
+  readonly frameRate: string;
+  readonly fps: number;
+  /** The reference's frames, the first `framesUsed` of which the clip is (the 8k+1 grid). */
+  readonly frames: number;
+  readonly framesUsed: number;
+  readonly framesUnused: number;
+  readonly strength: number;
+  /** The clip's sound level in dBFS (mean RMS, peak); it follows the reference recording's. */
+  readonly audioLevelDbfs: Readonly<Record<string, number | null>> | null;
+}
+
+/** The IC-LoRA a lip-dub clip ran with: its repo, revision, file, sha256 and strength. */
+export interface VideoLora {
+  readonly hfRepo: string;
+  readonly revision: string;
+  readonly file: string;
+  readonly sha256: string;
+  readonly strength: number | null;
 }
 
 /** What a clip did with a supplied soundtrack. */
@@ -2651,7 +2691,7 @@ export interface VideoResult {
   readonly backend: string;
   readonly engine: string;
   readonly dtype: string;
-  readonly mode: 'text-to-video' | 'image-to-video' | 'audio-to-video' | 'image-audio-to-video';
+  readonly mode: 'text-to-video' | 'image-to-video' | 'audio-to-video' | 'image-audio-to-video' | 'lip-dub';
   readonly prompt: string;
   /** The start picture's input name, for image-to-video; else null. */
   readonly input: string | null;
@@ -2659,6 +2699,8 @@ export interface VideoResult {
   readonly height: number;
   readonly numFrames: number;
   readonly fps: number;
+  /** A lip-dub clip's exact frame rate (`30000/1001`), its reference's; else null. */
+  readonly frameRate: string | null;
   readonly durationS: number;
   readonly videoTokens: number;
   readonly seed: number;
@@ -2671,6 +2713,9 @@ export interface VideoResult {
   readonly audioChannels: number | null;
   /** The supplied soundtrack, for audio-to-video; else null. */
   readonly soundtrack: VideoSoundtrack | null;
+  /** The reference video and the IC-LoRA, for a lip-dub clip; else null. */
+  readonly reference: VideoReference | null;
+  readonly lora: VideoLora | null;
   /** The artifact's name, `video.mp4`. */
   readonly artifact: string;
   readonly bytes: number | null;

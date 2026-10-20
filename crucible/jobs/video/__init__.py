@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import secrets
 import subprocess
 import uuid
@@ -9,7 +10,16 @@ from typing import Any, Callable, cast
 
 from pydantic import BaseModel, ConfigDict
 
-from ... import gpubusy, hosttools, jobenv, videodesktop, videoweights, weights, workers
+from ... import (
+    companionweights,
+    gpubusy,
+    hosttools,
+    jobenv,
+    videodesktop,
+    videoweights,
+    weights,
+    workers,
+)
 from ...backend import MLX_DARWIN
 from ...cardkinds import KIND_VIDEO
 from ...clock import utcnow
@@ -26,10 +36,13 @@ from ...residency import (
 )
 from ...videomodels import (
     AUDIO_TO_VIDEO,
+    IC_LORA,
     IMAGE_AUDIO_TO_VIDEO,
     IMAGE_TO_VIDEO,
+    LIP_DUB_MODE,
     LTX,
     LTX_2_MLX,
+    TEXT_ENCODER,
     TEXT_TO_VIDEO,
     VideoBackendSpec,
     VideoManifest,
@@ -48,7 +61,15 @@ from ..template import (
     run_model,
 )
 from ..unload import UnloadJobType
-from .params import MAX_SEED, Settled, VideoParams, refuse_mode, settle
+from .params import (
+    MAX_SEED,
+    Settled,
+    VideoParams,
+    refuse_lip_dub_params,
+    refuse_mode,
+    settle,
+    settle_lip_dub,
+)
 
 __all__ = [
     "JOB_TYPES",
@@ -92,6 +113,23 @@ AUDIO_MAGIC: tuple[tuple[bytes, int, str], ...] = (
 
 AUDIO_FORMATS = ("WAV", "FLAC", "MP3", "Ogg")
 
+# A lip-dub model's reference video. MP4 and modern QuickTime begin with an ftyp box (its
+# brand "qt  " says QuickTime); older QuickTime files begin with a moov, mdat or wide atom;
+# WebM and Matroska begin with the EBML header. An M4A is an ftyp file too: it is sniffed
+# as a reference and then refused by the probe for having no picture.
+CONTAINER_ATOMS: tuple[tuple[bytes, str], ...] = (
+    (b"moov", "MOV"),
+    (b"mdat", "MOV"),
+    (b"wide", "MOV"),
+)
+
+EBML_MAGIC = b"\x1a\x45\xdf\xa3"
+
+VIDEO_FORMATS = ("MP4", "MOV", "WebM/Matroska")
+
+# ftyp brands of still pictures (AVIF, HEIF), which are not videos.
+STILL_BRANDS = frozenset({b"avif", b"avis", b"heic", b"heix", b"mif1", b"msf1"})
+
 SNIFF_BYTES = 16
 
 MP4_MAGIC = (b"ftyp", 4)
@@ -99,6 +137,8 @@ MP4_MAGIC = (b"ftyp", 4)
 FFPROBE_WHY = "measures a soundtrack's length with ffprobe, which ships beside ffmpeg"
 
 SOUNDTRACK_PROBE_TIMEOUT_SECONDS = 120
+
+REFERENCE_WHY = "reads a lip-dub reference video's streams, frame count and rate with ffprobe"
 
 
 def worker_script(engine: str) -> Path:
@@ -159,24 +199,53 @@ class Soundtrack:
 
 
 @dataclass(frozen=True)
+class Reference:
+    """A lip-dub model's reference video: the person, the picture and the voice the clip
+    keeps. The numbers are None until it is probed, which happens only once the model has
+    said it takes one."""
+
+    name: str
+    path: Path
+    format: str
+    frames: int | None = None
+    frame_rate: str | None = None
+    width: int | None = None
+    height: int | None = None
+    seconds: float | None = None
+
+
+@dataclass(frozen=True)
 class ClipInputs:
     picture: Path | None
     soundtrack: Soundtrack | None
+    reference: Reference | None = None
 
     @property
     def mode(self) -> str:
+        if self.reference is not None:
+            return LIP_DUB_MODE
         if self.soundtrack is None:
             return TEXT_TO_VIDEO if self.picture is None else IMAGE_TO_VIDEO
         return AUDIO_TO_VIDEO if self.picture is None else IMAGE_AUDIO_TO_VIDEO
 
 
 def sniff(head: bytes) -> tuple[str, str] | None:
-    """("picture" or "soundtrack", the format) for an input's first bytes, or None.
+    """("picture", "soundtrack" or "reference", the format) for an input's first bytes, or
+    None.
 
     By content, never by name: a WAV is RIFF....WAVE (a WebP is RIFF....WEBP), and an MP3
     without an ID3 tag starts at a frame sync (eleven set bits) with a layer other than the
-    reserved 00, which a JPEG's FF D8 and an AAC ADTS header's layer 00 are not.
+    reserved 00, which a JPEG's FF D8 and an AAC ADTS header's layer 00 are not. A video
+    container is an ftyp box, an older QuickTime atom, or the EBML header.
     """
+    magic, at = MP4_MAGIC
+    if head[at : at + len(magic)] == magic and head[8:12] not in STILL_BRANDS:
+        return "reference", "MOV" if head[8:12] == b"qt  " else "MP4"
+    for atom, name in CONTAINER_ATOMS:
+        if head[4:8] == atom:
+            return "reference", name
+    if head[:4] == EBML_MAGIC:
+        return "reference", "WebM/Matroska"
     for magic, at, name in IMAGE_MAGIC:
         if head[at : at + len(magic)] == magic:
             return "picture", name
@@ -190,8 +259,9 @@ def sniff(head: bytes) -> tuple[str, str] | None:
 
 def clip_inputs(ctx: JobContext) -> ClipInputs:
     """What the job's inputs are: at most one picture (the first frame) and at most one
-    soundtrack (the clip's sound), told apart by their bytes; input names are free."""
-    found: dict[str, list[tuple[str, str]]] = {"picture": [], "soundtrack": []}
+    soundtrack (the clip's sound), or one reference video and nothing else (a lip-dub
+    model's), told apart by their bytes; input names are free."""
+    found: dict[str, list[tuple[str, str]]] = {"picture": [], "soundtrack": [], "reference": []}
     paths: dict[str, Path] = {}
     for name, path in sorted(ctx.inputs().items()):
         with path.open("rb") as handle:
@@ -200,10 +270,11 @@ def clip_inputs(ctx: JobContext) -> ClipInputs:
         if kind is None:
             raise JobError(
                 "invalid_inputs",
-                f"input {name!r} is neither a {', '.join(n for _, _, n in IMAGE_MAGIC)} "
-                f"picture nor a {', '.join(AUDIO_FORMATS)} soundtrack (its first bytes are "
+                f"input {name!r} is not a {', '.join(n for _, _, n in IMAGE_MAGIC)} "
+                f"picture, a {', '.join(AUDIO_FORMATS)} soundtrack or an "
+                f"{', '.join(VIDEO_FORMATS)} reference video (its first bytes are "
                 f"{head[:8].hex()}); a video job reads the picture its first frame starts "
-                "from and the soundtrack it is made to",
+                "from and the soundtrack it is made to, and a lip-dub job its reference",
             )
         found[kind[0]].append((name, kind[1]))
         paths[name] = path
@@ -216,14 +287,133 @@ def clip_inputs(ctx: JobContext) -> ClipInputs:
         raise JobError(
             "invalid_inputs",
             f"this job carries {said}; a video job reads at most one picture (its first "
-            "frame) and at most one soundtrack (its sound)",
+            "frame) and at most one soundtrack (its sound), and a lip-dub job exactly one "
+            "reference video",
         )
+    if found["reference"] and (found["picture"] or found["soundtrack"]):
+        others = [n for kind in ("picture", "soundtrack") for n, _ in found[kind]]
+        raise JobError(
+            "invalid_inputs",
+            f"this job carries a reference video ({found['reference'][0][0]!r}) and "
+            f"{', '.join(repr(n) for n in others)} beside it; a lip-dub job reads exactly "
+            "one input, the reference video, whose picture and voice it keeps",
+        )
+    reference = None
+    if found["reference"]:
+        name, kind = found["reference"][0]
+        reference = Reference(name, paths[name], kind)
     picture = paths[found["picture"][0][0]] if found["picture"] else None
     soundtrack = None
     if found["soundtrack"]:
         name, kind = found["soundtrack"][0]
         soundtrack = Soundtrack(name, paths[name], kind)
-    return ClipInputs(picture, soundtrack)
+    return ClipInputs(picture, soundtrack, reference)
+
+
+def refuse_inputs_for(manifest: VideoManifest, inputs: ClipInputs) -> None:
+    """A lip-dub model reads a reference video and nothing else; every other model reads no
+    reference video. Both are said by name before anything is probed or loaded."""
+    if manifest.lip_dub and inputs.reference is None:
+        raise JobError(
+            "invalid_inputs",
+            f"{manifest.id} re-makes a reference video so its speaker says a new line; send "
+            f"exactly one input, a {', '.join(VIDEO_FORMATS)} video of the person talking, "
+            "with its sound",
+        )
+    if not manifest.lip_dub and inputs.reference is not None:
+        raise JobError(
+            "invalid_inputs",
+            f"input {inputs.reference.name!r} is a {inputs.reference.format} video, and "
+            f"{manifest.id} takes no reference video: it makes a clip from a prompt, a start "
+            "picture or a soundtrack. A lip-dub model (ltx-2.3-dubit, on a Mac) takes one",
+        )
+
+
+def probe_reference(reference: Reference) -> Reference:
+    """The reference's picture size, frame count, exact frame rate and length, as ffprobe
+    reads them. The frame count is the one the port counts itself (ltx_core_mlx/utils/
+    ffmpeg.py, probe_video_info): the first video stream's nb_frames, or the container's
+    duration x rate when the stream does not say (WebM and Matroska often do not)."""
+    ffprobe = hosttools.ffprobe_path()
+    if ffprobe is None:
+        raise ApiError(
+            409,
+            "ffmpeg_missing",
+            f"there is no ffprobe on this server's PATH, and {JOB_TYPE} {REFERENCE_WHY} "
+            + hosttools.searched_note(),
+            {"path": hosttools.search_path(), "missing": ["ffprobe"]},
+        )
+    name, kind = reference.name, reference.format
+    try:
+        completed = subprocess.run(
+            [ffprobe, "-v", "error", "-print_format", "json", "-show_format", "-show_streams",
+             str(reference.path)],
+            capture_output=True,
+            text=True,
+            timeout=SOUNDTRACK_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raise JobError(
+            "invalid_inputs",
+            f"ffprobe took more than {SOUNDTRACK_PROBE_TIMEOUT_SECONDS} s to read input "
+            f"{name!r} ({kind}); send a reference video it can read",
+        ) from None
+    try:
+        said = json.loads(completed.stdout) if completed.returncode == 0 else None
+    except json.JSONDecodeError:
+        said = None
+    if not isinstance(said, dict):
+        tail = (completed.stderr.strip() or completed.stdout.strip() or "nothing")[-300:]
+        raise JobError(
+            "invalid_inputs",
+            f"input {name!r} begins like a {kind} file but ffprobe cannot read it "
+            f"(exit {completed.returncode}: {tail}); send a reference video that plays",
+        )
+    return measured_reference(reference, said)
+
+
+def measured_reference(reference: Reference, said: dict[str, Any]) -> Reference:
+    """`reference` with the facts of ffprobe's JSON (`-show_format -show_streams`)."""
+    from fractions import Fraction
+
+    streams = said.get("streams") or []
+    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    name, kind = reference.name, reference.format
+    if video is None:
+        raise JobError(
+            "video_reference_no_video",
+            f"input {name!r} is a {kind} file with no video stream; a lip-dub reference is "
+            "a video of the person talking, with its sound",
+        )
+    if not any(s.get("codec_type") == "audio" for s in streams):
+        raise JobError(
+            "video_reference_no_audio",
+            f"input {name!r} has a picture but no audio stream; the lip-dub model takes the "
+            "speaker's voice from the reference's sound, so send the video with it",
+        )
+    try:
+        rate = Fraction(str(video.get("r_frame_rate")))
+    except (ValueError, ZeroDivisionError):
+        rate = Fraction(0)
+    seconds = float((said.get("format") or {}).get("duration") or 0)
+    frames = int(video.get("nb_frames") or 0)
+    if frames == 0 and seconds > 0 and rate > 0:
+        frames = int(seconds * float(rate))
+    if rate <= 0 or frames <= 0:
+        raise JobError(
+            "invalid_inputs",
+            f"ffprobe reads no frame rate or frame count for input {name!r} (rate "
+            f"{video.get('r_frame_rate')!r}, {video.get('nb_frames')!r} frames, "
+            f"{seconds} s); send a reference video that states them",
+        )
+    return replace(
+        reference,
+        frames=frames,
+        frame_rate=f"{rate.numerator}/{rate.denominator}",
+        width=int(video["width"]),
+        height=int(video["height"]),
+        seconds=round(seconds, 3),
+    )
 
 
 def measured(soundtrack: Soundtrack) -> Soundtrack:
@@ -295,6 +485,9 @@ def start_video_session(
     spec = needs.spec
     script = worker_script(spec.engine)
     transformer = spec.transformer_path(needs.weights_dir)
+    lip_dub = spec.lip_dub
+    parts = companionweights.part_dirs(needs.weights_dir, spec)
+    lora = spec.companion(IC_LORA).files[0].target if lip_dub else None
     session = workers.WorkerSession(
         python=python,
         script=script,
@@ -310,7 +503,10 @@ def start_video_session(
         {
             "op": "load",
             "engine": spec.engine,
+            "pipeline": spec.pipeline,
             "model_dir": str(needs.weights_dir),
+            "lora_path": None if lora is None else str(Path(parts[IC_LORA]) / lora),
+            "text_encoder_dir": parts[TEXT_ENCODER] if lip_dub else None,
             "transformer_path": None if transformer is None else str(transformer),
             "hf_repo": spec.hf_repo,
             "device": spec.device,
@@ -654,7 +850,10 @@ class VideoJobType(ResidentWorker):
         spec = machine_spec(
             self._config, _require_block(manifest, model_id, self._backend.kind)
         )
-        settle(params, model_id, spec, 0)
+        if spec.lip_dub:
+            refuse_lip_dub_params(params, model_id, spec)
+        else:
+            settle(params, model_id, spec, 0)
         needs = self.loadable(model_id)
         hosttools.require_ffmpeg(JOB_TYPE, FFMPEG_WHY)
         return needs
@@ -711,14 +910,24 @@ class VideoJobType(ResidentWorker):
         model = run_model(job.model, self.name)
         needs = as_job_error(self.requirements, model, params)
         inputs = clip_inputs(ctx)
-        as_job_error(refuse_mode, params, inputs.mode, model, needs.spec)
-        if inputs.soundtrack is not None:
-            inputs = replace(inputs, soundtrack=as_job_error(measured, inputs.soundtrack))
+        refuse_inputs_for(needs.manifest, inputs)
         seed = params.seed if params.seed is not None else secrets.randbelow(MAX_SEED + 1)
-        settled = as_job_error(
-            settle, params, model, needs.spec, seed, inputs.mode,
-            None if inputs.soundtrack is None else inputs.soundtrack.seconds,
-        )
+        if inputs.reference is not None:
+            reference = as_job_error(probe_reference, inputs.reference)
+            inputs = replace(inputs, reference=reference)
+            settled = as_job_error(
+                settle_lip_dub, params, model, needs.spec, seed,
+                frames=reference.frames, frame_rate=reference.frame_rate,
+                width=reference.width, height=reference.height,
+            )
+        else:
+            as_job_error(refuse_mode, params, inputs.mode, model, needs.spec)
+            if inputs.soundtrack is not None:
+                inputs = replace(inputs, soundtrack=as_job_error(measured, inputs.soundtrack))
+            settled = as_job_error(
+                settle, params, model, needs.spec, seed, inputs.mode,
+                None if inputs.soundtrack is None else inputs.soundtrack.seconds,
+            )
         ffmpeg = as_job_error(hosttools.require_ffmpeg, JOB_TYPE, FFMPEG_WHY)
         session = self._worker(ctx, model, needs)
         self._make(ctx, model, session, params, needs, settled, inputs, ffmpeg)
@@ -781,8 +990,11 @@ def generate_request(
         "steps": settled.steps,
         "refine_steps": needs.spec.refine_steps,
         "audio": params.audio,
+        "frame_rate": settled.frame_rate,
         "image_path": None if inputs.picture is None else str(inputs.picture),
         "soundtrack_path": None if inputs.soundtrack is None else str(inputs.soundtrack.path),
+        "reference_path": None if inputs.reference is None else str(inputs.reference.path),
+        "reference_strength": settled.reference_strength,
         "output_path": str(output),
         "ffmpeg": ffmpeg,
         "revision": needs.spec.revision,
@@ -811,6 +1023,43 @@ def soundtrack_report(
         "sample_rate": result.get("audio_sample_rate"),
         "channels": result.get("audio_channels"),
         "audio_tokens": result["soundtrack"]["audio_tokens"],
+    }
+
+
+def reference_report(
+    inputs: ClipInputs, settled: Settled, result: dict[str, Any]
+) -> dict[str, Any] | None:
+    """What a lip-dub clip kept of its reference: its first `frames_used` frames (all of it
+    but the few past the 8k+1 grid), at the reference's own rate."""
+    reference = inputs.reference
+    if reference is None:
+        return None
+    return {
+        "input": reference.name,
+        "format": reference.format,
+        "width": reference.width,
+        "height": reference.height,
+        "duration_s": reference.seconds,
+        "frame_rate": reference.frame_rate,
+        "fps": round(settled.fps, 3),
+        "frames": reference.frames,
+        "frames_used": settled.num_frames,
+        "frames_unused": cast(int, reference.frames) - settled.num_frames,
+        "strength": settled.reference_strength,
+        "audio_level_dbfs": result.get("audio_level_dbfs"),
+    }
+
+
+def lora_report(needs: Needs, result: dict[str, Any]) -> dict[str, Any] | None:
+    if not needs.spec.lip_dub:
+        return None
+    lora = needs.spec.companion(IC_LORA)
+    return {
+        "hf_repo": lora.hf_repo,
+        "revision": lora.revision,
+        "file": lora.files[0].target,
+        "sha256": lora.files[0].sha256,
+        "strength": result.get("lora_strength"),
     }
 
 
@@ -846,6 +1095,7 @@ def effective_params(
         "height": result.get("height", settled.height),
         "num_frames": result.get("num_frames", settled.num_frames),
         "fps": settled.fps,
+        "frame_rate": settled.frame_rate,
         "duration_s": result.get("duration_s", settled.duration_s),
         "video_tokens": settled.video_tokens,
         "seed": settled.seed,
@@ -856,6 +1106,8 @@ def effective_params(
         "audio_sample_rate": result.get("audio_sample_rate"),
         "audio_channels": result.get("audio_channels"),
         "soundtrack": soundtrack_report(inputs, settled, result),
+        "reference": reference_report(inputs, settled, result),
+        "lora": lora_report(needs, result),
         "artifact": ARTIFACT_NAME,
         "bytes": result.get("bytes"),
         "encoder": result.get("encoder"),

@@ -89,6 +89,8 @@ import {
   type SegmentResult,
   type VideoOptions,
   type VideoResult,
+  type VideoLora,
+  type VideoReference,
   type VideoSoundtrack,
   type AlignWindowResult,
   type JobInput,
@@ -2218,10 +2220,17 @@ export class CrucibleClient {
       ['seed', 'seed'],
       ['steps', 'steps'],
       ['audio', 'audio'],
+      ['referenceStrength', 'reference_strength'],
     ];
     for (const [key, wire] of optional) {
       const value = given[key];
       if (value !== undefined && value !== null) params[wire] = value;
+    }
+    if (given.reference != null && (given.image != null || given.soundtrack != null)) {
+      throw new CrucibleConfigError(
+        'reference',
+        'video(...) with a reference video takes no image or soundtrack; a lip-dub job reads the reference alone',
+      );
     }
     if (given.soundtrack != null && given.audio === false) {
       throw new CrucibleConfigError('audio', 'video(...) with a soundtrack keeps its sound; audio false would drop it');
@@ -2234,6 +2243,7 @@ export class CrucibleClient {
     const inputs: Record<string, JobInput> = {};
     if (given.image != null) inputs[imageName] = given.image;
     if (given.soundtrack != null) inputs[soundtrackName] = given.soundtrack;
+    if (given.reference != null) inputs[given.referenceName ?? 'reference'] = given.reference;
     return this.submit({
       type: 'video',
       model: requireText(given.model, 'model'),
@@ -4124,7 +4134,7 @@ export function readVideoResult(done: DoneData): VideoResult {
     dtype: str(video, 'dtype', at),
     mode: oneOf(
       str(video, 'mode', at),
-      ['text-to-video', 'image-to-video', 'audio-to-video', 'image-audio-to-video'] as const,
+      ['text-to-video', 'image-to-video', 'audio-to-video', 'image-audio-to-video', 'lip-dub'] as const,
       `${at}.mode`,
     ),
     prompt: str(video, 'prompt', at),
@@ -4133,6 +4143,7 @@ export function readVideoResult(done: DoneData): VideoResult {
     height: num(video, 'height', at),
     numFrames: num(video, 'num_frames', at),
     fps: num(video, 'fps', at),
+    frameRate: nullableStr(video, 'frame_rate', at),
     durationS: num(video, 'duration_s', at),
     videoTokens: num(video, 'video_tokens', at),
     seed: num(video, 'seed', at),
@@ -4143,6 +4154,8 @@ export function readVideoResult(done: DoneData): VideoResult {
     audioSampleRate: nullableNum(video, 'audio_sample_rate', at),
     audioChannels: nullableNum(video, 'audio_channels', at),
     soundtrack: readVideoSoundtrack(nullableObject(video, 'soundtrack', at), `${at}.soundtrack`),
+    reference: readVideoReference(nullableObject(video, 'reference', at), `${at}.reference`),
+    lora: readVideoLora(nullableObject(video, 'lora', at), `${at}.lora`),
     artifact: str(video, 'artifact', at),
     bytes: nullableNum(video, 'bytes', at),
     encoder: nullableStr(video, 'encoder', at),
@@ -4155,6 +4168,42 @@ export function readVideoResult(done: DoneData): VideoResult {
     stageMemoryBytes: numberMap(nullableObject(video, 'stage_memory_bytes', at), `${at}.stage_memory_bytes`),
     promptCache: readPromptCache(video, at),
     artifacts: done.artifacts ?? [],
+  };
+}
+
+function readVideoReference(reference: Json | null, at: string): VideoReference | null {
+  if (reference === null) return null;
+  const level = nullableObject(reference, 'audio_level_dbfs', at);
+  return {
+    input: str(reference, 'input', at),
+    format: str(reference, 'format', at),
+    width: num(reference, 'width', at),
+    height: num(reference, 'height', at),
+    durationS: num(reference, 'duration_s', at),
+    frameRate: str(reference, 'frame_rate', at),
+    fps: num(reference, 'fps', at),
+    frames: num(reference, 'frames', at),
+    framesUsed: num(reference, 'frames_used', at),
+    framesUnused: num(reference, 'frames_unused', at),
+    strength: num(reference, 'strength', at),
+    audioLevelDbfs:
+      level === null
+        ? null
+        : {
+            mean: nullableNum(level, 'mean', `${at}.audio_level_dbfs`),
+            peak: nullableNum(level, 'peak', `${at}.audio_level_dbfs`),
+          },
+  };
+}
+
+function readVideoLora(lora: Json | null, at: string): VideoLora | null {
+  if (lora === null) return null;
+  return {
+    hfRepo: str(lora, 'hf_repo', at),
+    revision: str(lora, 'revision', at),
+    file: str(lora, 'file', at),
+    sha256: str(lora, 'sha256', at),
+    strength: nullableNum(lora, 'strength', at),
   };
 }
 

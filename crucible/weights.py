@@ -1224,6 +1224,7 @@ def pull_files(
     started = time.monotonic()
     extra = _progress_extra(on_progress)
     try:
+        kept = [] if force else [entry for entry in files if _placed(target_root, entry, on_line)]
         fetched = [
             _fetch_verified(
                 hub, config, entry, hf_repo=hf_repo, revision=revision, label=label,
@@ -1231,8 +1232,11 @@ def pull_files(
                 on_line=on_line,
             )
             for entry in files
+            if entry not in kept
         ]
-        total = _place_fetched(fetched)
+        total = _place_fetched(fetched) + sum(
+            (target_root / entry.target).stat().st_size for entry in kept
+        )
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     elapsed = time.monotonic() - started
@@ -1241,6 +1245,20 @@ def pull_files(
     return _read_back(
         files_installed(target_root, hf_repo, revision, stamp_name=stamp_name), stamp
     )
+
+
+def _placed(target_root: Path, entry: FileSource, on_line: Callable[[str], None] | None) -> bool:
+    """Whether the file is already at its target with the bytes the declaration pins: put
+    there by hand (weights fetched before Crucible knew them, moved in rather than fetched
+    twice) or by a pull whose stamp was lost. It is hashed, never trusted by name; a file
+    that does not match is fetched and replaced as if it were absent."""
+    destination = _safe_target(target_root, entry.target)
+    if not destination.is_file() or destination.stat().st_size != entry.bytes:
+        return False
+    if sha256_of(destination) != entry.sha256:
+        return False
+    _say(on_line, f"  kept {entry.target}: already here with the pinned sha256 ({entry.sha256[:12]})")
+    return True
 
 
 def _fetch_verified(

@@ -8,7 +8,13 @@ picture to a supplied soundtrack (`audio_to_video`), and companion files
 pulled from a second repo and verified by sha256 (the same `Companion` an
 audio manifest declares; the PC's arm has one, the Mac's none). The Mac's arm
 adds its MLX cache limit and the steps of its full-size refining pass.
-docs/internals/video.md says why each number is what it is.
+
+A model's `pipeline` (in [model]) says what it makes. `distilled`, the default, makes a
+clip from a prompt and optionally a start picture or a soundtrack. `lip-dub` re-makes a
+supplied reference video so its speaker says a new line: its length and frame rate come
+from the reference, so its blocks declare no fps or default length, and its two
+companions are the IC-LoRA fused into the transformer and the text encoder the pack does
+not carry. docs/internals/video.md says why each number is what it is.
 """
 
 from __future__ import annotations
@@ -52,6 +58,35 @@ ENGINE_TRANSFORMER_COMPANION: dict[str, bool] = {
     LTX_2_MLX: False,
 }
 
+DISTILLED = "distilled"
+
+LIP_DUB = "lip-dub"
+
+PIPELINES: tuple[str, ...] = (DISTILLED, LIP_DUB)
+
+# Which pipelines each engine's worker runs: ltx2mlx_worker.py drives the port's
+# DistilledPipeline and its LipDubPipeline; ltx_worker.py (diffusers) only the distilled one.
+ENGINE_PIPELINES: dict[str, frozenset[str]] = {
+    LTX: frozenset({DISTILLED}),
+    LTX_2_MLX: frozenset({DISTILLED, LIP_DUB}),
+}
+
+# A lip-dub block's companions, in this order: the lip-dub IC-LoRA (one .safetensors) and
+# the Gemma text encoder, which the LTX-2.3 MLX pack does not carry.
+IC_LORA = "ic-lora"
+
+TEXT_ENCODER = "text-encoder"
+
+LIP_DUB_COMPANIONS: tuple[str, ...] = (IC_LORA, TEXT_ENCODER)
+
+# What only the distilled pipeline declares: a lip-dub clip's rate and length are the
+# reference video's.
+CLIP_TIMING: dict[str, Any] = {
+    "fps": list,
+    "default_fps": int,
+    "default_duration_s": (int, float),
+}
+
 # Which engines' workers hold a supplied soundtrack fixed while they denoise the picture:
 # ltx2mlx_worker.py does (the port's frozen audio state); ltx_worker.py (diffusers) does not.
 ENGINE_AUDIO_TO_VIDEO: dict[str, bool] = {
@@ -75,7 +110,12 @@ AUDIO_TO_VIDEO = "audio-to-video"
 
 IMAGE_AUDIO_TO_VIDEO = "image-audio-to-video"
 
-MODES: tuple[str, ...] = (TEXT_TO_VIDEO, IMAGE_TO_VIDEO, AUDIO_TO_VIDEO, IMAGE_AUDIO_TO_VIDEO)
+# A lip-dub model's one mode: a reference video re-made so its speaker says a new line.
+LIP_DUB_MODE = "lip-dub"
+
+MODES: tuple[str, ...] = (
+    TEXT_TO_VIDEO, IMAGE_TO_VIDEO, AUDIO_TO_VIDEO, IMAGE_AUDIO_TO_VIDEO, LIP_DUB_MODE,
+)
 
 PICTURE_MODES = frozenset({IMAGE_TO_VIDEO, IMAGE_AUDIO_TO_VIDEO})
 
@@ -102,6 +142,9 @@ _MODEL_REQUIRED: dict[str, type] = {
     "licence_url": str,
     "commercial_use": str,
 }
+_MODEL_OPTIONAL: dict[str, type] = {
+    "pipeline": str,
+}
 _BACKEND_REQUIRED: dict[str, Any] = {
     "engine": str,
     "hf_repo": str,
@@ -116,11 +159,8 @@ _BACKEND_REQUIRED: dict[str, Any] = {
     "min_side": int,
     "max_side": int,
     "max_pixels": int,
-    "fps": list,
-    "default_fps": int,
     "default_width": int,
     "default_height": int,
-    "default_duration_s": (int, float),
     "max_frames": int,
     "max_video_tokens": int,
     "steps": int,
@@ -136,6 +176,7 @@ _BACKEND_OPTIONAL: dict[str, Any] = {
     "tiled_max_frames": int,
     "tiled_max_video_tokens": int,
     "audio_to_video": bool,
+    **CLIP_TIMING,
 }
 _COMPANION_REQUIRED: dict[str, Any] = {
     "name": str,
@@ -189,10 +230,10 @@ class VideoBackendSpec:
     max_side: int
     max_pixels: int
     fps: tuple[int, ...]
-    default_fps: int
+    default_fps: int | None
     default_width: int
     default_height: int
-    default_duration_s: float
+    default_duration_s: float | None
     max_frames: int
     max_video_tokens: int
     steps: int
@@ -206,10 +247,24 @@ class VideoBackendSpec:
     tiled_max_frames: int | None = None
     tiled_max_video_tokens: int | None = None
     audio_to_video: bool = False
+    pipeline: str = DISTILLED
 
     @property
     def device(self) -> str:
         return ENGINE_DEVICE[(self.engine, self.backend)]
+
+    @property
+    def lip_dub(self) -> bool:
+        return self.pipeline == LIP_DUB
+
+    def companion(self, name: str) -> Companion:
+        for found in self.companions:
+            if found.name == name:
+                return found
+        raise VideoManifestError(
+            f"the {self.backend} block declares no {name!r} companion; it has "
+            f"{[c.name for c in self.companions]}"
+        )
 
     @property
     def image_to_video(self) -> bool:
@@ -217,7 +272,9 @@ class VideoBackendSpec:
 
     @property
     def transformer_companion(self) -> Companion | None:
-        return self.companions[0] if self.companions else None
+        if not ENGINE_TRANSFORMER_COMPANION[self.engine]:
+            return None
+        return self.companions[0]
 
     def transformer_path(self, model_dir: Path) -> Path | None:
         companion = self.transformer_companion
@@ -272,6 +329,7 @@ class VideoBackendSpec:
             "refine_steps": self.refine_steps,
             "tiled_max_frames": self.tiled_max_frames,
             "tiled_max_video_tokens": self.tiled_max_video_tokens,
+            "pipeline": self.pipeline,
         }
 
 
@@ -287,6 +345,11 @@ class VideoManifest:
     commercial_use: str
     backends: dict[str, VideoBackendSpec]
     path: Path
+    pipeline: str = DISTILLED
+
+    @property
+    def lip_dub(self) -> bool:
+        return self.pipeline == LIP_DUB
 
     @property
     def pull_command(self) -> str:
@@ -315,6 +378,7 @@ class VideoManifest:
             "licence": self.licence,
             "licence_url": self.licence_url,
             "commercial_use": self.commercial_use,
+            "pipeline": self.pipeline,
             "backends": {k: v.to_dict() for k, v in sorted(self.backends.items())},
         }
 
@@ -353,7 +417,13 @@ def _check_document(document: dict[str, Any], path: Path) -> None:
 
 
 def _parse_model(model: dict[str, Any], path: Path, expected_id: str) -> str:
-    check_table(f"{path.name} [model]", model, _MODEL_REQUIRED, error=VideoManifestError)
+    check_table(
+        f"{path.name} [model]", model, _MODEL_REQUIRED, _MODEL_OPTIONAL, error=VideoManifestError
+    )
+    if model.get("pipeline", DISTILLED) not in PIPELINES:
+        raise VideoManifestError(
+            f"{path.name}: model.pipeline {model['pipeline']!r} is not one of {list(PIPELINES)}"
+        )
     model_id = model["id"]
     if not MODEL_ID_PATTERN.match(model_id):
         raise VideoManifestError(
@@ -389,11 +459,16 @@ def _check_backend(where: str, kind: str) -> None:
         )
 
 
-def _check_engine(where: str, kind: str, block: dict[str, Any]) -> None:
+def _check_engine(where: str, kind: str, block: dict[str, Any], pipeline: str) -> None:
     if block["engine"] not in VIDEO_BACKEND_ENGINES[kind]:
         raise VideoManifestError(
             f"{where}: engine {block['engine']!r} does not run on {kind}; that "
             f"backend's video engines are {sorted(VIDEO_BACKEND_ENGINES[kind])}"
+        )
+    if pipeline not in ENGINE_PIPELINES[block["engine"]]:
+        raise VideoManifestError(
+            f"{where}: engine {block['engine']!r} has no {pipeline} pipeline; it runs "
+            f"{sorted(ENGINE_PIPELINES[block['engine']])}"
         )
     _check_pin(where, block["hf_repo"], block["revision"])
     if block["dtype"] not in DTYPES:
@@ -490,7 +565,46 @@ def _check_sizes(where: str, block: dict[str, Any]) -> None:
         )
 
 
+def _check_timing(where: str, block: dict[str, Any], pipeline: str) -> None:
+    """The distilled pipeline declares its rates and default length; a lip-dub clip takes
+    both from its reference, so its block declaring either would be a number nothing reads."""
+    stated = sorted(key for key in CLIP_TIMING if key in block)
+    if pipeline == LIP_DUB and stated:
+        raise VideoManifestError(
+            f"{where}: a lip-dub block declares no {stated}; the clip's frame rate and "
+            "length are the reference video's"
+        )
+    absent = sorted(key for key in CLIP_TIMING if key not in block)
+    if pipeline == DISTILLED and absent:
+        raise VideoManifestError(f"{where}: missing required key(s) {absent}")
+    if pipeline == LIP_DUB:
+        for key in ("max_video_tokens_image_to_video", "audio_to_video",
+                    "tiled_max_frames", "tiled_max_video_tokens"):
+            if key in block:
+                raise VideoManifestError(
+                    f"{where}: {key} is a distilled-pipeline limit; a lip-dub block "
+                    "takes no start picture or soundtrack and its passes are not tiled"
+                )
+        if "refine_steps" not in block:
+            raise VideoManifestError(
+                f"{where}: a lip-dub block declares refine_steps, its full-size pass's steps"
+            )
+
+
+def _check_frames(where: str, block: dict[str, Any]) -> None:
+    frames = block["max_frames"]
+    if frames < FRAME_STRIDE + 1 or (frames - 1) % FRAME_STRIDE:
+        raise VideoManifestError(
+            f"{where}: max_frames {frames} is not on the VAE's frame grid "
+            f"({FRAME_STRIDE}k+1, at least {FRAME_STRIDE + 1})"
+        )
+    if block["steps"] <= 0 or block["audio_sample_rate"] <= 0:
+        raise VideoManifestError(f"{where}: steps and audio_sample_rate must be positive")
+
+
 def _check_time(where: str, block: dict[str, Any]) -> tuple[int, ...]:
+    if "fps" not in block:
+        return ()
     rates = block["fps"]
     if not rates or not all(
         isinstance(rate, int) and not isinstance(rate, bool) and rate > 0 for rate in rates
@@ -501,11 +615,6 @@ def _check_time(where: str, block: dict[str, Any]) -> tuple[int, ...]:
             f"{where}: default_fps {block['default_fps']} is not one of fps {rates}"
         )
     frames = block["max_frames"]
-    if frames < FRAME_STRIDE + 1 or (frames - 1) % FRAME_STRIDE:
-        raise VideoManifestError(
-            f"{where}: max_frames {frames} is not on the VAE's frame grid "
-            f"({FRAME_STRIDE}k+1, at least {FRAME_STRIDE + 1})"
-        )
     if block["default_duration_s"] <= 0:
         raise VideoManifestError(f"{where}: default_duration_s must be positive")
     if frames_for(float(block["default_duration_s"]), block["default_fps"]) > frames:
@@ -513,8 +622,6 @@ def _check_time(where: str, block: dict[str, Any]) -> tuple[int, ...]:
             f"{where}: default_duration_s {block['default_duration_s']} at "
             f"{block['default_fps']} fps is past max_frames {frames}"
         )
-    if block["steps"] <= 0 or block["audio_sample_rate"] <= 0:
-        raise VideoManifestError(f"{where}: steps and audio_sample_rate must be positive")
     return tuple(sorted(set(rates)))
 
 
@@ -529,11 +636,14 @@ def _check_tokens(where: str, block: dict[str, Any]) -> None:
                 f"{where}: a token ceiling of {ceiling} admits no clip at all "
                 f"(the smallest clip is {smallest} tokens)"
             )
-    default_tokens = video_tokens(
-        block["default_width"],
-        block["default_height"],
-        frames_for(float(block["default_duration_s"]), block["default_fps"]),
+    # A lip-dub clip is as long as its reference, so its default size must hold the
+    # longest reference the block admits.
+    default_frames = (
+        frames_for(float(block["default_duration_s"]), block["default_fps"])
+        if "default_duration_s" in block
+        else block["max_frames"]
     )
+    default_tokens = video_tokens(block["default_width"], block["default_height"], default_frames)
     if default_tokens > block["max_video_tokens"]:
         raise VideoManifestError(
             f"{where}: the default clip is {default_tokens} tokens, past "
@@ -619,11 +729,30 @@ def _companion(where: str, entry: Any) -> Companion:
     return Companion(entry["name"], entry["hf_repo"], entry["revision"], files)
 
 
-def _companions(where: str, block: dict[str, Any]) -> tuple[Companion, ...]:
+def _lip_dub_companions(where: str, companions: tuple[Companion, ...]) -> tuple[Companion, ...]:
+    names = tuple(companion.name for companion in companions)
+    if names != LIP_DUB_COMPANIONS:
+        raise VideoManifestError(
+            f"{where}: a lip-dub block declares exactly the companions "
+            f"{list(LIP_DUB_COMPANIONS)}, in that order (the IC-LoRA, then the text "
+            f"encoder); it declares {list(names)}"
+        )
+    lora = companions[0].files
+    if len(lora) != 1 or not lora[0].target.endswith(".safetensors"):
+        raise VideoManifestError(
+            f"{where}: the {IC_LORA} companion is one .safetensors file, the LoRA the "
+            "worker fuses into the transformer"
+        )
+    return companions
+
+
+def _companions(where: str, block: dict[str, Any], pipeline: str) -> tuple[Companion, ...]:
     companions = tuple(
         _companion(f"{where} companions[{index}]", entry)
         for index, entry in enumerate(block.get("companions", []))
     )
+    if pipeline == LIP_DUB:
+        return _lip_dub_companions(where, companions)
     if not ENGINE_TRANSFORMER_COMPANION[block["engine"]]:
         if companions:
             raise VideoManifestError(
@@ -644,17 +773,19 @@ def _companions(where: str, block: dict[str, Any]) -> tuple[Companion, ...]:
     return companions
 
 
-def _parse_backend(path: Path, kind: str, block: Any) -> VideoBackendSpec:
+def _parse_backend(path: Path, kind: str, block: Any, pipeline: str) -> VideoBackendSpec:
     where = f"{path.name} [backends.{kind}]"
     _check_backend(where, kind)
     if not isinstance(block, dict):
         raise VideoManifestError(f"{where}: must be a table")
     check_table(where, block, _BACKEND_REQUIRED, _BACKEND_OPTIONAL, error=VideoManifestError)
-    _check_engine(where, kind, block)
+    _check_engine(where, kind, block, pipeline)
+    _check_timing(where, block, pipeline)
     _check_mlx(where, kind, block)
     _check_memory(where, block)
     stages = _stage_memory(where, block)
     _check_sizes(where, block)
+    _check_frames(where, block)
     rates = _check_time(where, block)
     _check_tokens(where, block)
     _check_tiled(where, kind, block)
@@ -675,16 +806,18 @@ def _parse_backend(path: Path, kind: str, block: Any) -> VideoBackendSpec:
         max_side=block["max_side"],
         max_pixels=block["max_pixels"],
         fps=rates,
-        default_fps=block["default_fps"],
+        default_fps=block.get("default_fps"),
         default_width=block["default_width"],
         default_height=block["default_height"],
-        default_duration_s=float(block["default_duration_s"]),
+        default_duration_s=(
+            float(block["default_duration_s"]) if "default_duration_s" in block else None
+        ),
         max_frames=block["max_frames"],
         max_video_tokens=block["max_video_tokens"],
         steps=block["steps"],
         audio_sample_rate=block["audio_sample_rate"],
         stage_memory_bytes=stages,
-        companions=_companions(where, block),
+        companions=_companions(where, block, pipeline),
         max_video_tokens_image_to_video=block.get("max_video_tokens_image_to_video"),
         not_taken=_not_taken(where, block),
         mlx_cache_limit_bytes=block.get("mlx_cache_limit_bytes"),
@@ -692,6 +825,7 @@ def _parse_backend(path: Path, kind: str, block: Any) -> VideoBackendSpec:
         tiled_max_frames=block.get("tiled_max_frames"),
         tiled_max_video_tokens=block.get("tiled_max_video_tokens"),
         audio_to_video=block.get("audio_to_video", False),
+        pipeline=pipeline,
     )
 
 
@@ -699,8 +833,9 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VideoManif
     _check_document(document, path)
     model = document["model"]
     model_id = _parse_model(model, path, expected_id)
+    pipeline = model.get("pipeline", DISTILLED)
     backends = {
-        kind: _parse_backend(path, kind, block)
+        kind: _parse_backend(path, kind, block, pipeline)
         for kind, block in document["backends"].items()
     }
     return VideoManifest(
@@ -712,6 +847,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VideoManif
         commercial_use=model["commercial_use"],
         backends=backends,
         path=path,
+        pipeline=pipeline,
     )
 
 
@@ -750,18 +886,34 @@ def engines_on(backend_kind: str) -> tuple[str, ...]:
     return tuple(sorted(VIDEO_BACKEND_ENGINES.get(backend_kind, ())))
 
 
+def load_clip_manifests(directory: Path | None = None) -> dict[str, VideoManifest]:
+    """The models that make a clip from a prompt (the `video` verb's candidates); a lip-dub
+    model needs a reference video, which a verb's caller has not sent."""
+    return {
+        model_id: manifest
+        for model_id, manifest in load_all_video_manifests(directory).items()
+        if not manifest.lip_dub
+    }
+
+
 __all__ = [
     "AUDIO_TO_VIDEO",
+    "DISTILLED",
     "FRAME_STRIDE",
+    "IC_LORA",
     "IMAGE_AUDIO_TO_VIDEO",
     "IMAGE_TO_VIDEO",
     "LATENT_SCALE",
+    "LIP_DUB",
+    "LIP_DUB_COMPANIONS",
+    "LIP_DUB_MODE",
     "LTX",
     "LTX_2_MLX",
     "MODES",
     "PICTURE_MODES",
     "SOUNDTRACK_MODES",
     "STAGES",
+    "TEXT_ENCODER",
     "TEXT_TO_VIDEO",
     "VIDEO_BACKEND_ENGINES",
     "VIDEO_DIR_ENV",
@@ -772,6 +924,7 @@ __all__ = [
     "frames_for",
     "latent_frames",
     "load_all_video_manifests",
+    "load_clip_manifests",
     "load_video_manifest",
     "parse_video_manifest",
     "video_manifests_dir",

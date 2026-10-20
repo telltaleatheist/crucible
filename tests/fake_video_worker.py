@@ -1,5 +1,6 @@
 """A stand-in for crucible/jobs/video/ltx_worker.py (engine `ltx`, the PC) and
-ltx2mlx_worker.py (engine `ltx-2-mlx`, the Mac, with its refining pass): videocore's own Worker,
+ltx2mlx_worker.py (engine `ltx-2-mlx`, the Mac, with its refining pass, and its lip-dub
+pipeline): videocore's own Worker,
 Progress, Job and Clip, with a fake engine and a mux that writes a small MP4
 box structure instead of calling ffmpeg. Runs no model and needs no GPU.
 """
@@ -60,6 +61,9 @@ class FakeEngine:
         }
         if self._two_pass:
             self.spans = videocore.TWO_PASS_SPANS
+        self._lip_dub = request.get("pipeline") == "lip-dub"
+        if self._lip_dub:
+            self.spans = videocore.LIP_DUB_SPANS
 
     def _steps(self, stage: str, steps: int, pause: float, progress) -> None:
         progress.enter(stage, steps)
@@ -73,8 +77,12 @@ class FakeEngine:
             "image_path": job.image_path, "soundtrack_path": job.soundtrack_path,
             "num_frames": job.num_frames, "audio": job.audio,
             "ffmpeg": job.ffmpeg, "steps": job.steps, "refine_steps": job.refine_steps,
-            "width": job.width, "height": job.height,
+            "width": job.width, "height": job.height, "fps": job.fps,
+            "frame_rate": job.frame_rate, "reference_path": job.reference_path,
+            "reference_strength": job.reference_strength,
         })
+        if self._lip_dub:
+            return self._lip_dub_clip(job, progress)
         pause = float(os.environ.get("CRUCIBLE_FAKE_VIDEO_STEP_S") or 0)
         hit = job.prompt_key in self._seen
         if not hit:
@@ -114,6 +122,25 @@ class FakeEngine:
             "desktop": None if self._desktop is None else {
                 **self._desktop, "environment": self._environment,
             },
+        }
+
+
+    def _lip_dub_clip(self, job, progress):
+        progress.enter("encoding")
+        self._steps("denoising", job.steps, 0, progress)
+        self._steps("refining", job.refine_steps, 0, progress)
+        progress.enter("decoding")
+        progress.enter("audio_decoding")
+        pcm = b"\x00\x01" * 2 * round(job.num_frames / job.fps * SAMPLE_RATE)
+        clip = videocore.Clip(
+            job.width, job.height, job.fps, (bytes(48) for _ in range(job.num_frames)),
+            job.num_frames, pcm=pcm, channels=2, sample_rate=SAMPLE_RATE, rate=job.frame_rate,
+        )
+        return clip, {"encoding": 14, "denoising": 15, "refining": 16, "decoding": 9}, {
+            "prompt_cache": None, "soundtrack": None, "lora_strength": 1.0,
+            "audio_level_dbfs": {"mean": -28.4, "peak": -10.9},
+            "quantization": {"fake": True}, "sampling": {"passes": ["half", "full"]},
+            "desktop": None,
         }
 
 

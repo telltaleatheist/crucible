@@ -15,7 +15,7 @@ from crucible.jobs import image as image_job
 from crucible.jobs import video as video_job
 from crucible.jobs.audio.params import AudioParams, refuse_what_the_model_cannot_take
 from crucible.jobs.image import ImageParams
-from crucible.jobs.video.params import VideoParams, settle
+from crucible.jobs.video.params import VideoParams, refuse_lip_dub_params, settle
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, stamp_env
 from .test_audio_api import MUSIC, SFX, SONG, _weights
@@ -80,6 +80,9 @@ def test_every_declared_model_has_a_page_and_one_not_installed_downloads_on_firs
         *audio_job.MANIFESTS.all(),
     }
     assert set(pages) == declared
+    lip_dub = {model for model, manifest in video_job.MANIFESTS.all().items() if manifest.lip_dub}
+    for model in lip_dub:
+        assert pages.pop(model)["standing"] == playground.UNAVAILABLE
     for page in pages.values():
         assert page["standing"] == playground.DOWNLOAD and page["available"], page["id"]
         assert "first Generate downloads" in page["reason"]
@@ -216,6 +219,11 @@ def test_the_video_form_s_defaults_and_longest_clip_settle_at_every_rate(backend
             continue
         spec = manifest.spec(backend_kind)
         fields = playground.video_fields(manifest, spec)
+        if manifest.lip_dub:
+            # its clip's length and rate are the reference's, so the form offers neither
+            refuse_lip_dub_params(VideoParams(**_defaults(fields)), manifest.id, spec)
+            assert not {"duration_s", "fps"} & {field["name"] for field in fields}
+            continue
         settle(VideoParams(**_defaults(fields)), manifest.id, spec, 0)
         longest = {field["name"]: field for field in fields}["duration_s"]["max"]
         for fps in spec.fps:

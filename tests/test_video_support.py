@@ -45,7 +45,7 @@ def _sibling(name: str) -> Any:
 
 def test_the_manifest_pins_the_lightricks_snapshot_and_the_gguf() -> None:
     manifests = load_all_video_manifests()
-    assert sorted(manifests) == [MODEL]
+    assert sorted(manifests) == ["ltx-2.3-dubit", MODEL]
     manifest = manifests[MODEL]
     assert manifest.supports("mlx-darwin") and manifest.supports("cuda-linux")
     spec = manifest.spec("cuda-linux")
@@ -403,7 +403,7 @@ def test_the_catalog_lists_the_video_model_on_both_backends(home: Path) -> None:
     assert sorted(rows) == [MODEL]
     assert rows[MODEL].kind == "model" and rows[MODEL].installed() is None
     mac = {s.id: s for s in catalog.subjects(config, FAKE_MAC_BACKEND) if s.job_type == "video"}
-    assert sorted(mac) == [MODEL] and mac[MODEL].source == "hf:dgrauet/ltx-2.5-mlx-q8"
+    assert sorted(mac) == ["ltx-2.3-dubit", MODEL] and mac[MODEL].source == "hf:dgrauet/ltx-2.5-mlx-q8"
     assert catalog.backends_declaring("model", MODEL) == ["cuda-linux", "mlx-darwin"]
 
 

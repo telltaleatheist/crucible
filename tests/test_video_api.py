@@ -266,7 +266,7 @@ def test_image_to_video_has_its_own_lower_ceiling_and_it_is_named_before_the_wor
 @pytest.mark.parametrize(
     ("inputs", "words"),
     [
-        ({"notes.txt": {"inline_base64": base64.b64encode(b"hello").decode("ascii")}}, "neither a PNG"),
+        ({"notes.txt": {"inline_base64": base64.b64encode(b"hello").decode("ascii")}}, "is not a PNG"),
         (
             {"a.png": {"inline_base64": PNG}, "b.png": {"inline_base64": PNG}},
             "reads at most one picture",
@@ -914,7 +914,8 @@ def test_the_pc_refuses_a_soundtrack_before_it_measures_or_loads_anything(
          "2 soundtracks ('a.wav', WAV, 'b.wav', WAV)"),
         ({"a": {"inline_base64": PNG}, "b": {"inline_base64": PNG}}, "2 pictures"),
         ({"notes.txt": {"inline_base64": base64.b64encode(b"hello").decode("ascii")}},
-         "neither a PNG, JPEG, WebP picture nor a WAV, FLAC, MP3, Ogg soundtrack"),
+         "is not a PNG, JPEG, WebP picture, a WAV, FLAC, MP3, Ogg soundtrack or an MP4, MOV, "
+         "WebM/Matroska reference video"),
     ],
 )
 def test_inputs_other_than_one_picture_and_one_soundtrack_are_refused(

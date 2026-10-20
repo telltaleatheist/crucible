@@ -370,7 +370,8 @@ GLUE = textwrap.dedent(
             "request_id": f"r{seed}", "mode": "text-to-video", "prompt": "a fox in snow",
             "width": 256, "height": 128, "num_frames": 17, "fps": 24, "seed": seed,
             "steps": 8, "refine_steps": 3, "audio": True, "image_path": image,
-            "soundtrack_path": soundtrack,
+            "soundtrack_path": soundtrack, "frame_rate": None, "reference_path": None,
+            "reference_strength": None,
             "output_path": os.path.join(out_dir, "video.mp4"), "ffmpeg": "ffmpeg",
             "revision": "rev", "backend": "mlx-darwin",
         }, "video")
