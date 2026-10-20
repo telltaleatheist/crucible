@@ -26,6 +26,7 @@ All web sources were read on 2026-10-15.
 - **[S18]** The MLX port's card, https://huggingface.co/dgrauet/ltx-2.5-mlx-q8 @ `746ca9aa` (2026-08-28). COMMUNITY port. It carries no prompting guidance, only files and licence.
 - **[S19]** "LTX-2.5 Prompt Guide: Prompts, Tips, and Workflows", Aditya Bawankule, dreampixelforge.com, 2026-08-11 (updated 2026-08-29). https://www.dreampixelforge.com/blog/ltx-prompts. COMMUNITY.
 - **[S20]** "LTX-2.5 Prompt Guide: Multi-Shot Scenes, Native Audio…", deAPI.ai, 2026-09-04. https://deapi.ai/blog/ltx-2-5-prompting-guide-multi-shot-scenes-native-audio-and-prompts-that-actually-cut. COMMUNITY (a hosted-API vendor).
+- **[S21]** Hugging Face discussion Lightricks/LTX-2.5 #44 (August 2026) on custom-audio lip sync with the distilled model: https://huggingface.co/Lightricks/LTX-2.5/discussions/44. COMMUNITY, with a Lightricks staff remark that their dubbing pipeline is still being adapted to 2.5. Its findings were relayed to the session that built Crucible's soundtrack path (2026-10-19); the thread itself was not re-read for this guide.
 - **[C1]** Crucible `docs/VIDEO.md`, read 2026-10-15.
 - **[C2]** Crucible `docs/internals/video.md`, same repo.
 - **[C3]** Crucible manifest `crucible/video/ltx-2.5-distilled.toml`, same repo.
@@ -131,6 +132,16 @@ Notes:
 
 - The prompt shapes the sound even when `audio` is `false`, because sound and picture are generated together [C1][S12]. Describe a soundscape anyway.
 - A seed reproduces a clip only on the machine (arm) that made it [C1].
+
+## With a soundtrack (the Mac)
+
+A `video` job on the Mac may carry a soundtrack as an input; the picture is made to it and the sound is kept exactly as sent (audio-to-video, the audio held frozen in both passes) [C1][C2]. The prompt then describes a picture for a sound that already exists:
+
+- Describe the speaker: who they are, where they are in the frame, the light and the camera, as for any clip. With a start picture, describe the person in it and do not contradict it [S1].
+- Say that they are speaking, and quote the words they say, in the order the soundtrack says them: `She looks into the camera and says calmly, "I kept every letter you sent."` Quoted dialogue is how the official examples tie speech to a face [S3][S8].
+- Describe the voice and the delivery to match what is heard (pace, tone, a pause, a laugh), and leave out sounds the soundtrack does not have: the prompt still conditions the picture on the sound it describes, but the clip's sound is the soundtrack.
+- Keep the camera steady and the face visible (a medium close-up or closer) when lip sync matters; fast cuts and turned heads hide the mouth.
+- Results depend strongly on the seed [S21]; try several. Crucible runs it unguided (CFG 1) with plain Euler in both passes, the setting [S21] reports working for custom-audio lip sync on the distilled model [C2].
 
 ## Examples
 

@@ -691,15 +691,19 @@ JOB_DOCS: dict[str, JobDoc] = {
     ),
     "video": JobDoc(
         summary="Makes a video clip with its own sound from a prompt (text-to-video), "
-        "or brings a start picture to life (image-to-video), with LTX-2.5.",
+        "or brings a start picture to life (image-to-video), with LTX-2.5; on a Mac also "
+        "makes the picture to a supplied soundtrack (audio-to-video), lips in sync.",
         model="A video model id (GET /v1/catalog): `ltx-2.5-distilled`.",
         params=VideoParams,
-        inputs="None for text-to-video, or exactly one PNG, JPEG or WebP: the first "
-        "frame, cropped to the clip's shape and resized.",
+        inputs="Told apart by their bytes, names free: at most one PNG, JPEG or WebP "
+        "picture (the first frame, cropped to the clip's shape and resized) and at most "
+        "one WAV, FLAC, MP3 or Ogg soundtrack (the clip's sound, held fixed while the "
+        "picture is made to it; the Mac only). None for text-to-video.",
         returns="`video.mp4`: H.264 (yuv420p) with AAC stereo at 48 kHz, faststart. "
         "The `done` event gives `video`, every effective parameter (mode, size, "
         "`num_frames`, `fps`, `duration_s`, seed, …) plus timings and GPU-busy "
-        "figures, and `resident` " + RESIDENT_AFTER_A_JOB + ".",
+        "figures, `soundtrack` (what of a supplied soundtrack the clip used: `total_s`, "
+        "`used_s`; null without one), and `resident` " + RESIDENT_AFTER_A_JOB + ".",
         example={
             "type": "video",
             "model": "ltx-2.5-distilled",
@@ -720,6 +724,12 @@ JOB_DOCS: dict[str, JobDoc] = {
             "1280), `video_too_large`, `video_too_long`, and "
             "`video_param_unsupported` (`negative_prompt`, `steps` other than 8, "
             "`fps` other than 24 or 25). docs/VIDEO.md has the per-backend figures.",
+            "With a soundtrack and no `duration_s` or `num_frames` the clip is as long as "
+            "the soundtrack, rounded down to the frame grid; a shorter clip uses its first "
+            "part. Refused by name: `audio_to_video_unsupported` (the PC's arm), "
+            "`video_soundtrack_too_short` (a clip longer than its soundtrack), "
+            "`video_param_unsupported` (`audio` false with a soundtrack), `invalid_inputs` "
+            "(two pictures, two soundtracks, or anything else).",
             "The model repo is gated: `409 model_gated` says how to accept the "
             "licence.",
             UNHELD_AFTER_THE_JOB,

@@ -1,8 +1,9 @@
 """A video job's params, and the arm's refusals by name.
 
 Every refusal here happens before a worker starts: at submit for what the
-params alone decide, and in `run` (before the session) for the one thing
-that needs the inputs, the image-to-video token ceiling.
+params alone decide, and in `run` (before the session) for what needs the
+inputs: the image-to-video token ceiling, whether the arm takes a soundtrack,
+and a clip's length against the soundtrack it is made to.
 """
 
 from __future__ import annotations
@@ -14,9 +15,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from ...errors import ApiError
 from ...videomodels import (
+    AUDIO_TO_VIDEO,
     FRAME_STRIDE,
+    IMAGE_AUDIO_TO_VIDEO,
     IMAGE_TO_VIDEO,
     LATENT_SCALE,
+    PICTURE_MODES,
+    SOUNDTRACK_MODES,
     TEXT_TO_VIDEO,
     VideoBackendSpec,
     frames_for,
@@ -61,7 +66,8 @@ class VideoParams(BaseModel):
         gt=0.0,
         le=600.0,
         description="Seconds of clip, rounded to the model's 8k+1 frame grid; null "
-        "is the model's default (5). Not with `num_frames`.",
+        "is the model's default (5), or with a soundtrack input the soundtrack's own "
+        "length rounded down onto the grid. Not with `num_frames`.",
     )
     num_frames: int | None = Field(
         default=None,
@@ -94,7 +100,8 @@ class VideoParams(BaseModel):
     audio: bool = Field(
         default=True,
         description="false makes a silent clip: the sound is generated with the "
-        "picture but not decoded.",
+        "picture but not decoded. Refused with a soundtrack input, which is the "
+        "clip's sound.",
     )
 
     @field_validator("prompt")
@@ -132,6 +139,7 @@ class Settled:
     steps: int
     seed: int
     video_tokens: int
+    soundtrack_s: float | None = None
 
     @property
     def duration_s(self) -> float:
@@ -208,7 +216,9 @@ def _refuse_size(width: int, height: int, model: str, spec: VideoBackendSpec) ->
         )
 
 
-def _frames(params: VideoParams, fps: int, model: str, spec: VideoBackendSpec) -> int:
+def _frames(
+    params: VideoParams, fps: int, model: str, spec: VideoBackendSpec, soundtrack_s: float | None
+) -> int:
     if params.num_frames is not None:
         frames = params.num_frames
         if frames < FRAME_STRIDE + 1 or (frames - 1) % FRAME_STRIDE:
@@ -222,20 +232,93 @@ def _frames(params: VideoParams, fps: int, model: str, spec: VideoBackendSpec) -
                 model, spec, num_frames=frames, frame_stride=FRAME_STRIDE,
             )
         return frames
+    if params.duration_s is None and soundtrack_s is not None:
+        return longest_covered(soundtrack_s, fps)
     duration = params.duration_s if params.duration_s is not None else spec.default_duration_s
     return frames_for(duration, fps)
 
 
-def _refuse_length(frames: int, fps: int, model: str, spec: VideoBackendSpec) -> None:
+def longest_covered(soundtrack_s: float, fps: int) -> int:
+    """The longest clip on the 8k+1 grid that a soundtrack of soundtrack_s seconds lasts
+    through, rounded down so the clip never runs past its sound. Below one grid step (the
+    shortest clip is 9 frames) it is 1, which no clip is."""
+    return max(0, int((soundtrack_s * fps - 1) // FRAME_STRIDE)) * FRAME_STRIDE + 1
+
+
+def _refuse_length(
+    frames: int, fps: int, model: str, spec: VideoBackendSpec, from_soundtrack: float | None
+) -> None:
     if frames > spec.max_frames:
+        where = (
+            f". The length came from the soundtrack ({from_soundtrack:.2f} s); send "
+            "duration_s or num_frames for a clip of its first part"
+            if from_soundtrack is not None
+            else ""
+        )
         raise _refusal(
             "video_too_long",
             f"{frames} frames is {frames / fps:.2f} s at {fps} fps; {model} on "
             f"{spec.backend} makes at most {spec.max_frames} frames "
             f"({spec.max_frames / fps:.2f} s at {fps} fps) because its memory "
-            f"({spec.memory_basis}) was sized at that length. Ask for a shorter clip",
+            f"({spec.memory_basis}) was sized at that length. Ask for a shorter clip{where}",
             model, spec, num_frames=frames, max_frames=spec.max_frames,
         )
+
+
+def refuse_mode(params: VideoParams, mode: str, model: str, spec: VideoBackendSpec) -> None:
+    if mode in PICTURE_MODES and not spec.image_to_video:
+        raise _refusal(
+            "image_to_video_unsupported",
+            f"{model} on {spec.backend} does not start from an input image; send the "
+            "job without an input for text-to-video",
+            model, spec,
+        )
+    if mode not in SOUNDTRACK_MODES:
+        return
+    if not spec.audio_to_video:
+        raise _refusal(
+            "audio_to_video_unsupported",
+            f"{model} on {spec.backend} does not make a picture to a supplied soundtrack: "
+            f"its engine ({spec.engine}) generates the sound with the picture and has no "
+            "way to hold one fixed. Send the job without the audio input, or to a Mac "
+            "(mlx-darwin), whose arm does",
+            model, spec,
+        )
+    if not params.audio:
+        raise _refusal(
+            "video_param_unsupported",
+            "audio false asks for a silent clip, but this job carries a soundtrack, which "
+            "is the clip's sound. Leave audio out to keep the soundtrack, or send the job "
+            "without the audio input for a silent clip",
+            model, spec, param="audio",
+        )
+
+
+def _refuse_soundtrack(
+    frames: int, fps: int, soundtrack_s: float, model: str, spec: VideoBackendSpec
+) -> None:
+    shortest = FRAME_STRIDE + 1
+    if frames >= shortest and frames / fps <= soundtrack_s:
+        return
+    longest = longest_covered(soundtrack_s, fps)
+    never = "a supplied soundtrack is the clip's whole sound and is never padded or looped"
+    if longest < shortest:
+        message = (
+            f"the soundtrack is {soundtrack_s:.2f} s, shorter than the shortest clip, "
+            f"{shortest} frames ({shortest / fps:.2f} s at {fps} fps); {never}. Send a "
+            "longer soundtrack"
+        )
+    else:
+        message = (
+            f"the soundtrack is {soundtrack_s:.2f} s, and {frames} frames at {fps} fps is "
+            f"{frames / fps:.2f} s; {never}, so the longest clip it covers is {longest} "
+            f"frames ({longest / fps:.2f} s at {fps} fps). Send num_frames {longest} or "
+            "less, or leave the length out and the soundtrack sets it"
+        )
+    raise _refusal(
+        "video_soundtrack_too_short", message,
+        model, spec, soundtrack_s=soundtrack_s, num_frames=frames, longest_frames=longest,
+    )
 
 
 def refuse_tokens(settled: Settled, model: str, spec: VideoBackendSpec) -> None:
@@ -252,9 +335,9 @@ def refuse_tokens(settled: Settled, model: str, spec: VideoBackendSpec) -> None:
         else f"{settled.width}x{settled.height} is too large a frame for {settled.mode}"
     )
     why = (
-        " (image-to-video carries a timestep per token, so it holds more on the "
+        " (a start picture adds a timestep per token, so it holds more on the "
         "card per frame than text-to-video)"
-        if settled.mode == IMAGE_TO_VIDEO
+        if settled.mode in PICTURE_MODES
         else ""
     )
     raise _refusal(
@@ -270,21 +353,30 @@ def refuse_tokens(settled: Settled, model: str, spec: VideoBackendSpec) -> None:
 
 
 def settle(
-    params: VideoParams, model: str, spec: VideoBackendSpec, seed: int, mode: str = TEXT_TO_VIDEO
+    params: VideoParams,
+    model: str,
+    spec: VideoBackendSpec,
+    seed: int,
+    mode: str = TEXT_TO_VIDEO,
+    soundtrack_s: float | None = None,
 ) -> Settled:
-    _refuse_untaken(params, model, spec)
-    if mode == IMAGE_TO_VIDEO and not spec.image_to_video:
-        raise _refusal(
-            "image_to_video_unsupported",
-            f"{model} on {spec.backend} does not start from an input image; send the "
-            "job without an input for text-to-video",
-            model, spec,
+    """The clip a job makes. `soundtrack_s` is the supplied soundtrack's measured length,
+    given exactly when `mode` is one of the soundtrack modes."""
+    if (mode in SOUNDTRACK_MODES) != (soundtrack_s is not None):
+        raise ValueError(
+            f"settle() was given mode {mode!r} with soundtrack_s {soundtrack_s!r}; the "
+            "soundtrack modes carry its length and the others none"
         )
+    _refuse_untaken(params, model, spec)
+    refuse_mode(params, mode, model, spec)
     width, height = _size(params, spec)
     _refuse_size(width, height, model, spec)
     fps = params.fps if params.fps is not None else spec.default_fps
-    frames = _frames(params, fps, model, spec)
-    _refuse_length(frames, fps, model, spec)
+    frames = _frames(params, fps, model, spec, soundtrack_s)
+    derived = params.num_frames is None and params.duration_s is None
+    _refuse_length(frames, fps, model, spec, soundtrack_s if derived else None)
+    if soundtrack_s is not None:
+        _refuse_soundtrack(frames, fps, soundtrack_s, model, spec)
     settled = Settled(
         mode=mode,
         width=width,
@@ -294,17 +386,22 @@ def settle(
         steps=spec.steps,
         seed=seed,
         video_tokens=video_tokens(width, height, frames),
+        soundtrack_s=soundtrack_s,
     )
     refuse_tokens(settled, model, spec)
     return settled
 
 
 __all__ = [
+    "AUDIO_TO_VIDEO",
+    "IMAGE_AUDIO_TO_VIDEO",
     "IMAGE_TO_VIDEO",
     "MAX_SEED",
     "Settled",
     "TEXT_TO_VIDEO",
     "VideoParams",
+    "longest_covered",
+    "refuse_mode",
     "refuse_tokens",
     "settle",
 ]

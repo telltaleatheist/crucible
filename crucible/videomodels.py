@@ -3,7 +3,8 @@
 A video manifest is an image manifest's shape with what a clip adds: a frame
 ceiling, the frame rates the model was run at, a token budget per mode (the
 number that sizes the denoising stage's memory), the fixed step count of a
-distilled schedule, a declared memory figure per stage, and companion files
+distilled schedule, a declared memory figure per stage, whether the arm makes a
+picture to a supplied soundtrack (`audio_to_video`), and companion files
 pulled from a second repo and verified by sha256 (the same `Companion` an
 audio manifest declares; the PC's arm has one, the Mac's none). The Mac's arm
 adds its MLX cache limit and the steps of its full-size refining pass.
@@ -51,6 +52,13 @@ ENGINE_TRANSFORMER_COMPANION: dict[str, bool] = {
     LTX_2_MLX: False,
 }
 
+# Which engines' workers hold a supplied soundtrack fixed while they denoise the picture:
+# ltx2mlx_worker.py does (the port's frozen audio state); ltx_worker.py (diffusers) does not.
+ENGINE_AUDIO_TO_VIDEO: dict[str, bool] = {
+    LTX: False,
+    LTX_2_MLX: True,
+}
+
 MEMORY_BASES = frozenset({"measured", "declared"})
 
 DTYPES = frozenset({"bfloat16", "float16", "float32"})
@@ -63,10 +71,19 @@ TEXT_TO_VIDEO = "text-to-video"
 
 IMAGE_TO_VIDEO = "image-to-video"
 
-MODES: tuple[str, ...] = (TEXT_TO_VIDEO, IMAGE_TO_VIDEO)
+AUDIO_TO_VIDEO = "audio-to-video"
+
+IMAGE_AUDIO_TO_VIDEO = "image-audio-to-video"
+
+MODES: tuple[str, ...] = (TEXT_TO_VIDEO, IMAGE_TO_VIDEO, AUDIO_TO_VIDEO, IMAGE_AUDIO_TO_VIDEO)
+
+PICTURE_MODES = frozenset({IMAGE_TO_VIDEO, IMAGE_AUDIO_TO_VIDEO})
+
+SOUNDTRACK_MODES = frozenset({AUDIO_TO_VIDEO, IMAGE_AUDIO_TO_VIDEO})
 
 STAGES: tuple[str, ...] = (
     "encoding",
+    "audio_encoding",
     "connecting",
     "conditioning",
     "denoising",
@@ -118,6 +135,7 @@ _BACKEND_OPTIONAL: dict[str, Any] = {
     "refine_steps": int,
     "tiled_max_frames": int,
     "tiled_max_video_tokens": int,
+    "audio_to_video": bool,
 }
 _COMPANION_REQUIRED: dict[str, Any] = {
     "name": str,
@@ -187,6 +205,7 @@ class VideoBackendSpec:
     refine_steps: int | None = None
     tiled_max_frames: int | None = None
     tiled_max_video_tokens: int | None = None
+    audio_to_video: bool = False
 
     @property
     def device(self) -> str:
@@ -207,7 +226,10 @@ class VideoBackendSpec:
         return model_dir / companion.name / companion.files[0].target
 
     def token_ceiling(self, mode: str) -> int:
-        if mode == IMAGE_TO_VIDEO and self.max_video_tokens_image_to_video is not None:
+        """A start picture adds a timestep per video token, so both picture modes have the
+        image-to-video ceiling; a soundtrack alone adds per-token timesteps only to the
+        audio's few tokens, so audio-to-video keeps the text-to-video one."""
+        if mode in PICTURE_MODES and self.max_video_tokens_image_to_video is not None:
             return self.max_video_tokens_image_to_video
         return self.max_video_tokens
 
@@ -241,6 +263,7 @@ class VideoBackendSpec:
             "max_video_tokens": self.max_video_tokens,
             "max_video_tokens_image_to_video": self.max_video_tokens_image_to_video,
             "image_to_video": self.image_to_video,
+            "audio_to_video": self.audio_to_video,
             "steps": self.steps,
             "audio_sample_rate": self.audio_sample_rate,
             "stage_memory_bytes": dict(self.stage_memory_bytes),
@@ -544,6 +567,16 @@ def _check_tiled(where: str, kind: str, block: dict[str, Any]) -> None:
         )
 
 
+def _check_audio_to_video(where: str, block: dict[str, Any]) -> None:
+    if block.get("audio_to_video") is True and not ENGINE_AUDIO_TO_VIDEO[block["engine"]]:
+        raise VideoManifestError(
+            f"{where}: audio_to_video is declared but engine {block['engine']!r} has no "
+            "audio-to-video path (its worker would generate the sound instead of holding "
+            "the supplied one); the engines that have one are "
+            f"{sorted(engine for engine, has in ENGINE_AUDIO_TO_VIDEO.items() if has)}"
+        )
+
+
 def _strings(where: str, key: str, values: list[Any]) -> tuple[str, ...]:
     if not values or not all(isinstance(v, str) and v.strip() for v in values):
         raise VideoManifestError(f"{where}: {key} must be a non-empty list of strings")
@@ -625,6 +658,7 @@ def _parse_backend(path: Path, kind: str, block: Any) -> VideoBackendSpec:
     rates = _check_time(where, block)
     _check_tokens(where, block)
     _check_tiled(where, kind, block)
+    _check_audio_to_video(where, block)
     return VideoBackendSpec(
         backend=kind,
         engine=block["engine"],
@@ -657,6 +691,7 @@ def _parse_backend(path: Path, kind: str, block: Any) -> VideoBackendSpec:
         refine_steps=block.get("refine_steps"),
         tiled_max_frames=block.get("tiled_max_frames"),
         tiled_max_video_tokens=block.get("tiled_max_video_tokens"),
+        audio_to_video=block.get("audio_to_video", False),
     )
 
 
@@ -716,12 +751,16 @@ def engines_on(backend_kind: str) -> tuple[str, ...]:
 
 
 __all__ = [
+    "AUDIO_TO_VIDEO",
     "FRAME_STRIDE",
+    "IMAGE_AUDIO_TO_VIDEO",
     "IMAGE_TO_VIDEO",
     "LATENT_SCALE",
     "LTX",
     "LTX_2_MLX",
     "MODES",
+    "PICTURE_MODES",
+    "SOUNDTRACK_MODES",
     "STAGES",
     "TEXT_TO_VIDEO",
     "VIDEO_BACKEND_ENGINES",

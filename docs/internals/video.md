@@ -331,10 +331,11 @@ order:
 | stage | what runs | in memory (MLX) | declared |
 | --- | --- | --- | --- |
 | encoding | `PromptEncoder.encode`: Gemma 4 12B at int8 (group 64, `quantize_config.json`) from `text_encoder.safetensors` with its tokenizer (transformers' `AutoTokenizer`), and the connector (`connector.safetensors`, plus the aggregate-embed projections that live in the text encoder file), prompt left-padded to 1024 tokens; freed after | 16.0 + 4.0 GB of weights | 23 GB |
+| audio_encoding (a supplied soundtrack only) | the `AudioConditioner` block's encoder (`audio_vae.encoder.*` from `audio_vae.safetensors`) and its mel processor over the soundtrack's clip-length at 16 kHz stereo, into `round(seconds x 25)` audio tokens; freed after | about 0.1 GB of weights, a mel spectrogram | 3 GB (declared, like `audio_decoding`) |
 | denoising | `_stage1`: the distilled transformer (`transformer-distilled.safetensors`, int8, all 48 blocks in memory: no `--low-ram` block streaming, which the 64 GB Mac does not need and which costs time), the VAE encoder and the upscaler load; a start picture is encoded here; 8 steps at half size | 20.6 + 0.6 + 1.0 GB of weights, activations at a quarter of the tokens | 26 GB |
 | refining | `_upsample_latent`, then `_stage2` (it frees the VAE encoder and the upscaler before its 3 steps); then the transformer is dropped | 20.6 GB of weights plus about 150 KB a video token at full size | **29 GB** |
 | decoding | the conv VAE decoder's `tiled_decode`, tiled by the port's own `_compute_decode_tiling` to a 12 GiB budget (`DECODE_BUDGET_BYTES`; the port's default is half of unified memory, 32 GB here) inside its `decode_cache_limit()`, each chunk turned into 8-bit RGB and copied out | 0.8 GB of weights, the tile | 16 GB |
-| audio_decoding | the `AudioDecoder` block: audio VAE and the vocoder with bandwidth extension (its weights upcast to fp32), 48 kHz stereo, into 16-bit PCM | 0.1 + 0.5 GB | 3 GB |
+| audio_decoding | the `AudioDecoder` block: audio VAE and the vocoder with bandwidth extension (its weights upcast to fp32), 48 kHz stereo, into 16-bit PCM; skipped with a supplied soundtrack | 0.1 + 0.5 GB | 3 GB |
 
 After each stage the worker reads `mx.get_peak_memory()` (MLX's own high-water mark, not the
 process footprint), logs a `crucible memory` line, runs the garbage collector, clears MLX's
@@ -365,6 +366,59 @@ checked in the wheel's own `libavcodec` configure line), at CRF 18 (diffusers'
 PNG beside the output and hands the pipeline that with `crf=0`, so the picture is recompressed
 once, before the pipeline crops it to the clip's shape (never stretched). The picture is
 encoded inside the denoising stage, so the Mac has no separate `conditioning` stage.
+
+**A supplied soundtrack (audio-to-video).** Only this arm makes a picture to a given sound
+(`audio_to_video = true` in its block; the PC's diffusers pipeline has no frozen-audio path,
+so its block leaves it out and the job is refused `audio_to_video_unsupported` before
+anything loads). The port's own `A2VidPipelineTwoStage` (`a2vid_two_stage.py`) is the
+reference, but it needs the dev transformer and its LoRA, which the block does not pull; the
+worker applies the same frozen audio inside the `DistilledPipeline` it already drives. Read from
+the pinned port (ltx-pipelines-mlx at the commit the env pins):
+
+- `_stage1` (`distilled.py:450-459`) and `_stage2` (`distilled.py:622-631`) each build a noised
+  audio `LatentState` and pass that same object to `self._pre_denoise_flush` (`:473`, `:640`)
+  and then to `self._run_denoise_loop` (`:474`, `:641`). `LatentState`
+  (`ltx_core_mlx/conditioning/types/latent_cond.py:44-78`) is a plain mutable `@dataclass`, and
+  both loops read `audio_state.latent`, its mask and `frozen` only after the flush
+  (`utils/samplers.py`: the deterministic loop at 167 and 181-182, the ancestral one at 316
+  and 329-330).
+- So the worker's subclass overrides `_pre_denoise_flush` (a `@staticmethod` in `_base.py:723`,
+  called through `self`) and, when the job carries a soundtrack, makes the audio state the
+  soundtrack's tokens as both latent and clean latent, a denoise mask of 0 and `frozen = True`,
+  exactly the state `a2vid_two_stage.py:272-278` builds, before handing on to the port's flush.
+  Each step then blends the prediction back to the clean tokens (`apply_denoise_mask`), and
+  `_frozen_sigma_kwargs` (`samplers.py:82-103`) conditions the model on audio sigma 0. Stage 2
+  is frozen to the original tokens too, not to stage 1's output, as upstream does
+  (`a2vid_two_stage.py:367-376`). Tiling passes the audio arguments through untouched
+  (`modality_tiling.py`, `TiledLTXModel.__call__`).
+- Stage 1 of a 2.5 pack normally runs the ancestral (SDE) Euler loop (`ancestral=self._is_25`,
+  `distilled.py:484`). With a soundtrack the subclass's `_run_denoise_loop` asks for the
+  deterministic one: custom-audio lip sync on LTX-2.5 distilled was reported working with plain
+  Euler in both passes, unguided, the audio frozen in both and never regenerated between them
+  (huggingface.co/Lightricks/LTX-2.5/discussions/44, August 2026; Lightricks say their own
+  dubbing pipeline is still being adapted to 2.5). `done.video.sampling` names the sampler each
+  pass ran.
+
+The encoding follows `a2vid_two_stage.py:172-201`: 16 kHz stereo (PyAV, the same `-ac 2` pan law
+as the port's `load_audio`), the encoder's `encode_audio`, sliced to
+`compute_audio_token_count(frames, fps)` tokens. The encoder is given two latents' worth past
+those tokens (`ENCODER_MARGIN_LATENTS`): the token count rounds `seconds x 25` and can reach past
+the clip's last frame, and the encoder's framing can make one latent fewer than the samples
+suggest; that tail is more of the soundtrack where it goes on and silence where it ends, and is
+dropped with the tokens past the count. The clip's sound is the soundtrack itself, not the VAE's
+re-synthesis (as `a2vid_two_stage.py:402-428`): decoded through PyAV to 48 kHz stereo 16-bit, a
+mono file copied to both sides at its own level, cut to exactly `frames x 48000 / fps` samples.
+
+The server owns the length. It tells the inputs apart by their bytes (`sniff`: PNG, JPEG, WebP;
+WAV, FLAC, MP3, Ogg), measures the soundtrack with ffprobe (`format=duration`), and with no
+`duration_s` or `num_frames` sets the clip to the longest 8k+1 count that fits inside it
+(`params.longest_covered`). A clip longer than its soundtrack is refused
+`video_soundtrack_too_short`; a shorter one carries the soundtrack's first part, and
+`done.video.soundtrack` says how much (`total_s`, `used_s`, `unused_s`). If the decoded sound
+turns out shorter than the container's stated length the worker fails the job saying so.
+Image plus soundtrack is held to the image-to-video ceiling (the picture's per-token timestep);
+a soundtrack alone adds per-token timesteps only to the few audio tokens and keeps the
+text-to-video one.
 
 **The weights.** `dgrauet/ltx-2.5-mlx-q8`, revision
 `746ca9aacb697d2c739f544d68b584214dedcc75` (2026-08-28), made by the port's author with
@@ -406,6 +460,7 @@ the room for q8.
 | frame count | 8k+1, at most 505 while tiling (`tiled_max_frames`), else 145; frame rate 24 or 25 |
 | text-to-video | at most 56,320 video tokens while tiling (`tiled_max_video_tokens`: 1280x704 x 505 frames, 21 s at 24 fps), else 16,720 (1280x704 x 145 frames, 6.04 s), the same as the PC |
 | image-to-video | at most **14,080** video tokens (1280x704 x 121 frames, 5.04 s), higher than the PC's 8,800: the Mac has the memory for the per-token modulation |
+| audio-to-video | the text-to-video ceiling with a soundtrack alone, the image-to-video one with a picture and a soundtrack; the clip at most as long as the soundtrack |
 | steps | exactly 8, then 3 refining steps |
 
 A video token is counted at full size, `((frames - 1) / 8 + 1) x (width / 32) x (height / 32)`,

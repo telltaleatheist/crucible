@@ -2588,7 +2588,11 @@ export interface SegmentResult {
   readonly artifacts: readonly string[];
 }
 
-/** What a `video` job makes: a clip with sound from `prompt`, or from `prompt` and a start `image`. */
+/**
+ * What a `video` job makes: a clip with sound from `prompt`, or from `prompt` and a start `image`;
+ * or, with a `soundtrack`, a picture made to that sound (lips in sync with speech), alone or from
+ * a start `image`. The soundtrack is the clip's sound, held fixed; only the Mac's arm takes one.
+ */
 export interface VideoOptions {
   readonly model: string;
   readonly prompt: string;
@@ -2608,6 +2612,30 @@ export interface VideoOptions {
   /** The first frame, for image-to-video: a PNG, JPEG or WebP. */
   readonly image?: JobInput | null;
   readonly imageName?: string;
+  /**
+   * The clip's sound, for audio-to-video: a WAV, FLAC, MP3 or Ogg. With no `durationS` or
+   * `numFrames` the clip is as long as the soundtrack (rounded down to the frame grid); a
+   * shorter clip is made to its first part. Not with `audio: false`.
+   */
+  readonly soundtrack?: JobInput | null;
+  readonly soundtrackName?: string;
+}
+
+/** What a clip did with a supplied soundtrack. */
+export interface VideoSoundtrack {
+  /** The soundtrack's input name and the format it was read as (`WAV`, `FLAC`, `MP3`, `Ogg`). */
+  readonly input: string;
+  readonly format: string;
+  /** The soundtrack's whole length, and how much of it the clip carries (its first `usedS`). */
+  readonly totalS: number;
+  readonly usedS: number;
+  readonly unusedS: number;
+  readonly covers: string;
+  /** Always `supplied`: the clip's sound is the soundtrack itself, not generated. */
+  readonly sound: string;
+  readonly sampleRate: number | null;
+  readonly channels: number | null;
+  readonly audioTokens: number | null;
 }
 
 /** A `video` job's effective parameters and measurements, read by {@link readVideoResult}. */
@@ -2623,7 +2651,7 @@ export interface VideoResult {
   readonly backend: string;
   readonly engine: string;
   readonly dtype: string;
-  readonly mode: 'text-to-video' | 'image-to-video';
+  readonly mode: 'text-to-video' | 'image-to-video' | 'audio-to-video' | 'image-audio-to-video';
   readonly prompt: string;
   /** The start picture's input name, for image-to-video; else null. */
   readonly input: string | null;
@@ -2641,6 +2669,8 @@ export interface VideoResult {
   readonly audioSeconds: number | null;
   readonly audioSampleRate: number | null;
   readonly audioChannels: number | null;
+  /** The supplied soundtrack, for audio-to-video; else null. */
+  readonly soundtrack: VideoSoundtrack | null;
   /** The artifact's name, `video.mp4`. */
   readonly artifact: string;
   readonly bytes: number | null;

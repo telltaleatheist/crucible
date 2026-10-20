@@ -168,6 +168,7 @@ export type {
   SegmentResult,
   VideoOptions,
   VideoResult,
+  VideoSoundtrack,
   AlignWindow,
   AlignWindowResult,
   AsrOptions,

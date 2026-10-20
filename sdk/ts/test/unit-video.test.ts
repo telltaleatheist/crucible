@@ -77,6 +77,7 @@ const DONE_CLIP = {
   audio_seconds: 3.04,
   audio_sample_rate: 48000,
   audio_channels: 2,
+  soundtrack: null,
   artifact: 'video.mp4',
   bytes: 2_900_000,
   encoder: 'libopenh264',
@@ -130,6 +131,59 @@ test('a start picture goes as the one input', async () => {
     num_frames: 73,
   });
   assert.deepEqual(Object.keys(sent.inputs), ['start.png']);
+});
+
+test('a soundtrack goes as its own input, beside a start picture or alone', async () => {
+  answer(200, { job_id: 'job-video-3' });
+  await client().video({
+    model: 'ltx-2.5-distilled',
+    prompt: 'She looks into the camera and says the line',
+    image: { blobId: 'face-1' },
+    soundtrack: { blobId: 'line-1' },
+  });
+  const sent = JSON.parse(lastBody);
+  assert.deepEqual(sent.params, { prompt: 'She looks into the camera and says the line' });
+  assert.deepEqual(sent.inputs, { 'start.png': { blob_id: 'face-1' }, soundtrack: { blob_id: 'line-1' } });
+  answer(200, { job_id: 'job-video-4' });
+  await client().video({
+    model: 'ltx-2.5-distilled',
+    prompt: 'x',
+    soundtrack: { blobId: 'line-1' },
+    soundtrackName: 'line.wav',
+  });
+  assert.deepEqual(Object.keys(JSON.parse(lastBody).inputs), ['line.wav']);
+});
+
+test('video() refuses a soundtrack with audio false, and one name for two inputs', async () => {
+  await assert.rejects(
+    client().video({ model: 'ltx-2.5-distilled', prompt: 'x', soundtrack: { blobId: 'a' }, audio: false }),
+    CrucibleConfigError,
+  );
+  await assert.rejects(
+    client().video({
+      model: 'ltx-2.5-distilled', prompt: 'x', image: { blobId: 'a' }, soundtrack: { blobId: 'b' },
+      imageName: 'in', soundtrackName: 'in',
+    }),
+    CrucibleConfigError,
+  );
+});
+
+test('readVideoResult reads a clip made to a soundtrack', () => {
+  const made = {
+    ...DONE_CLIP,
+    mode: 'image-audio-to-video',
+    soundtrack: {
+      input: 'line.wav', format: 'WAV', total_s: 3.0, used_s: 2.042, unused_s: 0.958,
+      covers: 'its first 2.042 s', sound: 'supplied', sample_rate: 48000, channels: 2, audio_tokens: 51,
+    },
+  };
+  const result = readVideoResult({ artifacts: ['video.mp4'], extra: { video: made } });
+  assert.equal(result.mode, 'image-audio-to-video');
+  assert.deepEqual(
+    [result.soundtrack?.totalS, result.soundtrack?.usedS, result.soundtrack?.sound, result.soundtrack?.audioTokens],
+    [3.0, 2.042, 'supplied', 51],
+  );
+  assert.equal(readVideoResult({ artifacts: [], extra: { video: DONE_CLIP } }).soundtrack, null);
 });
 
 test('video() refuses a length said twice and a lone side before sending', async () => {

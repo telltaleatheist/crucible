@@ -266,10 +266,10 @@ def test_image_to_video_has_its_own_lower_ceiling_and_it_is_named_before_the_wor
 @pytest.mark.parametrize(
     ("inputs", "words"),
     [
-        ({"notes.txt": {"inline_base64": base64.b64encode(b"hello").decode("ascii")}}, "not a PNG"),
+        ({"notes.txt": {"inline_base64": base64.b64encode(b"hello").decode("ascii")}}, "neither a PNG"),
         (
             {"a.png": {"inline_base64": PNG}, "b.png": {"inline_base64": PNG}},
-            "reads at most one",
+            "reads at most one picture",
         ),
     ],
 )
@@ -800,3 +800,148 @@ def test_the_probes_parse_what_ioreg_and_nvidia_smi_print() -> None:
     assert gpubusy.verdict({"gpu_busy_mean_pct": 90.0}, 90.0) is True
     assert gpubusy.verdict({"gpu_busy_mean_pct": None}, 90.0) is None
     assert gpubusy.verdict({"gpu_busy_mean_pct": 50.0}, None) is None
+
+
+def _wav(seconds: float, rate: int = 8000) -> str:
+    import io
+    import wave
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(b"\x00\x10" * round(seconds * rate))
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+@pytest.fixture
+def ffprobe(monkeypatch: pytest.MonkeyPatch) -> str:
+    import shutil
+
+    found = shutil.which("ffprobe")
+    if found is None:
+        pytest.skip("no ffprobe on this machine; Crucible's own ships beside its ffmpeg")
+    monkeypatch.setattr(hosttools, "ffprobe_path", lambda: found)
+    return found
+
+
+def test_the_mac_makes_a_clip_to_a_soundtrack_as_long_as_the_soundtrack(
+    mac: TestClient, auth: dict[str, str], transcript: Path, ffprobe: str
+) -> None:
+    _, events = run_job(
+        mac, auth,
+        params={"prompt": PROMPT, "width": 768, "height": 512},
+        inputs={"line.wav": {"inline_base64": _wav(3.0)}},
+    )
+    assert events[-1]["event"] == "done", events[-1]
+    video = events[-1]["data"]["video"]
+    assert (video["mode"], video["input"], video["num_frames"], video["duration_s"]) == (
+        "audio-to-video", None, 65, 2.708,
+    )
+    assert video["soundtrack"] == {
+        "input": "line.wav", "format": "WAV", "total_s": 3.0, "used_s": 2.708,
+        "unused_s": 0.292, "covers": "its first 2.708 s", "sound": "supplied",
+        "sample_rate": 48000, "channels": 2, "audio_tokens": 68,
+    }
+    assert video["audio"] is True and video["audio_seconds"] == round(65 / 24, 3)
+    assert _in_order(events) == [
+        "encoding", "audio_encoding", "denoising", "refining", "decoding", "muxing", "done",
+    ]
+    made = rows(transcript, "generate")[0]
+    assert made["mode"] == "audio-to-video" and made["image_path"] is None
+    assert made["soundtrack_path"].endswith("line.wav")
+
+
+def test_a_picture_and_a_soundtrack_make_a_talking_clip_of_the_soundtrack_s_first_part(
+    mac: TestClient, auth: dict[str, str], transcript: Path, ffprobe: str
+) -> None:
+    _, events = run_job(
+        mac, auth,
+        params={"prompt": PROMPT, "width": 768, "height": 512, "duration_s": 2},
+        inputs={"face": {"inline_base64": PNG}, "voice": {"inline_base64": _wav(3.0)}},
+    )
+    assert events[-1]["event"] == "done", events[-1]
+    video = events[-1]["data"]["video"]
+    assert (video["mode"], video["input"], video["num_frames"]) == ("image-audio-to-video", "face", 49)
+    assert (video["soundtrack"]["used_s"], video["soundtrack"]["total_s"]) == (2.042, 3.0)
+    assert video["soundtrack"]["covers"] == "its first 2.042 s"
+    made = rows(transcript, "generate")[0]
+    assert made["image_path"].endswith("face") and made["soundtrack_path"].endswith("voice")
+
+
+@pytest.mark.parametrize(
+    ("params", "seconds", "code", "words"),
+    [
+        ({"prompt": PROMPT, "width": 768, "height": 512, "num_frames": 49}, 1.0,
+         "video_soundtrack_too_short", "longest clip it covers is 17 frames"),
+        ({"prompt": PROMPT, "width": 768, "height": 512}, 0.25,
+         "video_soundtrack_too_short", "shorter than the shortest clip"),
+        ({"prompt": PROMPT, "width": 768, "height": 512, "audio": False}, 3.0,
+         "video_param_unsupported", "is the clip's sound"),
+    ],
+)
+def test_the_mac_refuses_a_soundtrack_job_by_name_before_the_worker(
+    mac: TestClient, auth: dict[str, str], transcript: Path, ffprobe: str,
+    params: dict, seconds: float, code: str, words: str,
+) -> None:
+    _, events = run_job(mac, auth, params=params, inputs={"a.wav": {"inline_base64": _wav(seconds)}})
+    assert events[-1]["event"] == "failed", events[-1]
+    error = events[-1]["data"]["error"]
+    assert error["code"] == code, error
+    assert words in error["message"], error["message"]
+    assert rows(transcript, "load") == []
+
+
+def test_the_pc_refuses_a_soundtrack_before_it_measures_or_loads_anything(
+    ready: TestClient, auth: dict[str, str], transcript: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(hosttools, "ffprobe_path", lambda: None)
+    _, events = run_job(ready, auth, inputs={
+        "face.png": {"inline_base64": PNG}, "line.wav": {"inline_base64": _wav(3.0)},
+    })
+    assert events[-1]["event"] == "failed", events[-1]
+    error = events[-1]["data"]["error"]
+    assert error["code"] == "audio_to_video_unsupported", error
+    assert "cuda-linux" in error["message"]
+    assert rows(transcript, "load") == []
+
+
+@pytest.mark.parametrize(
+    ("inputs", "words"),
+    [
+        ({"a.wav": {"inline_base64": _wav(1.0)}, "b.wav": {"inline_base64": _wav(1.0)}},
+         "2 soundtracks ('a.wav', WAV, 'b.wav', WAV)"),
+        ({"a": {"inline_base64": PNG}, "b": {"inline_base64": PNG}}, "2 pictures"),
+        ({"notes.txt": {"inline_base64": base64.b64encode(b"hello").decode("ascii")}},
+         "neither a PNG, JPEG, WebP picture nor a WAV, FLAC, MP3, Ogg soundtrack"),
+    ],
+)
+def test_inputs_other_than_one_picture_and_one_soundtrack_are_refused(
+    mac: TestClient, auth: dict[str, str], transcript: Path, inputs: dict, words: str
+) -> None:
+    _, events = run_job(mac, auth, inputs=inputs)
+    assert events[-1]["event"] == "failed"
+    error = events[-1]["data"]["error"]
+    assert error["code"] == "invalid_inputs" and words in error["message"], error
+    assert rows(transcript, "load") == []
+
+
+def test_a_soundtrack_ffprobe_cannot_read_is_refused(
+    mac: TestClient, auth: dict[str, str], transcript: Path, ffprobe: str
+) -> None:
+    broken = base64.b64encode(b"RIFF\x24\0\0\0WAVEjunkjunkjunk").decode("ascii")
+    _, events = run_job(mac, auth, inputs={"line.wav": {"inline_base64": broken}})
+    error = events[-1]["data"]["error"]
+    assert error["code"] == "invalid_inputs" and "cannot read its length" in error["message"], error
+    assert rows(transcript, "load") == []
+
+
+def test_no_ffprobe_is_refused_by_name_for_a_soundtrack(
+    mac: TestClient, auth: dict[str, str], transcript: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(hosttools, "ffprobe_path", lambda: None)
+    _, events = run_job(mac, auth, inputs={"line.wav": {"inline_base64": _wav(3.0)}})
+    error = events[-1]["data"]["error"]
+    assert error["code"] == "ffmpeg_missing" and "ffprobe" in error["message"], error
+    assert rows(transcript, "load") == []

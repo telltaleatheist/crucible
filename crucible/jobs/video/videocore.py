@@ -43,8 +43,10 @@ SPANS: tuple[tuple[str, float], ...] = (
 
 # The Mac's arm (ltx2mlx_worker.py): the text encoder and connector are one stage, the start
 # picture is encoded inside denoising, and a full-size refining pass follows the half-size one.
+# A supplied soundtrack is encoded in its own stage after the text, and has no audio decoding.
 TWO_PASS_SPANS: tuple[tuple[str, float], ...] = (
-    ("encoding", 0.08),
+    ("encoding", 0.06),
+    ("audio_encoding", 0.02),
     ("denoising", 0.30),
     ("refining", 0.40),
     ("decoding", 0.12),
@@ -152,6 +154,7 @@ class Job:
         self.refine_steps = nullable("refine_steps", int)
         self.audio = required("audio", bool)
         self.image_path = nullable("image_path", str)
+        self.soundtrack_path = nullable("soundtrack_path", str)
         self.output_path = required("output_path", str)
         self.ffmpeg = required("ffmpeg", str)
         self.revision = required("revision", str)

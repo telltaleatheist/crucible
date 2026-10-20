@@ -87,7 +87,7 @@ gated = true
 dtype = "bfloat16"
 memory_bytes_estimate = 29000000000
 memory_basis = "declared"
-memory_note = "declared 2026-09-30 from the pinned pack's file sizes and the ltx-2-mlx source at 1724ca673d59f023a8a95efee06e5d36d61c2765, not measured through Crucible: one stage in unified memory at a time, MLX peak per stage (mx.get_peak_memory). The largest is refining, the full-size pass: the distilled transformer at int8 (20.6 GB file, all of it in memory, no block streaming) plus about 150 KB of activations per video token (the widest block's feed-forward, the attention inputs, per-token modulation for image-to-video), 23 GB at 1280x704 x 145 frames (16,720 tokens), declared 29 GB. The Gemma 4 text encoder at int8 (16.0 GB) and the connector (4.0 GB) are the encoding stage; see stage_memory_bytes. Needs a Mac with 29 GB left after the 16 GB desktop allowance: 48 GB or more"
+memory_note = "declared 2026-09-30 from the pinned pack's file sizes and the ltx-2-mlx source at 1724ca673d59f023a8a95efee06e5d36d61c2765, not measured through Crucible: one stage in unified memory at a time, MLX peak per stage (mx.get_peak_memory). The largest is refining, the full-size pass: the distilled transformer at int8 (20.6 GB file, all of it in memory, no block streaming) plus about 150 KB of activations per video token (the widest block's feed-forward, the attention inputs, per-token modulation for image-to-video), 23 GB at 1280x704 x 145 frames (16,720 tokens), declared 29 GB. The Gemma 4 text encoder at int8 (16.0 GB) and the connector (4.0 GB) are the encoding stage; a supplied soundtrack is encoded on its own after it (audio_encoding: the audio VAE's encoder from audio_vae.safetensors, 107 MB with its decoder, over the clip's mel spectrogram, declared at the audio_decoding stage's 3 GB); see stage_memory_bytes. Needs a Mac with 29 GB left after the 16 GB desktop allowance: 48 GB or more"
 files = [
   "LICENSE",
   "README.md",
@@ -124,6 +124,7 @@ max_video_tokens = 16720
 max_video_tokens_image_to_video = 14080
 tiled_max_frames = 505
 tiled_max_video_tokens = 56320
+audio_to_video = true
 steps = 8
 refine_steps = 3
 audio_sample_rate = 48000
@@ -131,6 +132,7 @@ mlx_cache_limit_bytes = 4000000000
 
 [backends.mlx-darwin.stage_memory_bytes]
 encoding = 23000000000
+audio_encoding = 3000000000
 denoising = 26000000000
 refining = 29000000000
 decoding = 16000000000

@@ -10,12 +10,18 @@ a batch that keeps it resident can skip the text stage for a prompt it has read,
 and the frames come back to videocore's mux like the PC's:
 
 - encoding: the pack's Gemma 4 text encoder (int8) and its connector; freed after.
+- audio_encoding (a supplied soundtrack only): the audio VAE's encoder turns the soundtrack's
+  first clip-length into audio tokens; freed after. Both passes then hold those tokens fixed
+  (a frozen audio state, denoise mask 0) and denoise only the picture: the port's
+  a2vid_two_stage applied inside the distilled pipeline (see `stepping_pipeline`).
 - denoising: the distilled transformer (int8, all of it in memory unless the machine's
   [video_desktop] table asks for block streaming), the VAE encoder and the upscaler load; the
   start picture of an image-to-video job is encoded here; 8 steps at half the size.
 - refining: the 2x latent upscale, then 3 steps at full size; the transformer is freed after.
 - decoding: the conv VAE decoder, tiled to DECODE_BUDGET_BYTES, into 8-bit RGB frames.
-- audio_decoding: the audio VAE and the vocoder with bandwidth extension, 48 kHz stereo.
+- audio_decoding: the audio VAE and the vocoder with bandwidth extension, 48 kHz stereo. With
+  a supplied soundtrack there is none: the clip's sound is the soundtrack itself, decoded
+  through PyAV to 48 kHz stereo and cut to the clip.
 
 With a [video_desktop] table the job also sends a `desktop` dict: block streaming, and a
 temporal (and optional spatial) tiling of each pass through the port's modality tiling, so
@@ -52,6 +58,19 @@ DECODE_BUDGET_BYTES = 12 * 1024**3
 IMAGE_CRF = 18
 
 AUDIO_SAMPLE_RATE = 48000
+
+# The audio VAE's encoder reads 16 kHz stereo (ltx_core_mlx/model/audio_vae/processor.py) and
+# makes 25 latents a second (ltx_core_mlx/utils/positions.py, AUDIO_LATENTS_PER_SECOND).
+ENCODER_SAMPLE_RATE = 16000
+
+AUDIO_LATENTS_PER_SECOND = 25
+
+# A clip's audio tokens are round(seconds x 25), which can reach half a latent past its last
+# frame, and the encoder's framing (a centred STFT, then 4x downsampling) can make one latent
+# fewer than the samples' length suggests. So the encoder is given this many latents' worth
+# beyond the tokens it must make: more of the soundtrack where it goes on, silence where it
+# ends. No frame of the clip is paired with that tail; the tokens past `count` are dropped.
+ENCODER_MARGIN_LATENTS = 2
 
 DEFAULT_REFINE_STEPS = 3
 
@@ -224,16 +243,48 @@ class DutyCycle:
             self.paused_s += pause
 
 
+def freeze_soundtrack(state, tokens, zeros) -> None:
+    """Make `state`, a pass's audio LatentState, the supplied soundtrack held fixed.
+
+    The state a2vid_two_stage builds (ltx_pipelines_mlx/a2vid_two_stage.py, audio_state_1 and
+    audio_state_2): the soundtrack's tokens as both the latent and the clean latent, a denoise
+    mask of 0 (every token preserved: apply_denoise_mask hands back the clean latent after each
+    step, and a step from a latent to itself stays there) and `frozen`, which conditions the
+    model on audio sigma 0 (utils/samplers.py, _frozen_sigma_kwargs). The positions the pipeline
+    built stay: compute_audio_positions of the same token count. LatentState is a plain mutable
+    dataclass and the loop reads these fields after the flush.
+    """
+    if tuple(state.latent.shape) != tuple(tokens.shape):
+        raise RuntimeError(
+            f"the pipeline built an audio state of {tuple(state.latent.shape)} for this pass, "
+            f"but the soundtrack was encoded to {tuple(tokens.shape)}; both are counted from "
+            "the same frames and frame rate and must agree"
+        )
+    state.latent = tokens
+    state.clean_latent = tokens
+    state.denoise_mask = zeros((1, tokens.shape[1], 1))
+    state.frozen = True
+
+
 def stepping_pipeline(base):
-    """`base` (DistilledPipeline) with the prompt's embeddings handed in.
+    """`base` (DistilledPipeline) with the prompt's embeddings, and any soundtrack, handed in.
 
     Its stage 1 encodes the prompt itself; here the encoding stage has already run (or the
     prompt cache answered), so loading the text encoder is a no-op and encoding returns what
     that stage produced. Built at call time so this file imports without mlx.
+
+    With `soundtrack` set (its encoded tokens) both passes run audio-to-video. _stage1 and
+    _stage2 (ltx_pipelines_mlx/distilled.py) each build a noised audio state and hand that same
+    object to `self._pre_denoise_flush` and then to `self._run_denoise_loop`; the flush is where
+    it becomes the frozen soundtrack, in both passes, so stage 2 holds the original tokens, not
+    stage 1's output. And stage 1 runs the deterministic Euler loop instead of the 2.5 pack's
+    ancestral one: custom-audio lip sync on LTX-2.5 distilled was found to work with plain
+    Euler in both passes, unguided (huggingface.co/Lightricks/LTX-2.5/discussions/44, 2026-08).
     """
 
     class Stepping(base):
         embeds = None
+        soundtrack = None
 
         def _load_text_encoder(self) -> None:
             return None
@@ -246,7 +297,65 @@ def stepping_pipeline(base):
                 )
             return self.embeds
 
+        def _pre_denoise_flush(self, video_state, audio_state) -> None:
+            if self.soundtrack is not None:
+                import mlx.core as mx
+
+                freeze_soundtrack(
+                    audio_state, self.soundtrack, lambda shape: mx.zeros(shape, dtype=mx.bfloat16)
+                )
+            super()._pre_denoise_flush(video_state, audio_state)
+
+        def _run_denoise_loop(self, **arguments):
+            if self.soundtrack is not None:
+                arguments["ancestral"] = False
+            return super()._run_denoise_loop(**arguments)
+
     return Stepping
+
+
+def decode_soundtrack(path: str, sample_rate: int, fmt: str, samples: int, level_mono: bool):
+    """The soundtrack's first `samples` stereo samples per channel at `sample_rate` in `fmt`
+    (a PyAV sample format), as a numpy array of (2, samples), through PyAV (the video env has
+    it; the port's own load_audio shells out to an ffmpeg on PATH and answers None for any
+    failure). Fewer come back when the soundtrack ends first; the caller says what it needed.
+
+    A mono soundtrack becomes stereo by ffmpeg's pan law (each side 3 dB down), which is what
+    the port's `-ac 2` hands the audio encoder; with `level_mono` it is instead copied to both
+    sides at its own level, so the clip sounds as loud as the file it was made from.
+    """
+    import av
+    import numpy
+
+    kept: list = []
+    have = 0
+    with av.open(path) as container:
+        if not container.streams.audio:
+            raise RuntimeError(f"{os.path.basename(path)} has no audio stream")
+        mono = level_mono and container.streams.audio[0].codec_context.channels == 1
+        width = 1 if mono else 2
+        resampler = av.AudioResampler(
+            format=fmt, layout="mono" if mono else "stereo", rate=sample_rate
+        )
+
+        def take(frames) -> None:
+            nonlocal have
+            for frame in frames:
+                block = frame.to_ndarray()
+                if not frame.format.is_planar:
+                    block = block.reshape(-1, width).T
+                kept.append(block)
+                have += block.shape[1]
+
+        for frame in container.decode(container.streams.audio[0]):
+            take(resampler.resample(frame))
+            if have >= samples:
+                break
+        else:
+            take(resampler.resample(None))
+    if not kept:
+        raise RuntimeError(f"{os.path.basename(path)} decoded to no sound at all")
+    return numpy.repeat(numpy.concatenate(kept, axis=1)[:, :samples], 3 - width, axis=0)
 
 
 class StepReport:
@@ -344,6 +453,7 @@ class LtxMlxEngine:
     def _unload(self) -> None:
         pipe = self._pipe
         pipe.embeds = None
+        pipe.soundtrack = None
         pipe.stepwise = None
         pipe.dit = None
         pipe.upsampler = None
@@ -351,6 +461,7 @@ class LtxMlxEngine:
         pipe._tile_count = None
         pipe.prompt_encoder.free()
         pipe.image_conditioner.free()
+        pipe.audio_conditioner.free()
         pipe.video_decoder_block.free()
         pipe.audio_decoder_block.free()
         gc.collect()
@@ -380,6 +491,55 @@ class LtxMlxEngine:
             return None
         self._prompts.move_to_end(job.prompt_key)
         return found[0]
+
+    def _encode_soundtrack(self, job):
+        """The soundtrack's audio tokens for this clip: (1, round(seconds x 25), 128)."""
+        import numpy
+        from ltx_core_mlx.model.audio_vae import encode_audio
+        from ltx_core_mlx.utils.positions import compute_audio_token_count
+
+        mx = self._mx
+        pipe = self._pipe
+        count = compute_audio_token_count(job.num_frames, frame_rate=float(job.fps))
+        wanted = (count + ENCODER_MARGIN_LATENTS) * ENCODER_SAMPLE_RATE // AUDIO_LATENTS_PER_SECOND
+        wave = decode_soundtrack(
+            job.soundtrack_path, ENCODER_SAMPLE_RATE, "fltp", wanted, level_mono=False
+        )
+        clip = job.num_frames * ENCODER_SAMPLE_RATE // job.fps
+        if wave.shape[1] < clip:
+            raise RuntimeError(
+                f"the soundtrack decoded to {wave.shape[1] / ENCODER_SAMPLE_RATE:.3f} s, short of "
+                f"the {job.duration_s:.3f} s clip the server measured it long enough for: its "
+                "container states a longer length than its sound"
+            )
+        wave = numpy.pad(wave.astype(numpy.float32), ((0, 0), (0, wanted - wave.shape[1])))
+        encoder, processor = pipe.audio_conditioner.load()
+        try:
+            latent = encode_audio(mx.array(wave)[None], ENCODER_SAMPLE_RATE, encoder, processor)
+            if latent.shape[2] < count:
+                raise RuntimeError(
+                    f"the audio VAE made {latent.shape[2]} latents of {wanted} samples, fewer "
+                    f"than the {count} audio tokens of a {job.num_frames}-frame clip at "
+                    f"{job.fps} fps"
+                )
+            tokens, _ = pipe.audio_patchifier.patchify(latent[:, :, :count, :])
+            mx.eval(tokens)
+            return tokens
+        finally:
+            pipe.audio_conditioner.free()
+
+    def _soundtrack_pcm(self, job) -> bytes:
+        """The soundtrack itself for the mux, 48 kHz stereo 16-bit, cut to the clip."""
+        samples = job.num_frames * AUDIO_SAMPLE_RATE // job.fps
+        pcm = decode_soundtrack(
+            job.soundtrack_path, AUDIO_SAMPLE_RATE, "s16", samples, level_mono=True
+        )
+        if pcm.shape[1] < samples:
+            raise RuntimeError(
+                f"the soundtrack decoded to {pcm.shape[1] / AUDIO_SAMPLE_RATE:.3f} s at "
+                f"{AUDIO_SAMPLE_RATE} Hz, short of the {job.duration_s:.3f} s clip"
+            )
+        return pcm.T.astype("<i2").tobytes()
 
     def _start_images(self, job):
         if job.image_path is None:
@@ -488,6 +648,7 @@ class LtxMlxEngine:
         peaks: dict = {}
         refine_steps = job.refine_steps if job.refine_steps is not None else DEFAULT_REFINE_STEPS
         prepared = None
+        tokens = None
         latent_frames = (job.num_frames - 1) // 8 + 1
         plans = [
             tile_plan((latent_frames, job.height // 64, job.width // 64), self._desktop),
@@ -505,6 +666,11 @@ class LtxMlxEngine:
                 peaks["encoding"] = self._close("encoding")
                 self._remember(job, embeds)
             pipe.embeds = embeds
+            if job.soundtrack_path is not None:
+                progress.enter("audio_encoding")
+                pipe.soundtrack = self._encode_soundtrack(job)
+                tokens = int(pipe.soundtrack.shape[1])
+                peaks["audio_encoding"] = self._close("audio_encoding")
             pipe.stepwise = StepReport(self._mx, progress, self._duty)
             images, prepared = self._start_images(job)
             progress.enter("denoising", job.steps)
@@ -523,7 +689,9 @@ class LtxMlxEngine:
             del video
             peaks["decoding"] = self._close("decoding")
             pcm, channels, rate = None, 0, 0
-            if job.audio:
+            if job.soundtrack_path is not None:
+                pcm, channels, rate = self._soundtrack_pcm(job), 2, AUDIO_SAMPLE_RATE
+            elif job.audio:
                 progress.enter("audio_decoding")
                 pcm, channels = self._decode_audio(audio)
                 rate = AUDIO_SAMPLE_RATE
@@ -537,14 +705,18 @@ class LtxMlxEngine:
             job.width, job.height, job.fps, iter(frames), len(frames),
             pcm=pcm, channels=channels, sample_rate=rate,
         )
+        frozen = job.soundtrack_path is not None
+        first = "euler" if frozen else "euler ancestral"
+        held = ", the soundtrack's audio frozen" if frozen else ""
         return clip, peaks, {
             "prompt_cache": cache,
+            "soundtrack": {"audio_tokens": tokens} if frozen else None,
             "sampling": {
                 "passes": [
                     {"size": "half", "steps": job.steps,
-                     "sampler": "euler ancestral, the LTX-2.5 distilled sigma schedule, unguided"},
+                     "sampler": f"{first}, the LTX-2.5 distilled sigma schedule, unguided{held}"},
                     {"size": "full", "steps": refine_steps,
-                     "sampler": "euler, the LTX-2.5 stage-2 distilled sigmas, unguided",
+                     "sampler": f"euler, the LTX-2.5 stage-2 distilled sigmas, unguided{held}",
                      "upscaler": "spatial_upscaler_x2_v1_0"},
                 ],
             },

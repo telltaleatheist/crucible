@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+import subprocess
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -24,6 +25,8 @@ from ...residency import (
     say_to,
 )
 from ...videomodels import (
+    AUDIO_TO_VIDEO,
+    IMAGE_AUDIO_TO_VIDEO,
     IMAGE_TO_VIDEO,
     LTX,
     LTX_2_MLX,
@@ -45,7 +48,7 @@ from ..template import (
     run_model,
 )
 from ..unload import UnloadJobType
-from .params import MAX_SEED, Settled, VideoParams, settle
+from .params import MAX_SEED, Settled, VideoParams, refuse_mode, settle
 
 __all__ = [
     "JOB_TYPES",
@@ -80,7 +83,22 @@ IMAGE_MAGIC: tuple[tuple[bytes, int, str], ...] = (
     (b"WEBP", 8, "WebP"),
 )
 
+AUDIO_MAGIC: tuple[tuple[bytes, int, str], ...] = (
+    (b"WAVE", 8, "WAV"),
+    (b"fLaC", 0, "FLAC"),
+    (b"ID3", 0, "MP3"),
+    (b"OggS", 0, "Ogg"),
+)
+
+AUDIO_FORMATS = ("WAV", "FLAC", "MP3", "Ogg")
+
+SNIFF_BYTES = 16
+
 MP4_MAGIC = (b"ftyp", 4)
+
+FFPROBE_WHY = "measures a soundtrack's length with ffprobe, which ships beside ffmpeg"
+
+SOUNDTRACK_PROBE_TIMEOUT_SECONDS = 120
 
 
 def worker_script(engine: str) -> Path:
@@ -128,28 +146,131 @@ def require_video_weights(
         raise ApiError(409, "model_not_installed", str(exc), details) from None
 
 
-def start_image(ctx: JobContext) -> Path | None:
-    """The one start image of an image-to-video job, or None for text-to-video."""
-    inputs = ctx.inputs()
-    if not inputs:
-        return None
-    if len(inputs) != 1:
+@dataclass(frozen=True)
+class Soundtrack:
+    """A supplied soundtrack: the clip's sound, held fixed while the picture is made to it.
+    `seconds` is None until it is measured, which happens only once the arm has said it
+    takes one."""
+
+    name: str
+    path: Path
+    format: str
+    seconds: float | None = None
+
+
+@dataclass(frozen=True)
+class ClipInputs:
+    picture: Path | None
+    soundtrack: Soundtrack | None
+
+    @property
+    def mode(self) -> str:
+        if self.soundtrack is None:
+            return TEXT_TO_VIDEO if self.picture is None else IMAGE_TO_VIDEO
+        return AUDIO_TO_VIDEO if self.picture is None else IMAGE_AUDIO_TO_VIDEO
+
+
+def sniff(head: bytes) -> tuple[str, str] | None:
+    """("picture" or "soundtrack", the format) for an input's first bytes, or None.
+
+    By content, never by name: a WAV is RIFF....WAVE (a WebP is RIFF....WEBP), and an MP3
+    without an ID3 tag starts at a frame sync (eleven set bits) with a layer other than the
+    reserved 00, which a JPEG's FF D8 and an AAC ADTS header's layer 00 are not.
+    """
+    for magic, at, name in IMAGE_MAGIC:
+        if head[at : at + len(magic)] == magic:
+            return "picture", name
+    for magic, at, name in AUDIO_MAGIC:
+        if head[at : at + len(magic)] == magic and (name != "WAV" or head[:4] == b"RIFF"):
+            return "soundtrack", name
+    if len(head) >= 2 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0 and head[1] & 0x06:
+        return "soundtrack", "MP3"
+    return None
+
+
+def clip_inputs(ctx: JobContext) -> ClipInputs:
+    """What the job's inputs are: at most one picture (the first frame) and at most one
+    soundtrack (the clip's sound), told apart by their bytes; input names are free."""
+    found: dict[str, list[tuple[str, str]]] = {"picture": [], "soundtrack": []}
+    paths: dict[str, Path] = {}
+    for name, path in sorted(ctx.inputs().items()):
+        with path.open("rb") as handle:
+            head = handle.read(SNIFF_BYTES)
+        kind = sniff(head)
+        if kind is None:
+            raise JobError(
+                "invalid_inputs",
+                f"input {name!r} is neither a {', '.join(n for _, _, n in IMAGE_MAGIC)} "
+                f"picture nor a {', '.join(AUDIO_FORMATS)} soundtrack (its first bytes are "
+                f"{head[:8].hex()}); a video job reads the picture its first frame starts "
+                "from and the soundtrack it is made to",
+            )
+        found[kind[0]].append((name, kind[1]))
+        paths[name] = path
+    doubled = {kind: entries for kind, entries in found.items() if len(entries) > 1}
+    if doubled:
+        said = "; ".join(
+            f"{len(entries)} {kind}s ({', '.join(f'{n!r}, {f}' for n, f in entries)})"
+            for kind, entries in doubled.items()
+        )
         raise JobError(
             "invalid_inputs",
-            f"this job carries {len(inputs)} inputs ({sorted(inputs)}); a video job "
-            "reads at most one, the picture its first frame starts from",
+            f"this job carries {said}; a video job reads at most one picture (its first "
+            "frame) and at most one soundtrack (its sound)",
         )
-    path = next(iter(inputs.values()))
-    with path.open("rb") as handle:
-        head = handle.read(16)
-    if not any(head[at : at + len(magic)] == magic for magic, at, _ in IMAGE_MAGIC):
+    picture = paths[found["picture"][0][0]] if found["picture"] else None
+    soundtrack = None
+    if found["soundtrack"]:
+        name, kind = found["soundtrack"][0]
+        soundtrack = Soundtrack(name, paths[name], kind)
+    return ClipInputs(picture, soundtrack)
+
+
+def measured(soundtrack: Soundtrack) -> Soundtrack:
+    return replace(
+        soundtrack,
+        seconds=soundtrack_seconds(soundtrack.path, soundtrack.name, soundtrack.format),
+    )
+
+
+def soundtrack_seconds(path: Path, name: str, kind: str) -> float:
+    """The soundtrack's length as ffprobe reads it from the container."""
+    ffprobe = hosttools.ffprobe_path()
+    if ffprobe is None:
+        raise ApiError(
+            409,
+            "ffmpeg_missing",
+            f"there is no ffprobe on this server's PATH, and {JOB_TYPE} {FFPROBE_WHY} "
+            + hosttools.searched_note(),
+            {"path": hosttools.search_path(), "missing": ["ffprobe"]},
+        )
+    try:
+        completed = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+             str(path)],
+            capture_output=True,
+            text=True,
+            timeout=SOUNDTRACK_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
         raise JobError(
             "invalid_inputs",
-            f"input {path.name!r} is not a "
-            f"{', '.join(name for _, _, name in IMAGE_MAGIC)} image (its first bytes "
-            f"are {head[:8].hex()}); send the picture the clip starts from",
+            f"ffprobe took more than {SOUNDTRACK_PROBE_TIMEOUT_SECONDS} s to read the length "
+            f"of input {name!r} ({kind}); send a soundtrack it can read",
+        ) from None
+    said = completed.stdout.strip()
+    try:
+        seconds = float(said)
+    except ValueError:
+        seconds = float("nan")
+    if completed.returncode != 0 or not seconds > 0:
+        tail = (completed.stderr.strip() or said or "nothing")[-300:]
+        raise JobError(
+            "invalid_inputs",
+            f"input {name!r} begins like a {kind} file but ffprobe cannot read its length "
+            f"(exit {completed.returncode}: {tail}); send a soundtrack that plays",
         )
-    return path
+    return seconds
 
 
 def check_video_file(path: Path) -> None:
@@ -589,13 +710,18 @@ class VideoJobType(ResidentWorker):
         params = VideoParams.model_validate(job.params)
         model = run_model(job.model, self.name)
         needs = as_job_error(self.requirements, model, params)
-        source = start_image(ctx)
-        mode = TEXT_TO_VIDEO if source is None else IMAGE_TO_VIDEO
+        inputs = clip_inputs(ctx)
+        as_job_error(refuse_mode, params, inputs.mode, model, needs.spec)
+        if inputs.soundtrack is not None:
+            inputs = replace(inputs, soundtrack=as_job_error(measured, inputs.soundtrack))
         seed = params.seed if params.seed is not None else secrets.randbelow(MAX_SEED + 1)
-        settled = as_job_error(settle, params, model, needs.spec, seed, mode)
+        settled = as_job_error(
+            settle, params, model, needs.spec, seed, inputs.mode,
+            None if inputs.soundtrack is None else inputs.soundtrack.seconds,
+        )
         ffmpeg = as_job_error(hosttools.require_ffmpeg, JOB_TYPE, FFMPEG_WHY)
         session = self._worker(ctx, model, needs)
-        self._make(ctx, model, session, params, needs, settled, source, ffmpeg)
+        self._make(ctx, model, session, params, needs, settled, inputs, ffmpeg)
 
     def _make(
         self,
@@ -605,11 +731,11 @@ class VideoJobType(ResidentWorker):
         params: VideoParams,
         needs: Needs,
         settled: Settled,
-        source: Path | None,
+        inputs: ClipInputs,
         ffmpeg: str,
     ) -> None:
         output = ctx.scratch / ARTIFACT_NAME
-        request = generate_request(params, needs, settled, source, output, ffmpeg)
+        request = generate_request(params, needs, settled, inputs, output, ffmpeg)
         sampler = gpubusy.start(self._backend.kind)
         try:
             result = self._generate(ctx, model, session, request, sampler)
@@ -629,7 +755,7 @@ class VideoJobType(ResidentWorker):
             stage="done",
         )
         ctx.done_extra(
-            video={**effective_params(params, needs, settled, result, source), **busy},
+            video={**effective_params(params, needs, settled, result, inputs), **busy},
             resident=self._residency.resident_id,
         )
 
@@ -638,7 +764,7 @@ def generate_request(
     params: VideoParams,
     needs: Needs,
     settled: Settled,
-    source: Path | None,
+    inputs: ClipInputs,
     output: Path,
     ffmpeg: str,
 ) -> dict[str, Any]:
@@ -655,11 +781,36 @@ def generate_request(
         "steps": settled.steps,
         "refine_steps": needs.spec.refine_steps,
         "audio": params.audio,
-        "image_path": None if source is None else str(source),
+        "image_path": None if inputs.picture is None else str(inputs.picture),
+        "soundtrack_path": None if inputs.soundtrack is None else str(inputs.soundtrack.path),
         "output_path": str(output),
         "ffmpeg": ffmpeg,
         "revision": needs.spec.revision,
         "backend": needs.spec.backend,
+    }
+
+
+def soundtrack_report(
+    inputs: ClipInputs, settled: Settled, result: dict[str, Any]
+) -> dict[str, Any] | None:
+    """What the clip did with a supplied soundtrack: all of it, or its first `used_s`
+    seconds when it is longer than the clip (said here, never dropped silently)."""
+    soundtrack = inputs.soundtrack
+    if soundtrack is None:
+        return None
+    total = round(cast(float, soundtrack.seconds), 3)
+    used = settled.duration_s
+    return {
+        "input": soundtrack.name,
+        "format": soundtrack.format,
+        "total_s": total,
+        "used_s": used,
+        "unused_s": round(max(0.0, total - used), 3),
+        "covers": "the whole soundtrack" if used >= total else f"its first {used} s",
+        "sound": "supplied",
+        "sample_rate": result.get("audio_sample_rate"),
+        "channels": result.get("audio_channels"),
+        "audio_tokens": result["soundtrack"]["audio_tokens"],
     }
 
 
@@ -668,7 +819,7 @@ def effective_params(
     needs: Needs,
     settled: Settled,
     result: dict[str, Any],
-    source: Path | None,
+    inputs: ClipInputs,
 ) -> dict[str, Any]:
     spec = needs.spec
     transformer = spec.transformer_companion
@@ -690,7 +841,7 @@ def effective_params(
         "desktop": result.get("desktop"),
         "mode": settled.mode,
         "prompt": params.prompt,
-        "input": None if source is None else source.name,
+        "input": None if inputs.picture is None else inputs.picture.name,
         "width": result.get("width", settled.width),
         "height": result.get("height", settled.height),
         "num_frames": result.get("num_frames", settled.num_frames),
@@ -704,6 +855,7 @@ def effective_params(
         "audio_seconds": result.get("audio_seconds"),
         "audio_sample_rate": result.get("audio_sample_rate"),
         "audio_channels": result.get("audio_channels"),
+        "soundtrack": soundtrack_report(inputs, settled, result),
         "artifact": ARTIFACT_NAME,
         "bytes": result.get("bytes"),
         "encoder": result.get("encoder"),

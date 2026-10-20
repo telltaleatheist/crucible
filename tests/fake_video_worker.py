@@ -70,7 +70,8 @@ class FakeEngine:
     def generate(self, job, progress):
         _transcribe({
             "op": "generate", "request_id": job.request_id, "seed": job.seed, "mode": job.mode,
-            "image_path": job.image_path, "num_frames": job.num_frames, "audio": job.audio,
+            "image_path": job.image_path, "soundtrack_path": job.soundtrack_path,
+            "num_frames": job.num_frames, "audio": job.audio,
             "ffmpeg": job.ffmpeg, "steps": job.steps, "refine_steps": job.refine_steps,
             "width": job.width, "height": job.height,
         })
@@ -81,6 +82,8 @@ class FakeEngine:
             if not self._two_pass:
                 progress.enter("connecting")
             self._seen.add(job.prompt_key)
+        if job.soundtrack_path is not None:
+            progress.enter("audio_encoding")
         if job.image_path is not None and not self._two_pass:
             progress.enter("conditioning")
         self._steps("denoising", job.steps, pause, progress)
@@ -89,7 +92,9 @@ class FakeEngine:
         progress.enter("decoding")
         frame = bytes(3 * 4 * 4)
         pcm = None
-        if job.audio:
+        if job.soundtrack_path is not None:
+            pcm = b"\x01\x00" * 2 * (job.num_frames * SAMPLE_RATE // job.fps)
+        elif job.audio:
             progress.enter("audio_decoding")
             pcm = b"\x00\x00" * 2 * round(job.num_frames / job.fps * SAMPLE_RATE)
         clip = videocore.Clip(
@@ -101,6 +106,9 @@ class FakeEngine:
             peaks["refining"] = 23
         return clip, peaks, {
             "prompt_cache": "hit" if hit else "miss",
+            "soundtrack": None if job.soundtrack_path is None else {
+                "audio_tokens": round(job.num_frames / job.fps * 25),
+            },
             "quantization": {"fake": True},
             "sampling": {"passes": ["half", "full"] if self._two_pass else ["full"]},
             "desktop": None if self._desktop is None else {

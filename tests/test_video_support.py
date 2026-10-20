@@ -88,7 +88,8 @@ def test_the_mac_block_pins_the_int8_mlx_pack_and_pulls_only_the_distilled_path(
     assert not set(left_out) & set(spec.files) and len(spec.files) == 20
     assert spec.mlx_cache_limit_bytes == 4_000_000_000 and spec.refine_steps == 3
     assert dict(spec.stage_memory_bytes) == {
-        "encoding": 23_000_000_000, "denoising": 26_000_000_000, "refining": 29_000_000_000,
+        "encoding": 23_000_000_000, "audio_encoding": 3_000_000_000,
+        "denoising": 26_000_000_000, "refining": 29_000_000_000,
         "decoding": 16_000_000_000, "audio_decoding": 3_000_000_000,
     }
     assert spec.memory_basis == "declared" and spec.memory_bytes_estimate == 29_000_000_000
@@ -144,6 +145,10 @@ def _manifest_with(old: str, new: str) -> str:
         ("size_multiple = 64", "size_multiple = 48", "VAE's 32-pixel cell"),
         ("refine_steps = 3", "refine_steps = 0", "refine_steps must be positive"),
         ("refining = 29000000000", "refining = 30000000000", "largest stage"),
+        ("max_video_tokens_image_to_video = 8800",
+         "max_video_tokens_image_to_video = 8800\naudio_to_video = true",
+         "engine 'ltx' has no audio-to-video path"),
+        ("audio_to_video = true", 'audio_to_video = "yes"', "audio_to_video"),
     ],
 )
 def test_a_manifest_that_contradicts_itself_is_refused(old: str, new: str, words: str) -> None:
@@ -499,7 +504,9 @@ def test_the_mac_ffmpeg_s_videotoolbox_encoder_is_picked_and_set(monkeypatch: py
 def test_the_two_pass_spans_cover_the_mac_stages_in_order() -> None:
     videocore = _sibling("videocore")
     names = [name for name, _ in videocore.TWO_PASS_SPANS]
-    assert names == ["encoding", "denoising", "refining", "decoding", "audio_decoding", "muxing"]
+    assert names == [
+        "encoding", "audio_encoding", "denoising", "refining", "decoding", "audio_decoding", "muxing",
+    ]
     assert abs(sum(share for _, share in videocore.TWO_PASS_SPANS) - 1.0) < 1e-9
     assert abs(sum(share for _, share in videocore.SPANS) - 1.0) < 1e-9
 

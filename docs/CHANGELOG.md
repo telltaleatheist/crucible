@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- A `video` job on the Mac can be made to a supplied soundtrack (audio-to-video, LTX-2's frozen-audio mode): send a WAV, FLAC, MP3 or Ogg as an input, alone or beside a start picture, and the picture is made to it (lips in sync with speech) with the sound kept exactly as sent and muxed as the clip's audio. Inputs are told apart by their bytes, so names are free. With no length the clip is as long as the soundtrack (rounded down to the frame grid); a shorter clip uses its first part and `done.video.soundtrack` says how much (`total_s`, `used_s`); a longer one is refused `video_soundtrack_too_short`. Both passes hold the audio frozen and run plain Euler (the 2.5 pack's ancestral first pass is switched off for it). The PC refuses a soundtrack `audio_to_video_unsupported` before anything loads (the manifest's per-arm `audio_to_video`). Modes `audio-to-video` and `image-audio-to-video`; the TypeScript SDK takes `soundtrack` and reads `VideoResult.soundtrack`. docs/VIDEO.md and the LTX-2.5 prompting guide say how to prompt it.
+
 ## 2.0.16 — 2026-10-18
 
 - The API reference makes the prompting guides obvious: a "How to prompt each model" section near the top lists every guide with its models and link, and every job type and model route (chat, decide, embed, rerank, the TTS stream) says which guide is its own (**How to prompt it:**). The `/docs` page follows those links. The Jobs section no longer says the image job's prompting lives in docs/IMAGE.md.

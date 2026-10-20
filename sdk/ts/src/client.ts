@@ -89,6 +89,7 @@ import {
   type SegmentResult,
   type VideoOptions,
   type VideoResult,
+  type VideoSoundtrack,
   type AlignWindowResult,
   type JobInput,
   type ArtifactHold,
@@ -2222,12 +2223,22 @@ export class CrucibleClient {
       const value = given[key];
       if (value !== undefined && value !== null) params[wire] = value;
     }
-    const picture = given.image ?? null;
+    if (given.soundtrack != null && given.audio === false) {
+      throw new CrucibleConfigError('audio', 'video(...) with a soundtrack keeps its sound; audio false would drop it');
+    }
+    const imageName = given.imageName ?? 'start.png';
+    const soundtrackName = given.soundtrackName ?? 'soundtrack';
+    if (given.image != null && given.soundtrack != null && imageName === soundtrackName) {
+      throw new CrucibleConfigError('soundtrackName', 'video(...) needs different names for the image and the soundtrack');
+    }
+    const inputs: Record<string, JobInput> = {};
+    if (given.image != null) inputs[imageName] = given.image;
+    if (given.soundtrack != null) inputs[soundtrackName] = given.soundtrack;
     return this.submit({
       type: 'video',
       model: requireText(given.model, 'model'),
       params,
-      inputs: picture === null ? {} : { [given.imageName ?? 'start.png']: picture },
+      inputs,
     });
   }
 
@@ -4111,7 +4122,11 @@ export function readVideoResult(done: DoneData): VideoResult {
     backend: str(video, 'backend', at),
     engine: str(video, 'engine', at),
     dtype: str(video, 'dtype', at),
-    mode: oneOf(str(video, 'mode', at), ['text-to-video', 'image-to-video'] as const, `${at}.mode`),
+    mode: oneOf(
+      str(video, 'mode', at),
+      ['text-to-video', 'image-to-video', 'audio-to-video', 'image-audio-to-video'] as const,
+      `${at}.mode`,
+    ),
     prompt: str(video, 'prompt', at),
     input: nullableStr(video, 'input', at),
     width: num(video, 'width', at),
@@ -4127,6 +4142,7 @@ export function readVideoResult(done: DoneData): VideoResult {
     audioSeconds: nullableNum(video, 'audio_seconds', at),
     audioSampleRate: nullableNum(video, 'audio_sample_rate', at),
     audioChannels: nullableNum(video, 'audio_channels', at),
+    soundtrack: readVideoSoundtrack(nullableObject(video, 'soundtrack', at), `${at}.soundtrack`),
     artifact: str(video, 'artifact', at),
     bytes: nullableNum(video, 'bytes', at),
     encoder: nullableStr(video, 'encoder', at),
@@ -4139,6 +4155,22 @@ export function readVideoResult(done: DoneData): VideoResult {
     stageMemoryBytes: numberMap(nullableObject(video, 'stage_memory_bytes', at), `${at}.stage_memory_bytes`),
     promptCache: readPromptCache(video, at),
     artifacts: done.artifacts ?? [],
+  };
+}
+
+function readVideoSoundtrack(soundtrack: Json | null, at: string): VideoSoundtrack | null {
+  if (soundtrack === null) return null;
+  return {
+    input: str(soundtrack, 'input', at),
+    format: str(soundtrack, 'format', at),
+    totalS: num(soundtrack, 'total_s', at),
+    usedS: num(soundtrack, 'used_s', at),
+    unusedS: num(soundtrack, 'unused_s', at),
+    covers: str(soundtrack, 'covers', at),
+    sound: str(soundtrack, 'sound', at),
+    sampleRate: nullableNum(soundtrack, 'sample_rate', at),
+    channels: nullableNum(soundtrack, 'channels', at),
+    audioTokens: nullableNum(soundtrack, 'audio_tokens', at),
   };
 }
 

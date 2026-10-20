@@ -173,7 +173,7 @@ Job types are submitted with `POST /v1/jobs` (`{"type", "model", "params", "inpu
 | `segment` | Makes a mask from a picture: the main subject by itself (`birefnet`, background removal), or the object under your points or inside your box (`sam2.1-hiera-large`). |
 | `unload-segment` | Takes the resident segmenter off the card now, whichever job put it there (segment or load-segment). |
 | `load-segment` | Puts a segment model on the card and leaves it there, so the first job that uses it starts at once. |
-| `video` | Makes a video clip with its own sound from a prompt (text-to-video), or brings a start picture to life (image-to-video), with LTX-2.5. |
+| `video` | Makes a video clip with its own sound from a prompt (text-to-video), or brings a start picture to life (image-to-video), with LTX-2.5; on a Mac also makes the picture to a supplied soundtrack (audio-to-video), lips in sync. |
 | `unload-video` | Takes the resident video generator off the card now, whichever job put it there (video or load-video). |
 | `load-video` | Puts a video model on the card and leaves it there, so the first job that uses it starts at once. |
 | `score` | Transcribes a recorded song into a YuE2-native ABC score with SheetSage2: the melodies (and, with `keep_harmony`, the chords), YuE2's section labels, and the form YuE2 plays an instrumental cover from. |
@@ -2390,7 +2390,7 @@ Puts a segment model on the card and leaves it there, so the first job that uses
 
 ### `video`
 
-Makes a video clip with its own sound from a prompt (text-to-video), or brings a start picture to life (image-to-video), with LTX-2.5.
+Makes a video clip with its own sound from a prompt (text-to-video), or brings a start picture to life (image-to-video), with LTX-2.5; on a Mac also makes the picture to a supplied soundtrack (audio-to-video), lips in sync.
 
 *Model:* A video model id (GET /v1/catalog): `ltx-2.5-distilled`.
 
@@ -2404,19 +2404,20 @@ Makes a video clip with its own sound from a prompt (text-to-video), or brings a
 | `negative_prompt` | string or null | no | `null` | Refused by name (`video_param_unsupported`): the distilled checkpoint runs without guidance and would never read it. |
 | `width` | integer or null | no | `null` | Frame width in pixels, sent with `height` or not at all (null: the model's default, 1280x704). A multiple of 32 (64 on a Mac), sides 256 to 1280, at most 901,120 pixels. |
 | `height` | integer or null | no | `null` | Frame height in pixels, sent with `width` or not at all; the same rules as `width`. |
-| `duration_s` | number or null | no | `null` | Seconds of clip, rounded to the model's 8k+1 frame grid; null is the model's default (5). Not with `num_frames`. |
+| `duration_s` | number or null | no | `null` | Seconds of clip, rounded to the model's 8k+1 frame grid; null is the model's default (5), or with a soundtrack input the soundtrack's own length rounded down onto the grid. Not with `num_frames`. |
 | `num_frames` | integer or null | no | `null` | The exact frame count instead of `duration_s`; must be 8k+1 (49, 97, 121, …). |
 | `fps` | integer or null | no | `null` | Frames per second, 24 or 25 for ltx-2.5-distilled; null is the model's default (24). |
 | `seed` | integer or null | no | `null` | 0 to 4294967295; null lets the server choose one and report it. A seed reproduces a clip on the machine that made it. |
 | `steps` | integer or null | no | `null` | Must equal the model's fixed step count (8 for the distilled checkpoint) or be left out; any other value is refused. |
-| `audio` | boolean | no | `True` | false makes a silent clip: the sound is generated with the picture but not decoded. |
+| `audio` | boolean | no | `True` | false makes a silent clip: the sound is generated with the picture but not decoded. Refused with a soundtrack input, which is the clip's sound. |
 
-*Inputs:* None for text-to-video, or exactly one PNG, JPEG or WebP: the first frame, cropped to the clip's shape and resized.
+*Inputs:* Told apart by their bytes, names free: at most one PNG, JPEG or WebP picture (the first frame, cropped to the clip's shape and resized) and at most one WAV, FLAC, MP3 or Ogg soundtrack (the clip's sound, held fixed while the picture is made to it; the Mac only). None for text-to-video.
 
-*Returns:* `video.mp4`: H.264 (yuv420p) with AAC stereo at 48 kHz, faststart. The `done` event gives `video`, every effective parameter (mode, size, `num_frames`, `fps`, `duration_s`, seed, …) plus timings and GPU-busy figures, and `resident` (what is on the card as the job ends: the model while a session, a claim, a chat or a waiting call holds the card, otherwise null, because the server took it off first and said so in a `note`).
+*Returns:* `video.mp4`: H.264 (yuv420p) with AAC stereo at 48 kHz, faststart. The `done` event gives `video`, every effective parameter (mode, size, `num_frames`, `fps`, `duration_s`, seed, …) plus timings and GPU-busy figures, `soundtrack` (what of a supplied soundtrack the clip used: `total_s`, `used_s`; null without one), and `resident` (what is on the card as the job ends: the model while a session, a claim, a chat or a waiting call holds the card, otherwise null, because the server took it off first and said so in a `note`).
 
 - Send `width` and `height` together or neither (default 1280x704); `duration_s` or `num_frames`, not both. `num_frames` is 8k+1 (`video_frames_not_supported`).
 - Every limit is refused by name before anything loads: `video_size_not_supported` (multiples of 32, 64 on a Mac; sides 256 to 1280), `video_too_large`, `video_too_long`, and `video_param_unsupported` (`negative_prompt`, `steps` other than 8, `fps` other than 24 or 25). docs/VIDEO.md has the per-backend figures.
+- With a soundtrack and no `duration_s` or `num_frames` the clip is as long as the soundtrack, rounded down to the frame grid; a shorter clip uses its first part. Refused by name: `audio_to_video_unsupported` (the PC's arm), `video_soundtrack_too_short` (a clip longer than its soundtrack), `video_param_unsupported` (`audio` false with a soundtrack), `invalid_inputs` (two pictures, two soundtracks, or anything else).
 - The model repo is gated: `409 model_gated` says how to accept the licence.
 - The model comes off the card when the job ends unless something holds it. To run several jobs without a reload between them, open a queue session first (POST /v1/queue/sessions, docs/QUEUE.md) and close it at the end.
 - A model or env not installed yet is installed on submit where the server allows it: the submit answers 409 `installing`; submit again when it is done.

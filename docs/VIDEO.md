@@ -1,14 +1,15 @@
 # Video generation: the `video` job
 
 Words in, a video clip with its own sound out; or a picture and words in, the picture brought to
-life. One job type, `video`, with one model, `ltx-2.5-distilled` (Lightricks' LTX-2.5, the
+life; or, on a Mac, a soundtrack in and a picture made to it (a face speaking the line, lips in
+sync), from words alone or from a start picture. One job type, `video`, with one model, `ltx-2.5-distilled` (Lightricks' LTX-2.5, the
 distilled checkpoint, 8 steps). How it runs on a 24 GB card and on a Mac, and why every limit
 is what it is, is [internals/video.md](internals/video.md); this page is what a caller sends,
 what comes back, and how to write a prompt.
 
 | model | makes | class | PC (cuda-linux) | Mac (mlx-darwin) | longest | licence |
 | --- | --- | --- | --- | --- | --- | --- |
-| `ltx-2.5-distilled` | video with synchronized sound (speech, effects, ambience, music) from a prompt, or from a prompt and a start picture | `video` | yes (24 GB card) | yes (48 GB or more) | 6.04 s at 1280x704 from text on both; from a picture 3.04 s on the PC, 5.04 s on the Mac | LTX-2.x Community License (gated) |
+| `ltx-2.5-distilled` | video with synchronized sound (speech, effects, ambience, music) from a prompt, or from a prompt and a start picture; on the Mac also a picture made to a supplied soundtrack | `video` | yes (24 GB card) | yes (48 GB or more) | 6.04 s at 1280x704 from text on both; from a picture 3.04 s on the PC, 5.04 s on the Mac | LTX-2.x Community License (gated) |
 
 `GET /v1/capability` has a `video` row: "can make video, using ltx-2.5-distilled" on a CUDA card
 with room for its largest stage and on a Mac with 48 GB or more of memory, and "cannot make
@@ -75,16 +76,36 @@ first frame, cropped to the clip's shape (never stretched) and resized:
  "inputs": {"start.png": {"inline_base64": "..."}}}
 ```
 
+To a soundtrack (the Mac only): send the audio as an input (WAV, FLAC, MP3 or Ogg) and the
+picture is made to it, with the sound held exactly as sent; the clip's sound is your file, not
+generated. Add a start picture for a talking clip of a given face. Inputs are told apart by their
+bytes, so their names are yours; at most one picture and one soundtrack:
+
+```json
+{"type": "video",
+ "model": "ltx-2.5-distilled",
+ "params": {"prompt": "A close-up of the woman in the photo, looking into the camera in a warm kitchen, soft window light. She speaks calmly and smiles at the end: \"I kept every letter you sent.\"",
+            "width": 768, "height": 512, "seed": 7},
+ "inputs": {"face.png": {"inline_base64": "..."},
+            "line.wav": {"inline_base64": "..."}}}
+```
+
+With no `duration_s` or `num_frames` the clip is as long as the soundtrack, rounded down onto the
+8k+1 frame grid (a 3.0 s line at 24 fps is 65 frames, 2.71 s). Ask for a shorter clip and it is
+made to the soundtrack's first part; `done.video.soundtrack` says how much was used. A clip
+longer than the soundtrack is refused, never padded or looped. Results vary a lot with the seed:
+try a few.
+
 | param | default | what it does |
 | --- | --- | --- |
 | `prompt` | required | the shot, the motion, the light and the sound, in one paragraph (below) |
 | `width`, `height` | 1280 x 704 | multiples of 32 (64 on the Mac), each side 256 to 1280, at most 901,120 pixels; send both or neither |
-| `duration_s` | 5 | seconds; rounded to the model's frame grid (8k+1 frames): 5 s at 24 fps is 121 frames, 5.04 s |
+| `duration_s` | 5, or the soundtrack's length | seconds; rounded to the model's frame grid (8k+1 frames): 5 s at 24 fps is 121 frames, 5.04 s |
 | `num_frames` | from `duration_s` | the exact count instead of `duration_s` (not both); must be 8k+1, for example 49, 97, 121, 145 |
 | `fps` | 24 | 24 or 25 |
 | `seed` | chosen and reported | 0 to 2^32-1; the same seed and params give the same clip |
 | `steps` | 8 | the distilled checkpoint runs its own fixed 8-step schedule; any other value is refused (the Mac then refines in 3 more at full size, reported as `refine_steps`) |
-| `audio` | `true` | `false` makes a silent clip (the model still generates sound with the picture; it is not decoded) |
+| `audio` | `true` | `false` makes a silent clip (the model still generates sound with the picture; it is not decoded); refused with a soundtrack |
 
 `negative_prompt` is refused by name: the distilled checkpoint runs without guidance, so it
 would never be read.
@@ -104,8 +125,17 @@ list:
 - `video_frames_not_supported`: `num_frames` not 8k+1 (the refusal names the two nearest).
 - `video_too_long`: more than 145 frames.
 - `video_param_unsupported`: `negative_prompt`, a `steps` other than 8, an `fps` other than 24
-  or 25.
-- `ffmpeg_missing`: the server has no ffmpeg (every `crucible install` places one).
+  or 25; `audio: false` with a soundtrack.
+- `invalid_inputs`: an input that is neither a PNG, JPEG or WebP picture nor a WAV, FLAC, MP3 or
+  Ogg soundtrack; two pictures or two soundtracks; a soundtrack ffprobe cannot read.
+- `audio_to_video_unsupported`: a soundtrack sent to the PC, whose arm generates the sound with
+  the picture and cannot hold one fixed. Send it to a Mac.
+- `video_soundtrack_too_short`: a clip longer than its soundtrack (the refusal names the longest
+  clip it covers), or a soundtrack under the shortest clip, 9 frames.
+- `video_too_long` also covers a soundtrack longer than the arm makes, when the length came from
+  it; send `duration_s` or `num_frames` for a clip of its first part.
+- `ffmpeg_missing`: the server has no ffmpeg, or (for a soundtrack) no ffprobe; every
+  `crucible install` places both.
 
 ### The Mac
 
@@ -123,6 +153,12 @@ list:
   or more. A smaller one answers `409 insufficient_memory` naming 29,000,000,000 bytes.
 - There is no `conditioning` stage (the picture is encoded while the transformer loads) and
   there is a `refining` stage with steps 1 to 3 after `denoising`.
+- It takes a soundtrack. The soundtrack is encoded in its own `audio_encoding` stage after the
+  text, both passes hold it fixed and denoise only the picture (Lightricks' audio-to-video,
+  frozen audio, plain Euler in both passes), and there is no `audio_decoding`: the clip's sound
+  is the soundtrack, cut to the clip. A soundtrack alone has the text-to-video ceiling; with a
+  start picture, the image-to-video one (14,080 tokens). Mode `audio-to-video`, or
+  `image-audio-to-video` with a picture.
 - The Mac keeps its desktop responsive while it renders, by default: the full-size pass is
   tiled, the transformer streams from disk, GPU work goes in small batches, and the GPU is
   left idle for part of every step so the screen can draw. Renders are slower for it.
@@ -158,7 +194,16 @@ so a browser plays it as it downloads. `done.video` carries every effective para
  "prompt_cache": "miss", "versions": {"diffusers": "…", "torch": "2.14.0", "…": "…"}}
 ```
 
-(The timings above are placeholders, not measurements.) `refine_steps` is null and `sampling`
+With a soundtrack, `mode` is `audio-to-video` (or `image-audio-to-video`), the `audio_*` fields
+describe the soundtrack as muxed, and `soundtrack` says what was done with it:
+
+```json
+"soundtrack": {"input": "line.wav", "format": "WAV", "total_s": 3.0, "used_s": 2.708,
+               "unused_s": 0.292, "covers": "its first 2.708 s", "sound": "supplied",
+               "sample_rate": 48000, "channels": 2, "audio_tokens": 68}
+```
+
+Without one it is null. (The timings above are placeholders, not measurements.) `refine_steps` is null and `sampling`
 names the one full-size pass. Progress events name the stage (`encoding`, `connecting`,
 `conditioning` for a start picture, `denoising` with steps 1 to 8, `decoding`,
 `audio_decoding`, `muxing`), and a cancel lands between denoising steps.

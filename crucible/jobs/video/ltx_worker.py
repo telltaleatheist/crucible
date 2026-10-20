@@ -400,6 +400,13 @@ class LtxEngine:
             self._vocoder.to("cpu")
 
     def generate(self, job, progress) -> tuple:
+        if job.soundtrack_path is not None:
+            raise RuntimeError(
+                "this engine has no audio-to-video path: it generates the sound with the "
+                "picture and cannot hold a supplied soundtrack fixed. The manifest's "
+                "cuda-linux block does not declare audio_to_video, so the server refuses "
+                "such a job by name (audio_to_video_unsupported) before it gets here"
+            )
         peaks: dict = {}
         self._release()
         connected = self._recall(job)

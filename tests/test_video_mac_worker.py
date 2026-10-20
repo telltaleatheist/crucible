@@ -56,11 +56,17 @@ MLX_CORE = textwrap.dedent(
     round = numpy.round
     clip = numpy.clip
     contiguous = numpy.ascontiguousarray
+    array = numpy.asarray
+    bfloat16 = numpy.float32
+
+    def zeros(shape, dtype=None):
+        return numpy.zeros(shape, dtype or numpy.float32)
     """
 )
 
 DISTILLED = textwrap.dedent(
     """
+    from dataclasses import dataclass
     from types import SimpleNamespace
 
     import numpy
@@ -68,6 +74,14 @@ DISTILLED = textwrap.dedent(
     import mlx.core as mx
 
     calls = []
+
+
+    @dataclass
+    class State:
+        latent: object
+        clean_latent: object
+        denoise_mask: object
+        frozen: bool = False
 
 
     class Block:
@@ -108,9 +122,27 @@ DISTILLED = textwrap.dedent(
             return numpy.full((1, 2, latent.shape[1]), 0.5, numpy.float32)
 
 
+    class AudioConditioner(Block):
+        def load(self):
+            calls.append(["load", self.name])
+            return "audio encoder", "audio processor"
+
+
     class Patchifier:
         def unpatchify(self, tokens, dims):
             return numpy.zeros((1, 128, *dims), numpy.float32)
+
+
+    class AudioPatchifier:
+        def patchify(self, latent):
+            b, c1, t, c2 = latent.shape
+            return latent.transpose(0, 2, 1, 3).reshape(b, t, c1 * c2), t
+
+
+    def noised_audio(count, value):
+        return State(numpy.full((1, count, 128), value, numpy.float32),
+                     numpy.full((1, count, 128), value, numpy.float32),
+                     numpy.ones((1, count, 1), numpy.float32))
 
 
     class DistilledPipeline:
@@ -127,7 +159,31 @@ DISTILLED = textwrap.dedent(
             self.image_conditioner = Block("image_conditioner")
             self.video_decoder_block = VideoDecoderBlock("video_decoder")
             self.audio_decoder_block = AudioDecoderBlock("audio_decoder")
+            self.audio_conditioner = AudioConditioner("audio_conditioner")
             self.video_patchifier = Patchifier()
+            self.audio_patchifier = AudioPatchifier()
+
+        @staticmethod
+        def _pre_denoise_flush(video_state, audio_state):
+            calls.append(["flush", audio_state.frozen])
+
+        def _run_denoise_loop(self, *, model, video_state, audio_state, video_text_embeds,
+                              audio_text_embeds, sigmas, video_cross_attention_mask, on_step,
+                              seed, ancestral):
+            calls.append(["loop", model, ancestral, audio_state.frozen,
+                          float(numpy.max(audio_state.denoise_mask)),
+                          sorted({float(v) for v in numpy.ravel(audio_state.latent)}),
+                          audio_state.latent is audio_state.clean_latent])
+            return audio_state.latent
+
+        def _audio_pass(self, stage, num_frames, frame_rate, value, ancestral):
+            state = noised_audio(round(num_frames / frame_rate * 25), value)
+            self._pre_denoise_flush(None, state)
+            return self._run_denoise_loop(
+                model=f"stage {stage}", video_state=None, audio_state=state,
+                video_text_embeds=None, audio_text_embeds=None, sigmas=[],
+                video_cross_attention_mask=None, on_step=None, seed=0, ancestral=ancestral,
+            )
 
         def _load_text_encoder(self):
             calls.append(["pipeline loaded gemma"])
@@ -168,7 +224,9 @@ DISTILLED = textwrap.dedent(
             mx.use(24)
             dims = ((num_frames - 1) // 8 + 1, height // 64, width // 64)
             self._steps(1, stage1_steps, dims)
-            return SimpleNamespace(video_tokens=None, latent_dims=dims), num_frames, height, width
+            audio = self._audio_pass(1, num_frames, frame_rate, 7.0, self._is_25)
+            return (SimpleNamespace(video_tokens=None, latent_dims=dims, audio_tokens=audio),
+                    num_frames, height, width)
 
         def _upsample_latent(self, half):
             calls.append(["upsample", list(half.shape)])
@@ -182,6 +240,7 @@ DISTILLED = textwrap.dedent(
             self.upsampler = None
             frames, height, width = stage1.latent_dims
             self._steps(2, stage2_steps, (frames, 2 * height, 2 * width))
+            self._audio_pass(2, num_frames, frame_rate, 9.0, False)
             samples = round(num_frames / frame_rate * 48000)
             return (numpy.zeros((1, 128, frames, 2 * height, 2 * width), numpy.float32),
                     numpy.zeros((1, samples), numpy.float32))
@@ -240,6 +299,30 @@ TILING = textwrap.dedent(
     """
 )
 
+AUDIO_VAE = textwrap.dedent(
+    """
+    import numpy
+
+    import mlx.core as mx
+    from ltx_pipelines_mlx.distilled import calls
+
+
+    def encode_audio(waveform, sample_rate, encoder, processor):
+        # The real encoder's framing: a centred STFT with a 160-sample hop, then 4x down.
+        calls.append(["encode audio", list(waveform.shape), sample_rate, encoder, processor])
+        mx.use(3)
+        latents = (waveform.shape[2] // 160 + 1) // 4
+        return numpy.full((1, 8, latents, 16), float(waveform[0, 0, 0]), numpy.float32)
+    """
+)
+
+POSITIONS = textwrap.dedent(
+    """
+    def compute_audio_token_count(num_video_frames, frame_rate=24.0):
+        return round(num_video_frames / frame_rate * 25.0)
+    """
+)
+
 DESKTOP = {
     "max_tile_tokens": 40, "tile_spatial": 1, "tile_overlap": 0, "dit_eval_every": 1,
     "low_ram": True, "mlx_max_ops_per_buffer": 20, "mlx_max_mb_per_buffer": 40,
@@ -282,11 +365,12 @@ GLUE = textwrap.dedent(
     report = {"cache_limit": mx.state["cache_limit"], "versions": engine.versions, "runs": []}
 
 
-    def job(seed, image):
+    def job(seed, image, soundtrack=None):
         return videocore.Job({
             "request_id": f"r{seed}", "mode": "text-to-video", "prompt": "a fox in snow",
             "width": 256, "height": 128, "num_frames": 17, "fps": 24, "seed": seed,
             "steps": 8, "refine_steps": 3, "audio": True, "image_path": image,
+            "soundtrack_path": soundtrack,
             "output_path": os.path.join(out_dir, "video.mp4"), "ffmpeg": "ffmpeg",
             "revision": "rev", "backend": "mlx-darwin",
         }, "video")
@@ -323,6 +407,36 @@ GLUE = textwrap.dedent(
         report["cancel"] = "not raised"
     except videocore.Cancelled as stopped:
         report["cancel"] = [stopped.stage, stopped.step, freed()]
+
+    def fake_decode(path, rate, fmt, samples, level_mono):
+        # PyAV stands in: the soundtrack's length from its WAV header, a constant sound.
+        import wave
+
+        import numpy
+
+        with wave.open(path) as handle:
+            have = min(samples, handle.getnframes() * rate // handle.getframerate())
+        calls.append(["decode soundtrack", os.path.basename(path), rate, fmt, samples, level_mono])
+        if fmt == "s16":
+            return numpy.full((2, have), 1000, numpy.int16)
+        return numpy.full((2, have), 0.25, numpy.float32)
+
+
+    worker.decode_soundtrack = fake_decode
+    soundtrack, short = sys.argv[7], sys.argv[8]
+    before = len(calls)
+    clip, peaks, extra = engine.generate(job(5, None, soundtrack), videocore.Progress("r5", engine.spans))
+    report["soundtrack"] = {
+        "calls": calls[before:], "peaks": peaks, "extra": extra, "count": clip.count,
+        "pcm": [len(clip.pcm), clip.channels, clip.sample_rate, clip.pcm[:4].hex()],
+        "freed": freed() + [engine._pipe.soundtrack],
+    }
+    before = len(calls)
+    try:
+        engine.generate(job(6, None, short), videocore.Progress("r6", engine.spans))
+        report["short"] = "not raised"
+    except RuntimeError as exc:
+        report["short"] = [str(exc), calls[before:], freed() + [engine._pipe.soundtrack]]
 
     defaults = {"max_tile_tokens": 16000, "tile_spatial": 1, "tile_overlap": 2}
     report["plans"] = {
@@ -367,10 +481,24 @@ def _stubs(root: Path) -> None:
         "ltx_core_mlx/model/video_vae/tiling.py": TILING,
         "ltx_core_mlx/model/transformer/__init__.py": "",
         "ltx_core_mlx/model/transformer/model.py": DIT_MODEL,
+        "ltx_core_mlx/model/audio_vae/__init__.py": AUDIO_VAE,
+        "ltx_core_mlx/utils/__init__.py": "",
+        "ltx_core_mlx/utils/positions.py": POSITIONS,
     }
     for name, text in files.items():
         (root / name).parent.mkdir(parents=True, exist_ok=True)
         (root / name).write_text(text, encoding="utf-8")
+
+
+def _wav(path: Path, seconds: float) -> Path:
+    import wave
+
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(16000)
+        handle.writeframes(b"\x00\x10" * round(seconds * 16000))
+    return path
 
 
 def _libx264() -> bool:
@@ -396,9 +524,11 @@ def _run(tmp_path: Path, picture: Path | None) -> tuple[dict, list[dict]]:
         (model_dir / name).write_bytes(b"w")
     out_dir = tmp_path / "scratch"
     out_dir.mkdir()
+    tracks = [_wav(tmp_path / f"{name}.wav", seconds) for name, seconds in (("line", 1.0), ("short", 0.5))]
     done = subprocess.run(
         [sys.executable, "-c", GLUE, str(WORKER), str(model_dir), str(out_dir),
-         "" if picture is None else str(picture), json.dumps(DESKTOP), json.dumps(PLANNED)],
+         "" if picture is None else str(picture), json.dumps(DESKTOP), json.dumps(PLANNED),
+         *map(str, tracks)],
         env={**__import__("os").environ, "PYTHONPATH": str(stubs), "MLX_MAX_OPS_PER_BUFFER": "20",
              "MLX_MAX_MB_PER_BUFFER": "40", "LTX2_DIT_EVAL_EVERY": "1"},
         capture_output=True, text=True, timeout=120,
@@ -574,3 +704,78 @@ def test_a_desktop_table_streams_blocks_and_tiles_the_pass_that_needs_it(ran) ->
 def test_the_duty_cycle_pauses_a_share_of_each_sync(ran) -> None:
     slept, busy, paused = ran[0]["duty"]
     assert slept == [0.5, 0.125] and busy == 2.5 and paused == 0.625
+
+
+def test_a_text_clip_s_audio_is_generated_by_the_ancestral_first_pass(ran) -> None:
+    loops = [call for call in ran[0]["runs"][0]["calls"] if call[0] == "loop"]
+    assert loops == [
+        ["loop", "stage 1", True, False, 1.0, [7.0], False],
+        ["loop", "stage 2", False, False, 1.0, [9.0], False],
+    ]
+
+
+def test_a_soundtrack_is_encoded_in_its_own_stage_and_let_go(ran) -> None:
+    run = ran[0]["soundtrack"]
+    calls = run["calls"]
+    encoding = calls[calls.index(["decode soundtrack", "line.wav", 16000, "fltp", 12800, False]):]
+    assert encoding[1:4] == [
+        ["load", "audio_conditioner"],
+        ["encode audio", [1, 2, 12800], 16000, "audio encoder", "audio processor"],
+        ["free", "audio_conditioner"],
+    ]
+    assert run["peaks"]["audio_encoding"] == 3 and "audio_decoding" not in run["peaks"]
+    assert run["extra"]["soundtrack"] == {"audio_tokens": 18}
+
+
+def test_both_passes_hold_the_soundtrack_frozen_and_run_plain_euler(ran) -> None:
+    calls = ran[0]["soundtrack"]["calls"]
+    assert [call for call in calls if call[0] == "flush"] == [["flush", True], ["flush", True]]
+    assert [call for call in calls if call[0] == "loop"] == [
+        ["loop", "stage 1", False, True, 0.0, [0.25], True],
+        ["loop", "stage 2", False, True, 0.0, [0.25], True],
+    ]
+    passes = ran[0]["soundtrack"]["extra"]["sampling"]["passes"]
+    assert passes[0]["sampler"].startswith("euler, ") and "frozen" in passes[0]["sampler"]
+    assert "frozen" in passes[1]["sampler"]
+
+
+def test_the_clip_s_sound_is_the_soundtrack_itself_cut_to_the_clip(ran) -> None:
+    run = ran[0]["soundtrack"]
+    assert ["decode soundtrack", "line.wav", 48000, "s16", 34000, True] in run["calls"]
+    assert not [call for call in run["calls"] if call[0] == "audio"]
+    assert run["pcm"] == [34000 * 2 * 2, 2, 48000, "e803e803"]
+    assert run["count"] == 17
+    assert run["freed"] == [None, None, False, None, None, None]
+
+
+def test_a_soundtrack_that_decodes_shorter_than_its_header_said_fails_and_frees(ran) -> None:
+    message, calls, freed = ran[0]["short"]
+    assert "decoded to 0.500 s, short of the 0.708 s clip" in message
+    assert ["free", "audio_conditioner"] in calls
+    assert freed == [None, None, False, None, None, None]
+
+
+DECODE = textwrap.dedent(
+    """
+    import importlib.util, json, sys
+
+    spec = importlib.util.spec_from_file_location("ltx2mlx_worker", sys.argv[1])
+    worker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(worker)
+    pcm = worker.decode_soundtrack(sys.argv[2], 48000, "s16", 24000, True)
+    wave = worker.decode_soundtrack(sys.argv[2], 16000, "fltp", 40000, False)
+    print(json.dumps([list(pcm.shape), str(pcm.dtype), int(abs(pcm).max()),
+                      list(wave.shape), str(wave.dtype)]), file=sys.stderr)
+    """
+)
+
+
+def test_a_real_pyav_decodes_a_soundtrack_to_stereo_at_the_rate_asked(tmp_path: Path) -> None:
+    pytest.importorskip("av", reason="PyAV is in the Mac's video env, not this test env")
+    track = _wav(tmp_path / "line.wav", 1.0)
+    done = subprocess.run([sys.executable, "-c", DECODE, str(WORKER), str(track)],
+                          capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stderr[-3000:]
+    pcm_shape, pcm_type, loudest, wave_shape, wave_type = json.loads(done.stderr.strip().splitlines()[-1])
+    assert (pcm_shape, pcm_type) == ([2, 24000], "int16") and abs(loudest - 0x1000) < 64
+    assert (wave_shape, wave_type) == ([2, 16000], "float32")
