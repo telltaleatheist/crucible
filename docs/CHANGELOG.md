@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 2.0.19 — 2026-10-20
+
 - A text model loaded without a stated context (a chat, a queue session, `load-model` with no `params.context`) now loads at the most this card affords when its manifest default does not fit, instead of being refused `insufficient_kv_cache`; it is refused only under 2048 tokens. The fit is made again on the card read after the eviction, and the engine starts at the smaller of the two. A stated `params.context` is still held to. The load's `done` reports `context` and `context_default`, and a queue session reports `context` (its `opened` event and `GET /v1/queue/sessions/{id}`), so a client sizes its work to what loaded. Found by Briefcase on the PC (2026-10-20): `generate` with `max_params_b` 27 picked `qwen3.8-27b-4bit`, which fits the verb's working context, and its load at the 16384 default was refused where the card afforded 14_247. The TypeScript SDK reads `QueueSessionState.context`.
 
 ## 2.0.18 — 2026-10-19
