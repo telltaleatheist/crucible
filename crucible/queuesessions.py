@@ -112,6 +112,9 @@ class QueueSession:
     # stream opened in it, or anything of its seen in flight); None until then.
     first_work_at: datetime | None = None
     load_job: str | None = None
+    # The context its model was started at, in tokens, set when it opens on a resident
+    # text model; None for a session with no model, or one whose model is not a text one.
+    context: int | None = None
     jobs: list[str] = field(default_factory=list)
     # Installs its items are waiting on (crucible/tasks Task objects): an item refused
     # `installing` names the task, and the session holds it until the task ends.
@@ -386,6 +389,7 @@ class QueueSessions:
         self._open = session
         self._say(session, "opened", {
             "opened_at": now.isoformat(), "model": session.model, "load_job": session.load_job,
+            "context": session.context,
         })
 
     def removed(
@@ -505,6 +509,7 @@ class QueueSessions:
             "act": session.act,
             "client": session.client,
             "model": session.model,
+            "context": session.context,
             "position": session.position,
             "idle_s": session.idle_s,
             "max_wait_s": session.max_wait_s,

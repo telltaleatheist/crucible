@@ -2897,6 +2897,7 @@ function readQueueSession(data: Json, where: string): QueueSessionState {
     act: str(data, 'act', where),
     client: nullableStr(data, 'client', where),
     model: nullableStr(data, 'model', where),
+    context: nullableNum(data, 'context', where),
     position: nullableNum(data, 'position', where),
     idleS: num(data, 'idle_s', where),
     maxWaitS: num(data, 'max_wait_s', where),

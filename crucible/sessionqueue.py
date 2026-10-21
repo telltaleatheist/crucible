@@ -46,9 +46,15 @@ def _load_failed(session: QueueSession, job: Any) -> ApiError:
 
 
 async def _resident(ctx: AdmissionContext, session: QueueSession) -> bool:
+    """Whether the session's model is on the card; when it is, the session takes the
+    context that model was started at, which is what a client sizes its work to (a load
+    that named no context may have been fitted under the model's default)."""
     async with ctx.residency.settled_for(f"opening session {session.id}"):
         resident = ctx.residency.resident_model
-        return resident is not None and resident.model_id == session.model
+        if resident is None or resident.model_id != session.model:
+            return False
+        session.context = resident.max_model_len
+        return True
 
 
 async def _load_for(

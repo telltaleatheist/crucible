@@ -177,9 +177,11 @@ class LoadParams(BaseModel):
         ge=MIN_LOAD_CONTEXT,
         strict=True,
         description="The context length in tokens to start the engine at, at least "
-        "2048; null uses the model's own default. Above this host's ceiling it is "
-        "refused `context_over_limit`; loading the resident model at a new context "
-        "is a reload.",
+        "2048; null uses the model's own default, or the most this card affords "
+        "below it (the load's done `context` and the session's `context` say which). "
+        "Above this host's ceiling a stated context is refused "
+        "`context_over_limit`; loading the resident model at a new context is a "
+        "reload.",
     )
     form: str | None = Field(
         default=None,
@@ -581,6 +583,25 @@ class EngineLaunch:
     library_dirs: tuple[Path, ...] = ()
 
 
+def fit_to_card(
+    plan: "vram.KvPlan", plan_at: Callable[[int], "vram.KvPlan | None"]
+) -> "vram.KvPlan":
+    """A load that named no context, planned at the most this card affords when the
+    model's default does not fit: the default is a preference, not something the caller
+    asked for, so a ceiling pick that fits the verb's working context loads rather than
+    being refused (Briefcase, 2026-10-20: qwen3.8-27b-4bit at 16384 on a 3090 Ti that
+    affords 14_247). Under MIN_LOAD_CONTEXT the plan is returned as it was, unfitting,
+    and refused by the caller with its sentence."""
+    if plan.fits:
+        return plan
+    affordable = plan.affordable_context
+    if affordable < MIN_LOAD_CONTEXT:
+        return plan
+    fitted = plan_at(min(affordable, plan.context))
+    assert fitted is not None and fitted.fits, (plan, fitted)
+    return fitted
+
+
 def _load_context(
     config: Config,
     backend: Any,
@@ -609,6 +630,9 @@ class LoadNeeds:
     launch: EngineLaunch
     installed: Any
     context: int
+    # True when the request named no context: the load takes the manifest's default, or
+    # the most the card affords below it (fit_to_card). A stated context is held to.
+    fits_to_card: bool
     state: Any
     forecast: Any
 
@@ -706,19 +730,42 @@ class LoadModelJobType:
             desktop_allowance_bytes=self._config.desktop_allowance_bytes,
             reclaimable_bytes=self._reclaimable(),
         )
+        fits_to_card = params.context is None
+        if forecast is not None and fits_to_card:
+            forecast = fit_to_card(
+                forecast,
+                lambda tokens: vram.plan_vllm_memory(
+                    model_id=model,
+                    spec=spec,
+                    context=tokens,
+                    card=state,
+                    desktop_allowance_bytes=self._config.desktop_allowance_bytes,
+                    reclaimable_bytes=self._reclaimable(),
+                ),
+            )
+            context = forecast.context
         if forecast is not None and not forecast.fits:
             raise ApiError(409, "insufficient_kv_cache", forecast.sentence())
-        return LoadNeeds(manifest, spec, launch, installed, context, state, forecast)
+        return LoadNeeds(
+            manifest, spec, launch, installed, context, fits_to_card, state, forecast
+        )
 
     def plan_on_the_card(
-        self, model: str, spec: BackendSpec, context: int, say: Callable[[str], None]
+        self,
+        model: str,
+        spec: BackendSpec,
+        context: int,
+        fits_to_card: bool,
+        say: Callable[[str], None],
     ) -> "vram.KvPlan | None":
         """The budget vLLM is started with, from the card as it is once the resident has
         been evicted and what it held has been handed back: what vLLM will find free when it
         checks, with nothing left to reclaim. A forecast's free-plus-reclaimable is not that:
         the reclaimable figure is the resident's estimate or its load-time measurement, not
         what it holds now (a staged or sleeping engine holds less), and an 8 GiB card given
-        a budget past what it has refuses to start."""
+        a budget past what it has refuses to start. A load that named no context is
+        planned again at what this card affords when its forecast's context no longer
+        fits (fit_to_card); the plan's `context` is what the engine starts with."""
         if not vram.plans_memory(spec):
             return None
         try:
@@ -732,15 +779,25 @@ class LoadModelJobType:
                 "accelerator_unreadable",
                 f"cannot load {model!r}: could not read the card after the eviction: {exc}",
             ) from None
-        plan = vram.plan_vllm_memory(
-            model_id=model,
-            spec=spec,
-            context=context,
-            card=card,
-            desktop_allowance_bytes=self._config.desktop_allowance_bytes,
-            reclaimable_bytes=0,
-        )
+        def at(tokens: int) -> "vram.KvPlan | None":
+            return vram.plan_vllm_memory(
+                model_id=model,
+                spec=spec,
+                context=tokens,
+                card=card,
+                desktop_allowance_bytes=self._config.desktop_allowance_bytes,
+                reclaimable_bytes=0,
+            )
+
+        plan = at(context)
         assert plan is not None
+        if fits_to_card:
+            plan = fit_to_card(plan, at)
+            if plan.fits and plan.context < context:
+                say(
+                    f"{model}: loading at {plan.context:_} tokens, the most this card "
+                    f"affords now, under the {context:_} planned"
+                )
         if not plan.fits:
             raise JobError("insufficient_kv_cache", plan.sentence())
         say(plan.detail())
@@ -790,7 +847,7 @@ class LoadModelJobType:
                 needs.installed.path,
                 needs.launch.executable,
                 plan_on_the_card=lambda say: self.plan_on_the_card(
-                    model, needs.spec, needs.context, say
+                    model, needs.spec, needs.context, needs.fits_to_card, say
                 ),
                 context=needs.context,
                 timeout=params.timeout_s,
@@ -805,7 +862,11 @@ class LoadModelJobType:
         except EngineError as exc:
             raise JobError("engine_failed", str(exc)) from None
         ctx.raise_if_cancelled()
-        extra: dict[str, Any] = {"resident": resident.model_id}
+        extra: dict[str, Any] = {
+            "resident": resident.model_id,
+            "context": resident.max_model_len,
+            "context_default": needs.manifest.context_for(self._backend.kind),
+        }
         ctx.progress(1.0, f"{model} is resident")
         ctx.done_extra(**extra)
 
@@ -845,6 +906,9 @@ def occupy_model(
 
     def start() -> Occupant:
         plan = plan_on_the_card(say)
+        # The plan's context is what the engine starts with: a load that named none may
+        # have been fitted to the card under the one asked for (fit_to_card).
+        starting = context if plan is None else plan.context
         log_path = residency.log_path_for(manifest.id)
         engine = engines.build_engine(
             spec.engine, python, log_path, library_dirs=library_dirs
@@ -855,14 +919,14 @@ def occupy_model(
         port = find_free_port()
         say(
             f"starting {spec.engine} for {manifest.id} on 127.0.0.1:{port} "
-            f"(context {context}); log {log_path}"
+            f"(context {starting}); log {log_path}"
         )
         args = engine_load_args(
             manifest,
             spec,
             weights_dir,
             plan,
-            context=context,
+            context=starting,
             card_args=card_args,
             concurrency=concurrency,
         )
@@ -877,7 +941,7 @@ def occupy_model(
             base_url=engine.base_url,
             port=port,
             revision=spec.revision,
-            max_model_len=context,
+            max_model_len=starting,
             defaults=manifest.defaults,
             memory_bytes_estimate=spec.memory_bytes_estimate,
             log_path=log_path,

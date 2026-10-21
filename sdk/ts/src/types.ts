@@ -335,6 +335,12 @@ export interface QueueSessionState {
   readonly client: string | null;
   /** The model it opened with resident, or null when it named none. */
   readonly model: string | null;
+  /**
+   * The context, in tokens, its model was started at, set when it opens on a text model: size work
+   * to this. The model's default, or the most the card affords under it (never under 2048). Null
+   * while queued and for a session with no text model.
+   */
+  readonly context: number | null;
   /** 1 is next, while it waits; null once open. */
   readonly position: number | null;
   readonly idleS: number;

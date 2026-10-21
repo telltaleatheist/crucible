@@ -1115,6 +1115,7 @@ Where the session stands: queued (and where), open (what it has run and has in f
 | `act` | string | yes | — |  |
 | `client` | string or null | yes | — |  |
 | `model` | string or null | yes | — |  |
+| `context` | integer or null | yes | — | The context, in tokens, its model was started at: set when it opens on a text model, and what a client sizes its work to. A load that names no context takes the model's default or, when the card cannot hold that, the most it affords (never under 2048); null while queued and for a session with no text model. |
 | `position` | integer or null | yes | — |  |
 | `idle_s` | integer | yes | — |  |
 | `max_wait_s` | integer | yes | — |  |
@@ -1153,6 +1154,7 @@ End your session (reason `client`): an open one closes and the card is settled b
 | `act` | string | yes | — |  |
 | `client` | string or null | yes | — |  |
 | `model` | string or null | yes | — |  |
+| `context` | integer or null | yes | — | The context, in tokens, its model was started at: set when it opens on a text model, and what a client sizes its work to. A load that names no context takes the model's default or, when the card cannot hold that, the most it affords (never under 2048); null while queued and for a session with no text model. |
 | `position` | integer or null | yes | — |  |
 | `idle_s` | integer | yes | — |  |
 | `max_wait_s` | integer | yes | — |  |
@@ -1628,7 +1630,7 @@ Starts an LLM engine for a model and leaves it resident, so the chat door (POST 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
 | `timeout_s` | number | no | `900.0` | Seconds to wait for the engine to come up and answer before the load fails, 30 to 7200 (default 900). |
-| `context` | integer or null | no | `null` | The context length in tokens to start the engine at, at least 2048; null uses the model's own default. Above this host's ceiling it is refused `context_over_limit`; loading the resident model at a new context is a reload. |
+| `context` | integer or null | no | `null` | The context length in tokens to start the engine at, at least 2048; null uses the model's own default, or the most this card affords below it (the load's done `context` and the session's `context` say which). Above this host's ceiling a stated context is refused `context_over_limit`; loading the resident model at a new context is a reload. |
 | `form` | string or null | no | `null` | Which form of the model to load, for a model whose block on this backend states more than one (GET /v1/models lists them under `forms`); null loads the one this host's card takes (the row's `form`). A name the model does not have is refused `unknown_form`. |
 | `verb` | string or null | no | `null` | In place of `model`: load the model this server registered for this verb (one with a size goal: generate, clean, translate, simplify, analysis, decide, embed, rerank; GET /v1/capability), capped by `max_params_b`; the job's `model` names the one chosen. Beside a `model`, that model is held to the verb's rules (`model_not_for_verb`, `model_does_not_fit`). Unknown: `unknown_verb`; a verb with no goal: `verb_not_sized`. |
 | `max_params_b` | number or null | no | `null` | In place of `model`: a ceiling, in billions of parameters, on the verb's model (`verb`, default `generate`). This server's own pick for the verb is kept when it is at or below the ceiling; a pick above it is replaced by the biggest that fits this card at or below it. Beside a `model`: `model_with_ceiling`; nothing at or below it: `nothing_fits_ceiling`. |
@@ -3438,6 +3440,7 @@ A queue session: one client's claim on the server for a run of requests. Not a T
 | `act` | string | yes | — |  |
 | `client` | string or null | yes | — |  |
 | `model` | string or null | yes | — |  |
+| `context` | integer or null | yes | — | The context, in tokens, its model was started at: set when it opens on a text model, and what a client sizes its work to. A load that names no context takes the model's default or, when the card cannot hold that, the most it affords (never under 2048); null while queued and for a session with no text model. |
 | `position` | integer or null | yes | — |  |
 | `idle_s` | integer | yes | — |  |
 | `max_wait_s` | integer | yes | — |  |

@@ -331,6 +331,13 @@ class SessionState(_Open):
     act: str
     client: str | None
     model: str | None
+    context: int | None = Field(
+        description="The context, in tokens, its model was started at: set when it opens "
+        "on a text model, and what a client sizes its work to. A load that names no "
+        "context takes the model's default or, when the card cannot hold that, the most "
+        "it affords (never under 2048); null while queued and for a session with no text "
+        "model."
+    )
     position: int | None
     idle_s: int
     max_wait_s: int

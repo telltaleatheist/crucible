@@ -98,7 +98,7 @@ function state(overrides: Record<string, unknown>): Record<string, unknown> {
     position: null, idle_s: 300, max_wait_s: 3600, created: '2026-10-01T10:00:00+00:00',
     opened_at: '2026-10-01T10:00:01+00:00', idle_deadline: '2026-10-01T10:05:01+00:00',
     first_work_deadline: null, max_hold_deadline: null, items_run: 0, in_flight: [],
-    stream_session: null, load_job: null,
+    stream_session: null, load_job: null, context: null,
     closed_at: null, reason: null, message: null, error: null,
     ...overrides,
   };
