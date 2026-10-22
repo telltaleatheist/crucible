@@ -1,2 +1,2 @@
 /** This package's own build version. */
-export const BOOTSTRAP_VERSION = '2.0.19';
+export const BOOTSTRAP_VERSION = '2.0.20';
