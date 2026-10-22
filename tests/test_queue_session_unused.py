@@ -45,13 +45,7 @@ def test_an_unused_session_closes_at_the_window_and_says_why_everywhere(
     assert sessions.due(held.opened_at + timedelta(seconds=FIRST_WORK_S - 1)) is None
     due = sessions.due(held.opened_at + timedelta(seconds=FIRST_WORK_S))
     assert due is not None and due[1] == UNUSED, "a day's idle_s does not keep an unused session"
-    assert f"sent no work within {FIRST_WORK_S} s of opening" in due[2]
-
-    touched = client.post(f"/v1/queue/sessions/{session_id}/touch", headers=mine)
-    assert touched.status_code == 200
-    assert state(client, auth, session_id)["first_work_deadline"] is not None, (
-        "a touch says the client is alive, not that it is using the card"
-    )
+    assert f"sent no work and no touch within {FIRST_WORK_S} s of opening" in due[2]
 
     waiting = submit(client, theirs, **body())
     assert waiting.status_code == 202 and waiting.json()["queued"] is True
@@ -62,7 +56,7 @@ def test_an_unused_session_closes_at_the_window_and_says_why_everywhere(
              "the pump to close the unused session")
     closed = state(client, auth, session_id)
     assert closed["reason"] == UNUSED
-    assert f"sent no work within {FIRST_WORK_S} s of opening" in closed["message"]
+    assert f"sent no work and no touch within {FIRST_WORK_S} s of opening" in closed["message"]
     assert closed["first_work_deadline"] is None and closed["items_run"] == 0
 
     last = session_events(client, auth, session_id)[-1]
@@ -78,7 +72,7 @@ def test_an_unused_session_closes_at_the_window_and_says_why_everywhere(
     assert late.status_code == 409
     error = late.json()["error"]
     assert error["code"] == "session_closed" and error["details"]["reason"] == UNUSED
-    assert f"closed (unused): it sent no work within {FIRST_WORK_S} s of opening" in (
+    assert f"closed (unused): it sent no work and no touch within {FIRST_WORK_S} s of opening" in (
         error["message"]
     )
     touched = client.post(f"/v1/queue/sessions/{session_id}/touch", headers=mine)
@@ -86,6 +80,37 @@ def test_an_unused_session_closes_at_the_window_and_says_why_everywhere(
 
     wait_for(lambda: status(client, auth, waiting_id) == "done",
              "the next client's job once the unused session let the server go")
+
+
+def test_a_touch_in_the_window_keeps_it_open_and_idle_s_runs_from_the_last_touch(
+    client: TestClient, auth: dict[str, str]
+) -> None:
+    """Foundry's page reader, 2026-10-22: it opens its session so dots-ocr loads while it
+    renders the book, and a 968-page render took ~90 s. It touched at 10:14:30 and was
+    closed `unused` at 10:15:02. A touch now ends the window: the client is present, and
+    only its idle_s (from the last touch) closes it."""
+    mine = as_client(auth, "foundry")
+    session_id = open_session(client, mine, idle_s=300)["session_id"]
+    sessions = sessions_of(client)
+    held = sessions.get(session_id)
+
+    touched = client.post(f"/v1/queue/sessions/{session_id}/touch", headers=mine)
+    assert touched.status_code == 200
+    opened = state(client, auth, session_id)
+    assert opened["first_work_deadline"] is None, "a touch ends the unused window"
+    assert held.first_touch_at is not None and held.first_work_at is None
+    last_touch = held.seen
+    assert last_touch is not None
+
+    past_window = held.opened_at + timedelta(seconds=FIRST_WORK_S + 30)
+    assert sessions.due(past_window) is None, "a touched session is not unused"
+    assert sessions.due(last_touch + timedelta(seconds=299)) is None
+    due = sessions.due(last_touch + timedelta(seconds=300))
+    assert due is not None and due[1] == "idle", "an abandoned client still lets go, at idle_s"
+
+    done = submit(client, mine, **body()).json()["job_id"]
+    wait_for(lambda: status(client, auth, done) == "done", "its first item after the render")
+    assert held.first_work_at is not None and state(client, auth, session_id)["status"] == "open"
 
 
 def test_a_session_that_sends_work_in_time_keeps_its_own_idle_s(

@@ -544,7 +544,7 @@ def session_line(activity: Any, now: datetime | None = None) -> SessionLine | No
     unused, idle = _when(session.get("first_work_deadline")), _when(session.get("idle_deadline"))
     if unused is not None and (idle is None or unused <= idle):
         parts.append(f"it closes {countdown_text(session.get('first_work_deadline'), now)} "
-                     f"unless {app} sends its first request")
+                     f"unless {app} sends its first request or touches it")
     elif idle is not None:
         parts.append(f"it closes {countdown_text(session.get('idle_deadline'), now)} "
                      f"unless {app} sends more")

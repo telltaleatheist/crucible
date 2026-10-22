@@ -345,9 +345,9 @@ class SessionState(_Open):
     opened_at: str | None
     idle_deadline: str | None
     first_work_deadline: str | None = Field(
-        description="When an open session that has sent no work yet closes `unused` "
-        f"({FIRST_WORK_S} s after it opened, whatever its idle_s); null once it has sent any, and "
-        "while it is queued or closed."
+        description="When an open session that has sent no work and no touch yet closes "
+        f"`unused` ({FIRST_WORK_S} s after it opened, whatever its idle_s); null once it has "
+        "sent any or been touched, and while it is queued or closed."
     )
     max_hold_deadline: str | None
     items_run: int

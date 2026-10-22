@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- A touch ends a queue session's 90 s `unused` window (Owen, 2026-10-22): an app with work of its own between opening and its first request touches the session, and from then on its `idle_s` runs from the last touch; a crashed app stops touching and still lets go, `idle`, at its `idle_s`. Found by Foundry's page reader on the PC: it opens its session so dots-ocr loads while it renders the book, a 968-page render took ~90 s, and the session was closed `unused` 32 s after a touch, unloading dots-ocr under the rendered book. `first_work_deadline` is null once the session is touched; the `unused` message names the touch.
+
 ## 2.0.19 — 2026-10-20
 
 - A text model loaded without a stated context (a chat, a queue session, `load-model` with no `params.context`) now loads at the most this card affords when its manifest default does not fit, instead of being refused `insufficient_kv_cache`; it is refused only under 2048 tokens. The fit is made again on the card read after the eviction, and the engine starts at the smaller of the two. A stated `params.context` is still held to. The load's `done` reports `context` and `context_default`, and a queue session reports `context` (its `opened` event and `GET /v1/queue/sessions/{id}`), so a client sizes its work to what loaded. Found by Briefcase on the PC (2026-10-20): `generate` with `max_params_b` 27 picked `qwen3.8-27b-4bit`, which fits the verb's working context, and its load at the 16384 default was refused where the card afforded 14_247. The TypeScript SDK reads `QueueSessionState.context`.

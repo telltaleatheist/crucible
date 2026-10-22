@@ -1122,7 +1122,7 @@ Where the session stands: queued (and where), open (what it has run and has in f
 | `created` | string | yes | — |  |
 | `opened_at` | string or null | yes | — |  |
 | `idle_deadline` | string or null | yes | — |  |
-| `first_work_deadline` | string or null | yes | — | When an open session that has sent no work yet closes `unused` (90 s after it opened, whatever its idle_s); null once it has sent any, and while it is queued or closed. |
+| `first_work_deadline` | string or null | yes | — | When an open session that has sent no work and no touch yet closes `unused` (90 s after it opened, whatever its idle_s); null once it has sent any or been touched, and while it is queued or closed. |
 | `max_hold_deadline` | string or null | yes | — |  |
 | `items_run` | integer | yes | — |  |
 | `in_flight` | array of object | yes | — |  |
@@ -1161,7 +1161,7 @@ End your session (reason `client`): an open one closes and the card is settled b
 | `created` | string | yes | — |  |
 | `opened_at` | string or null | yes | — |  |
 | `idle_deadline` | string or null | yes | — |  |
-| `first_work_deadline` | string or null | yes | — | When an open session that has sent no work yet closes `unused` (90 s after it opened, whatever its idle_s); null once it has sent any, and while it is queued or closed. |
+| `first_work_deadline` | string or null | yes | — | When an open session that has sent no work and no touch yet closes `unused` (90 s after it opened, whatever its idle_s); null once it has sent any or been touched, and while it is queued or closed. |
 | `max_hold_deadline` | string or null | yes | — |  |
 | `items_run` | integer | yes | — |  |
 | `in_flight` | array of object | yes | — |  |
@@ -3447,7 +3447,7 @@ A queue session: one client's claim on the server for a run of requests. Not a T
 | `created` | string | yes | — |  |
 | `opened_at` | string or null | yes | — |  |
 | `idle_deadline` | string or null | yes | — |  |
-| `first_work_deadline` | string or null | yes | — | When an open session that has sent no work yet closes `unused` (90 s after it opened, whatever its idle_s); null once it has sent any, and while it is queued or closed. |
+| `first_work_deadline` | string or null | yes | — | When an open session that has sent no work and no touch yet closes `unused` (90 s after it opened, whatever its idle_s); null once it has sent any or been touched, and while it is queued or closed. |
 | `max_hold_deadline` | string or null | yes | — |  |
 | `items_run` | integer | yes | — |  |
 | `in_flight` | array of object | yes | — |  |

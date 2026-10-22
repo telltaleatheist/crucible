@@ -305,7 +305,7 @@ export type QueueSessionStatus = 'queued' | 'open' | 'closed';
 
 /**
  * Why a queue session ended. `client`: its client closed it. `unused`: it sent no work (no item, no
- * stream) within 90 s of opening, whatever `idleS` it asked for: the server took it to be left
+ * stream) and no touch within 90 s of opening, whatever `idleS` it asked for: the server took it to be left
  * behind by an app that crashed or restarted. `idle`: `idle_s` passed with nothing in flight, no
  * item and no touch. `operator`: a person ended it. `max_hold`: the server's
  * configured maximum hold. `server_restart`: the server stopped. A session that never opened ends
@@ -350,8 +350,8 @@ export interface QueueSessionState {
   /** When it closes `idle` unless something arrives; null while anything is in flight. */
   readonly idleDeadline: string | null;
   /**
-   * When it closes `unused` unless its first item arrives: 90 s after it opened. Null once it has
-   * sent any work, and while it is queued or closed.
+   * When it closes `unused` unless its first item or a touch arrives: 90 s after it opened. Null
+   * once it has sent any work or been touched, and while it is queued or closed.
    */
   readonly firstWorkDeadline: string | null;
   /** When it closes `max_hold`; null unless the server sets a maximum. */
@@ -408,9 +408,9 @@ export interface SessionOptions {
   readonly maxParamsB?: number;
   /**
    * Close the session after this many seconds with nothing in flight, no item and no touch:
-   * 10..86400, the server's default 300. It applies from the session's first item on: until
-   * then the server closes it `unused` 90 s after it opens, so send the first item as soon as
-   * `session(...)` resolves. A running job or an answer in flight always counts as
+   * 10..86400, the server's default 300. It applies from the session's first item or touch on:
+   * until then the server closes it `unused` 90 s after it opens, so send the first item as soon
+   * as `session(...)` resolves, or `touch()` it while the app works on its own side first. A running job or an answer in flight always counts as
    * activity; work on the app's own side (a cloud call, a file copy) does not, so call
    * `touch()` across a long gap.
    */

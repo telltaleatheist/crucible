@@ -14,9 +14,9 @@ queue pump opens it, loading its ``model`` first when it names one that is not r
   refused by name;
 - the settlement treats it as a holder, so what its items leave on the card stays there.
 
-It closes when its client deletes it (``client``), when it sends no work within
-``FIRST_WORK_S`` of opening (``unused``: an app that asked and then crashed or restarted
-never holds the card for the ``idle_s`` it asked for), when ``idle_s`` passes with nothing
+It closes when its client deletes it (``client``), when it sends no work and no touch
+within ``FIRST_WORK_S`` of opening (``unused``: an app that asked and then crashed or
+restarted never holds the card for the ``idle_s`` it asked for), when ``idle_s`` passes with nothing
 in flight and no item or touch (``idle``), when an operator removes it (``operator``),
 when the configured maximum hold passes (``max_hold``; none by default), or when the
 server stops (``server_restart``). One session is open at a time.
@@ -53,8 +53,12 @@ MAX_IDLE_S = 86_400
 # sending its first request: under a second for a live app. 90 s, the top of Owen's
 # 60-90 s, leaves room for a client that polls slowly or a host that is busy, and caps
 # what a crashed app costs everyone else at a minute and a half instead of up to a day.
-# No client may ask for longer: no app needs a gap between opening and its first
-# request, and one that has work of its own to do first does it before it asks.
+# No client may ask for longer. A TOUCH ends the window too (Owen, 2026-10-22): an app
+# with work of its own between opening and its first request says so by touching, and
+# from then on its idle_s runs from the last touch. Foundry's page reader opens its
+# session to overlap dots-ocr's load with rendering the book, and a 968-page render took
+# ~90 s; it touched at 10:14:30 and was closed `unused` at 10:15:02 with the book
+# rendered. A crashed app stops touching, so it still lets go, at its idle_s.
 FIRST_WORK_S = 90
 REMEMBERED = 200
 
@@ -111,6 +115,9 @@ class QueueSession:
     # When the first piece of work arrived under it (an item named or implied, a TTS
     # stream opened in it, or anything of its seen in flight); None until then.
     first_work_at: datetime | None = None
+    # When its client first touched it while open; like first work, it ends the
+    # FIRST_WORK_S window (the client is present), and idle_s decides from then on.
+    first_touch_at: datetime | None = None
     load_job: str | None = None
     # The context its model was started at, in tokens, set when it opens on a resident
     # text model; None for a session with no model, or one whose model is not a text one.
@@ -274,8 +281,8 @@ class QueueSessions:
         ``FIRST_WORK_S`` window, and from then on only ``idle_s`` decides. Called the
         moment an item is known to be the session's (crucible/api/caller.py), before any
         admission, so an item that is refused or waits (a model being installed or loaded
-        for it) still counts: the app is plainly using the session. A touch does not
-        count: it says the client is alive, not that it is using the card."""
+        for it) still counts: the app is plainly using the session. A touch ends the
+        window as well, without being work (``touch``)."""
         if session.status == OPEN and session.first_work_at is None:
             session.first_work_at = self._now()
 
@@ -325,9 +332,18 @@ class QueueSessions:
         return None
 
     def touch(self, session: QueueSession) -> None:
-        """"Still here": an in-memory timestamp, nothing written anywhere."""
+        """"Still here": an in-memory timestamp, nothing written anywhere. The first one
+        ends the ``FIRST_WORK_S`` window: a client that touches is present, doing work of
+        its own before its first request, and its ``idle_s`` runs from the last touch."""
         if session.status == OPEN:
             session.seen = self._now()
+            if session.first_touch_at is None:
+                session.first_touch_at = session.seen
+
+    @staticmethod
+    def _present(session: QueueSession) -> bool:
+        """Its client has shown it is there since it opened: work sent, or a touch."""
+        return session.first_work_at is not None or session.first_touch_at is not None
 
 
     def refuse_if_held(self, session_id: str | None, what: str) -> None:
@@ -433,11 +449,12 @@ class QueueSessions:
         return session.seen + timedelta(seconds=session.idle_s)
 
     def first_work_deadline(self, session: QueueSession) -> datetime | None:
-        """When an open session that has sent no work closes ``unused``; None once it has
-        (or while anything of its is in flight), and for a session that is not open."""
+        """When an open session that has sent no work and no touch closes ``unused``;
+        None once it has (or while anything of its is in flight), and for a session that is
+        not open."""
         if (
             session.status != OPEN or session.opened_at is None
-            or session.first_work_at is not None or self.in_flight(session)
+            or self._present(session) or self.in_flight(session)
         ):
             return None
         return session.opened_at + timedelta(seconds=FIRST_WORK_S)
@@ -481,15 +498,15 @@ class QueueSessions:
         assert session.seen is not None and session.opened_at is not None
         idle_at = session.seen + timedelta(seconds=session.idle_s)
         unused_at = (
-            None if session.first_work_at is not None
+            None if self._present(session)
             else session.opened_at + timedelta(seconds=FIRST_WORK_S)
         )
         if unused_at is not None and now >= unused_at and unused_at <= idle_at:
             return session, UNUSED, (
-                f"it sent no work within {FIRST_WORK_S} s of opening, so it was taken "
-                f"to be abandoned (its client crashed or restarted) whatever idle_s "
-                f"({session.idle_s} s) it asked for; send the first item as soon as "
-                "`opened` arrives"
+                f"it sent no work and no touch within {FIRST_WORK_S} s of opening, so it "
+                f"was taken to be abandoned (its client crashed or restarted) whatever "
+                f"idle_s ({session.idle_s} s) it asked for; send the first item as soon "
+                "as `opened` arrives, or touch it while the app works on its own side"
             )
         if now >= idle_at:
             return session, IDLE, (
