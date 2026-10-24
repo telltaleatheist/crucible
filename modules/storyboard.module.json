@@ -1,6 +1,6 @@
 {
   "name": "storyboard",
-  "version": "2.0.22+b1886435aea6",
+  "version": "2.0.23+b1886435aea6",
   "job_types": [
     {
       "type": "asr",

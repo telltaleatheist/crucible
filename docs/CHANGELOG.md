@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 2.0.23 — 2026-10-24
+
 - A transcription's width (pieces at a time, Qwen3-ASR on vLLM) is planned from the smaller of the job's budget and the card's free memory as read at load, so a desktop holding more than its allowance narrows the width instead of failing the load `insufficient_memory`. On Victoria's 8 GiB laptop (2026-10-24) the desktop held 1.6-1.9 GiB against a 1.0 GiB allowance, and the six pieces planned from the allowance needed 6.7 GiB where about 6.1 GiB was free. The allowance still caps it: a freer card never widens the plan.
 - Under WSL, an install, a pull or a module hands the guest's file cache of what it wrote back to Windows when it ends (`crucible/pagecache.py`: `sync`, then `posix_fadvise(DONTNEED)` on every file under the Crucible home and the pip, uv and Hugging Face download caches; no root, nothing stopped). On Victoria's laptop the VM held 7.6 GB after installing ASR, 0.9 GB of it processes, and her Godot and Blender jobs were killed for low memory; dropping the cache took it to 2.66 GB. Tasks say it in the server log, `crucible install` and `crucible models pull` print it. Measured on owens-pc's WSL: 504,317 files (375 GiB) in 24 s. A Linux box or a Mac keeps its cache.
 
