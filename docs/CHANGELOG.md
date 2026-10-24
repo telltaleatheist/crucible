@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 2.0.21 — 2026-10-24
+
 - Windows: Crucible starts at login from a `Crucible` value under the user's Run key (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`), running `pythonw.exe <host>\launchers\crucible-tray.pyw`, instead of a `Startup\Crucible.lnk`. Python writes the value (`winreg`) and the launcher file itself, so registering starts no shell, and nothing runs code from a command line. On Victoria's laptop (2026-10-24, 2.0.20) Microsoft Defender blocked the old way as `Trojan:Win32/Commando.A!ml`: an inline `powershell -Command` writing a Startup shortcut to a hidden `pythonw.exe -c "<code>"`. The install stopped at `install-desktop` (`host_no_pack ... [WinError 5] Access is denied`) and the tray, which writes its login entry at every start, was blocked at every login. An install removes the old `Startup\Crucible.lnk`; `orchestrator --remove-startup` and `crucible uninstall` remove the value and any old shortcut. The Start Menu item runs a launcher file too (`launchers\crucible-app.pyw`).
 
 ## 2.0.20 — 2026-10-22
