@@ -78,15 +78,20 @@ def in_thread(work: Callable[[], None]) -> None:
     threading.Thread(target=work, daemon=True).start()
 
 
+Choose = Callable[[str, list[screens.InstallOption]], "list[str] | None"]
+
+
 class Controller:
     def __init__(self, api: Any, host: Any, ask: Ask, run: Run = in_thread,
                  clock: Callable[[], float] = time.monotonic,
                  stream: Run = in_thread,
                  wall: Callable[[], datetime] = wall_clock.now,
-                 sleep: Callable[[float], None] = time.sleep) -> None:
+                 sleep: Callable[[float], None] = time.sleep,
+                 *, choose: Choose) -> None:
         self.api = api
         self.host = host
         self.ask = ask
+        self.choose = choose
         self.run = run
         self.clock = clock
         self.stream = stream
@@ -382,12 +387,24 @@ class Controller:
         self.act(f"{kind}:{subject_id}", work)
 
     def install(self, job_type: str, engine: str | None) -> None:
+        """One press: the package's env built and turned on, and the models ticked in the
+        dialog downloaded, as ONE module task with one progress (Owen, 2026-10-24: "click
+        install package, and itll activate it in wsl and download the models. the user can
+        pick which models they want to download")."""
         def work() -> None:
-            if self._plan_says_yes("job_type=" + quoted(job_type), f"Install {job_type}?"):
-                request: dict[str, Any] = {"type": "install", "job_type": job_type}
-                if engine:
-                    request["narrator_engine"] = engine
-                self._submit(request)
+            plan = self.api.get("/v1/capability/plan?job_type=" + quoted(job_type))
+            options = screens.install_options(plan, self.api.get(PATHS["catalog"]))
+            picked = self.choose(screens.install_question(job_type, plan), options)
+            if picked is None:
+                return
+            entry: dict[str, Any] = {"type": job_type}
+            if engine:
+                entry["narrator_engine"] = engine
+            by_id = {option.id: option for option in options}
+            self._submit({"type": "module", "module": {
+                "name": job_type, "version": "1", "job_types": [entry],
+                "subjects": [{"kind": by_id[chosen].kind, "id": chosen} for chosen in picked],
+            }})
         self.act(f"package:{job_type}", work)
 
     def cancel(self, target: str, ident: str) -> None:

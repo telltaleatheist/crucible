@@ -153,6 +153,41 @@ def _reserve_line(
     )
 
 
+def _model_rows(
+    entries: list[CapabilityClass],
+    by_name: dict[str, Decision],
+    card: "CardFacts | None",
+) -> list[dict[str, Any]]:
+    """Every model the package's classes weigh, in their pick order, once each: whether
+    it runs on this card (`usable`, with the sentence why or why not) and whether it is
+    the one this server would use (`recommended`), so an install can offer the models to
+    download with the fitting ones marked (Owen, 2026-10-24: install a package and pick
+    the models it downloads, in one press)."""
+    rows: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        decision = by_name.get(entry.name)
+        if decision is None:
+            continue
+        for candidate in entry.pick_order(decision.candidates):
+            line, usable = _subject_line(entry, decision, candidate, candidate.id, card)
+            row = rows.get(candidate.id)
+            if row is None:
+                rows[candidate.id] = {
+                    "id": candidate.id,
+                    "usable": usable,
+                    "recommended": decision.enabled and decision.selected == candidate.id,
+                    "lines": [line],
+                }
+                continue
+            row["usable"] = row["usable"] or usable
+            row["recommended"] = row["recommended"] or (
+                decision.enabled and decision.selected == candidate.id
+            )
+            if line not in row["lines"]:
+                row["lines"].append(line)
+    return list(rows.values())
+
+
 def install_plan(
     job_type: str,
     decisions: tuple[Decision, ...],
@@ -202,6 +237,7 @@ def install_plan(
         "desktop_allowance_basis": desktop_basis,
         "usable": usable,
         "classes": rows,
+        "models": _model_rows(entries, by_name, card),
         "confirm": (
             f"Install {job_type}.\n\nYour card ({card_words}):\n{reserve_line}"
             f"{lines}\n\n{closing}"

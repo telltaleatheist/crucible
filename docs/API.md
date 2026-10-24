@@ -338,7 +338,7 @@ What this server can hold, per capability class, and why not; `enabled: false` i
 
 ### `GET /v1/capability/plan`
 
-What an install (`?job_type=`) or a pull (`?subject=`) would give this card, decided live and writing nothing.
+What an install (`?job_type=`) or a pull (`?subject=`) would give this card, decided live and writing nothing. An install's answer lists `models`: every model the package's classes weigh, once each, in pick order, with `usable` (it runs on this card), `recommended` (the one this server would use) and `lines` (why), so an install can offer them to download in the same press (the desktop app's Packages > Install sends one `module` task with the ones ticked).
 
 *Door:* token + `X-Crucible-Api: 1`
 

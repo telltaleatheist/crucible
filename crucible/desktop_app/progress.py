@@ -20,6 +20,11 @@ def request_words(task: Mapping[str, Any]) -> str:
         return f"Installing {request.get('job_type')}" + (f" ({engine})" if engine else "")
     if kind == "module":
         module = request.get("module") or {}
+        job_types = module.get("job_types") or []
+        if len(job_types) == 1 and job_types[0].get("type") == module.get("name"):
+            # The Packages screen's Install: one package and the models ticked with it.
+            engine = job_types[0].get("narrator_engine")
+            return f"Installing {module.get('name')}" + (f" ({engine})" if engine else "")
         return f"Installing module {module.get('name')}"
     return str(kind).replace("-", " ").capitalize()
 

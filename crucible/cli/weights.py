@@ -316,7 +316,31 @@ def cmd_models_pull(args: argparse.Namespace) -> int:
     except weights.WeightsError as exc:
         return _fail(str(exc))
     print(f"{manifest.id}: {result.bytes / 1e9:.2f} GB at {result.path}")
+    package = _package_still_needed(config, backend, manifest.id)
+    if package is not None:
+        print(package)
     return EXIT_OK
+
+
+def _package_still_needed(config: Any, backend: Any, model_id: str) -> str | None:
+    """The sentence a pull ends on when the model's package is not installed and on here:
+    a pull downloads weights only, and the package (the env, and its [jobs] flag) is the
+    other half (Owen, 2026-10-24: on the command line, install the package, then pull the
+    model). None when the package is ready or the model belongs to no package."""
+    from .. import catalog, jobflags
+
+    subject = catalog.find(config, backend, "model", model_id)
+    if subject is None or subject.job_type not in jobflags.JOB_TYPE_NAMES:
+        return None
+    built = jobflags.env_built(config, backend, subject.job_type)
+    enabled = getattr(config, jobflags.flag(subject.job_type))
+    if built is not False and enabled:
+        return None
+    return (
+        f"{model_id} is downloaded, but the {subject.job_type} package is not installed "
+        f"here, so nothing can use it yet. {jobflags.install_words(subject.job_type)} "
+        "installs it and turns it on."
+    )
 
 
 def cmd_rvc_list(args: argparse.Namespace) -> int:

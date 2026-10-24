@@ -442,6 +442,57 @@ def package_rows(info: Any, capability: Any, tasks: Any) -> list[PackageRow]:
 
 
 @dataclass(frozen=True)
+class InstallOption:
+    """One model an Install offers to download: ticked when it is the one this server
+    would use here, offered unticked when it also runs here, shown but not offered when
+    it cannot run on this card or is already on this computer."""
+    kind: str
+    id: str
+    label: str
+    detail: str
+    enabled: bool
+    checked: bool
+
+
+def install_options(plan: Any, catalog: Any) -> list[InstallOption]:
+    """The plan's models (`GET /v1/capability/plan?job_type=`), each joined to its catalog
+    row for its kind, size and whether it is here. A model the catalog has no row for is
+    not something this server downloads (an upstream, an engine), so it is not offered."""
+    rows = catalog.get("rows") if isinstance(catalog, Mapping) else None
+    by_id = {str(row.get("id")): row for row in rows or []}
+    options = []
+    for model in (plan.get("models") if isinstance(plan, Mapping) else None) or []:
+        row = by_id.get(str(model.get("id")))
+        if row is None:
+            continue
+        installed = bool(row.get("installed"))
+        size = size_text(row.get("installed_bytes") if installed else row.get("expected_bytes"))
+        usable = bool(model.get("usable"))
+        if installed:
+            note = "Already on this computer"
+        elif model.get("recommended"):
+            note = "Recommended for this card"
+        else:
+            note = "Fits this card" if usable else "Does not fit this card"
+        label = f"{row.get('name') or row.get('id')}" + (f" ({size})" if size else "")
+        options.append(InstallOption(
+            kind=str(row.get("kind")), id=str(row.get("id")), label=label,
+            detail=f"{note}. " + " ".join(str(line) for line in model.get("lines") or []),
+            enabled=usable and not installed,
+            checked=installed or (usable and bool(model.get("recommended"))),
+        ))
+    return options
+
+
+def install_question(job_type: str, plan: Any) -> str:
+    title = JOB_TYPE_WORDS.get(job_type, (job_type, ""))[0]
+    card = plan.get("card_words") if isinstance(plan, Mapping) else None
+    on_card = f" Your card: {card}." if card else ""
+    return (f"Install {title}.{on_card}\n\nTick the models to download with it. "
+            "You can download others later under Models.")
+
+
+@dataclass(frozen=True)
 class UpstreamRow:
     name: str
     label: str

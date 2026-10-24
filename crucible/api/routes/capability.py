@@ -46,7 +46,11 @@ def register(routers: Routers, ctx: AppContext) -> None:
     @private.get("/capability/plan")
     async def capability_plan(request: Request) -> dict[str, Any]:
         """What an install (`?job_type=`) or a pull (`?subject=`) would give this card,
-        decided live and writing nothing.
+        decided live and writing nothing. An install's answer lists `models`: every model
+        the package's classes weigh, once each, in pick order, with `usable` (it runs on
+        this card), `recommended` (the one this server would use) and `lines` (why), so
+        an install can offer them to download in the same press (the desktop app's
+        Packages > Install sends one `module` task with the ones ticked).
         """
         query = request.query_params
         job_type, subject = query.get("job_type"), query.get("subject")

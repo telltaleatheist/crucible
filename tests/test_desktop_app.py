@@ -180,8 +180,12 @@ class FakeHost:
         return Path("logs")
 
 
+def refuse_choice(question: str, options: list) -> None:
+    raise AssertionError(f"this test offers no choice, yet one was asked: {question}")
+
+
 def controller(api: FakeApi | None = None, host: FakeHost | None = None, answers: list[bool] | None = None,
-               asked: list[str] | None = None) -> Controller:
+               asked: list[str] | None = None, choose=refuse_choice) -> Controller:
     replies = list(answers if answers is not None else [True])
     questions = asked if asked is not None else []
 
@@ -189,7 +193,7 @@ def controller(api: FakeApi | None = None, host: FakeHost | None = None, answers
         questions.append(question)
         return replies.pop(0) if replies else True
     return Controller(api or FakeApi(), host or FakeHost(), ask, run=lambda work: work(),
-                      stream=lambda work: None, wall=lambda: NOW)
+                      stream=lambda work: None, wall=lambda: NOW, choose=choose)
 
 
 def test_home_shows_the_machine_memory_what_is_loaded_and_the_running_job() -> None:
@@ -234,7 +238,7 @@ def test_a_busy_server_that_misses_a_status_read_is_slow_not_gone() -> None:
     miss flipped the window to "Crucible is not running" and back (2026-10-02)."""
     now = [0.0]
     host = FakeHost()
-    c = Controller(FakeApi(), host, lambda q: True, run=lambda w: w(), clock=lambda: now[0],
+    c = Controller(FakeApi(), host, lambda q: True, choose=refuse_choice, run=lambda w: w(), clock=lambda: now[0],
                    stream=lambda w: None, wall=lambda: NOW)
     c.refresh_now("home")
     host._status = {"state": "unreachable", "detail": "Engine did not answer: timed out",
@@ -463,13 +467,71 @@ def test_a_refused_removal_shows_the_servers_message_under_that_row() -> None:
         "whisper-tiny is named by a running job; wait for it or cancel it under Activity (subject_in_use)")
 
 
-def test_an_install_names_its_engine_and_is_watched() -> None:
-    api = FakeApi({"/v1/tasks/t3": {"state": "done"}})
+ASR_PLAN = {
+    "job_type": "asr", "card_words": "RTX 3070 Laptop, 8.0 GiB", "usable": True,
+    "models": [
+        {"id": "qwen3-asr-1.7b", "usable": False, "recommended": False,
+         "lines": ["Cannot transcribe with it: it needs 7.6 GiB and this card gives a job 7.0 GiB."]},
+        {"id": "qwen3-asr-0.6b", "usable": True, "recommended": True,
+         "lines": ["Will transcribe with it, 6 pieces at a time."]},
+        {"id": "whisper-tiny", "usable": True, "recommended": False, "lines": ["Can transcribe with it."]},
+        {"id": "an-upstream-only", "usable": True, "recommended": False, "lines": ["Can."]},
+    ],
+}
+
+ASR_CATALOG = {"rows": [
+    *CATALOG["rows"],
+    {"kind": "model", "id": "qwen3-asr-1.7b", "name": None, "job_type": "asr", "installed": False,
+     "installed_bytes": None, "expected_bytes": 4 * 2**30, "resident": False},
+    {"kind": "model", "id": "qwen3-asr-0.6b", "name": None, "job_type": "asr", "installed": False,
+     "installed_bytes": None, "expected_bytes": 2 * 2**30, "resident": False},
+]}
+
+
+def test_install_offers_the_packages_models_with_the_one_for_this_card_ticked() -> None:
+    options = {option.id: option for option in screens.install_options(ASR_PLAN, ASR_CATALOG)}
+    assert list(options) == ["qwen3-asr-1.7b", "qwen3-asr-0.6b", "whisper-tiny"]
+    assert options["qwen3-asr-0.6b"].checked and options["qwen3-asr-0.6b"].enabled
+    assert options["qwen3-asr-0.6b"].detail.startswith("Recommended for this card.")
+    assert not options["qwen3-asr-1.7b"].enabled and not options["qwen3-asr-1.7b"].checked
+    assert "needs 7.6 GiB" in options["qwen3-asr-1.7b"].detail
+    assert options["whisper-tiny"].detail.startswith("Already on this computer")
+    assert not options["whisper-tiny"].enabled
+
+
+def test_one_install_press_is_one_module_that_builds_turns_on_and_downloads_the_ticks() -> None:
+    api = FakeApi({"/v1/capability/plan?job_type=asr": ASR_PLAN, "/v1/catalog": ASR_CATALOG,
+                   "/v1/tasks/t3": {"state": "done"}})
     api.answers[("POST", "/v1/tasks")] = {"task_id": "t3"}
-    c = controller(api)
+    offered: list[tuple[str, list]] = []
+
+    def choose(question: str, options: list) -> list[str]:
+        offered.append((question, options))
+        return ["qwen3-asr-0.6b"]
+    c = controller(api, choose=choose)
+    c.install("asr", None)
+    assert "Tick the models to download" in offered[0][0] and "RTX 3070 Laptop" in offered[0][0]
+    assert api.sent == [("POST", "/v1/tasks", {"type": "module", "module": {
+        "name": "asr", "version": "1", "job_types": [{"type": "asr"}],
+        "subjects": [{"kind": "model", "id": "qwen3-asr-0.6b"}]}})]
+    assert c.watch_view().title == "Installing asr"
+
+
+def test_an_install_names_its_engine_and_is_watched() -> None:
+    api = FakeApi({"/v1/capability/plan?job_type=tts": {"models": []}, "/v1/tasks/t3": {"state": "done"}})
+    api.answers[("POST", "/v1/tasks")] = {"task_id": "t3"}
+    c = controller(api, choose=lambda question, options: [])
     c.install("tts", "higgs-v3")
-    assert api.sent[0] == ("POST", "/v1/tasks", {"type": "install", "job_type": "tts", "narrator_engine": "higgs-v3"})
+    module = api.sent[0][2]["module"]
+    assert module["job_types"] == [{"type": "tts", "narrator_engine": "higgs-v3"}] and module["subjects"] == []
     assert c.watch_view().title == "Installing tts (higgs-v3)"
+
+
+def test_cancelling_the_install_dialog_sends_nothing() -> None:
+    api = FakeApi({"/v1/capability/plan?job_type=asr": ASR_PLAN, "/v1/catalog": ASR_CATALOG})
+    c = controller(api, choose=lambda question, options: None)
+    c.install("asr", None)
+    assert api.sent == []
 
 
 def test_a_running_task_found_on_refresh_is_followed_once() -> None:
@@ -558,7 +620,7 @@ def test_keys_and_the_allowance_are_written_through_settings() -> None:
 
 def test_one_action_at_a_time_per_row() -> None:
     held: list = []
-    c = Controller(FakeApi(), FakeHost(), lambda q: True, run=held.append)
+    c = Controller(FakeApi(), FakeHost(), lambda q: True, choose=refuse_choice, run=held.append)
     c.remove("model", "whisper-tiny", "")
     c.remove("model", "whisper-tiny", "")
     assert len(held) == 1 and "model:whisper-tiny" in c.busy
@@ -570,7 +632,7 @@ def test_slow_documents_are_not_refetched_every_tick() -> None:
     reads: list[str] = []
     real_get = api.get
     api.get = lambda path: reads.append(path) or real_get(path)
-    c = Controller(api, FakeHost(), lambda q: True, run=lambda w: w(), clock=lambda: now[0],
+    c = Controller(api, FakeHost(), lambda q: True, choose=refuse_choice, run=lambda w: w(), clock=lambda: now[0],
                    stream=lambda w: None)
     c.refresh_now("home")
     c.refresh_now("home")
@@ -587,7 +649,7 @@ def test_the_event_stream_replaces_polling_and_rereads_only_what_an_event_names(
     real_get = api.get
     api.get = lambda path: reads.append(path) or real_get(path)
     started: list = []
-    c = Controller(api, FakeHost(), lambda q: True, run=lambda w: w(), stream=started.append,
+    c = Controller(api, FakeHost(), lambda q: True, choose=refuse_choice, run=lambda w: w(), stream=started.append,
                    wall=lambda: NOW)
     c.refresh_now("activity")
     c.refresh_now("activity")
@@ -622,7 +684,7 @@ def test_a_gap_snapshot_rereads_what_no_event_covers() -> None:
     reads: list[str] = []
     real_get = api.get
     api.get = lambda path: reads.append(path) or real_get(path)
-    c = Controller(api, FakeHost(), lambda q: True, run=lambda w: w(), stream=lambda w: None)
+    c = Controller(api, FakeHost(), lambda q: True, choose=refuse_choice, run=lambda w: w(), stream=lambda w: None)
     c.refresh_now("home")
     api.frames["/v1/events"] = [{"id": 3, "event": "snapshot", "data": {
         "gap": True, "topics": [], "activity": ACTIVITY, "queue": QUEUE, "tasks": []}}]

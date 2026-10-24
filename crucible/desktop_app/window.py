@@ -10,7 +10,7 @@ from tkinter import messagebox
 from typing import Any
 
 from .. import traylife
-from . import theme, views
+from . import screens, theme, views
 from .api import LocalApi
 from .controller import Controller
 from .host import LocalHost
@@ -31,21 +31,76 @@ MAC_QUIT = "::tk::mac::Quit"
 
 
 class Asker:
+    """Questions from the controller's worker threads, answered on the window's thread:
+    a yes/no, or which of an install's models to download."""
+
     def __init__(self) -> None:
         self.questions: queue.Queue = queue.Queue()
 
-    def __call__(self, question: str) -> bool:
-        answer: dict[str, bool] = {}
+    def _wait(self, kind: str, payload: Any) -> dict[str, Any]:
+        answer: dict[str, Any] = {}
         done = threading.Event()
-        self.questions.put((question, answer, done))
+        self.questions.put((kind, payload, answer, done))
         done.wait()
-        return answer.get("yes", False)
+        return answer
+
+    def __call__(self, question: str) -> bool:
+        return bool(self._wait("yes", question).get("yes", False))
+
+    def choose(self, question: str, options: list[screens.InstallOption]) -> list[str] | None:
+        return self._wait("choose", (question, options)).get("picked")
 
     def answer_pending(self, root: tk.Tk) -> None:
         while not self.questions.empty():
-            question, answer, done = self.questions.get_nowait()
-            answer["yes"] = messagebox.askyesno("Crucible", question, parent=root)
-            done.set()
+            kind, payload, answer, done = self.questions.get_nowait()
+            try:
+                if kind == "yes":
+                    answer["yes"] = messagebox.askyesno("Crucible", payload, parent=root)
+                else:
+                    answer["picked"] = choose_dialog(root, *payload)
+            finally:
+                done.set()
+
+
+def choose_dialog(root: tk.Misc, question: str,
+                  options: list[screens.InstallOption]) -> list[str] | None:
+    """A modal checklist: the ticked models' ids on Install, None on Cancel or close."""
+    palette = theme.current()
+    top = tk.Toplevel(root, bg=palette.bg)
+    top.title("Crucible")
+    top.transient(root)
+    top.resizable(False, False)
+    plain = {"bg": palette.bg, "fg": palette.text, "justify": "left"}
+    tk.Label(top, text=question, wraplength=520, **plain).pack(anchor="w", padx=20, pady=(18, 12))
+    ticked: dict[str, tk.BooleanVar] = {}
+    for option in options:
+        var = tk.BooleanVar(master=top, value=option.checked)
+        tk.Checkbutton(top, text=option.label, variable=var, anchor="w",
+                       state="normal" if option.enabled else "disabled",
+                       bg=palette.bg, fg=palette.text, selectcolor=palette.entry,
+                       activebackground=palette.bg, activeforeground=palette.text,
+                       disabledforeground=palette.muted).pack(fill="x", padx=20)
+        tk.Label(top, text=option.detail, wraplength=480, bg=palette.bg, fg=palette.muted,
+                 justify="left").pack(anchor="w", padx=44, pady=(0, 8))
+        if option.enabled:
+            ticked[option.id] = var
+    if not options:
+        tk.Label(top, text="It has no models to download on this server.", **plain).pack(
+            anchor="w", padx=20)
+    result: dict[str, list[str]] = {}
+
+    def install() -> None:
+        result["picked"] = [model for model, var in ticked.items() if var.get()]
+        top.destroy()
+
+    buttons = tk.Frame(top, bg=palette.bg)
+    buttons.pack(fill="x", padx=20, pady=(8, 18))
+    tk.Button(buttons, text="Install", command=install, default="active").pack(side="right")
+    tk.Button(buttons, text="Cancel", command=top.destroy).pack(side="right", padx=(0, 8))
+    top.protocol("WM_DELETE_WINDOW", top.destroy)
+    top.grab_set()
+    root.wait_window(top)
+    return result.get("picked")
 
 
 def prepare_windows() -> None:
@@ -240,7 +295,7 @@ def make_root() -> tk.Tk:
 def run(home: Path, instance: Instance, root: Any = None) -> int:
     root = root if root is not None else make_root()
     asker = Asker()
-    controller = Controller(LocalApi(), LocalHost(home), asker)
+    controller = Controller(LocalApi(), LocalHost(home), asker, choose=asker.choose)
     app = App(root, controller, asker, home)
     instance.serve(app.heard.put)
     app.start()
