@@ -234,7 +234,7 @@ export async function requestHostInstall(
     throw new BootstrapRefusal(
       'host_unreachable',
       `the Crucible host is installed on this machine and ${url} did not answer (${(err as Error).message}). `
-        + 'Start it from the Startup item, or run `crucible orchestrator` from the host runtime.',
+        + 'Sign out and in again (Crucible starts at login), or run `crucible orchestrator` from the host runtime.',
       { command: `${hostRuntimeDir(runner)}\\${HOST_ENTRY_POINT} host`, cause: err },
     );
   }
@@ -623,7 +623,7 @@ async function doorGet(
     throw new BootstrapRefusal(
       'host_unreachable',
       `the Crucible host is installed on this machine and ${url} did not answer (${(err as Error).message}). `
-        + 'Start it from the Startup item, or run `crucible orchestrator` from the host runtime.',
+        + 'Sign out and in again (Crucible starts at login), or run `crucible orchestrator` from the host runtime.',
       { command: `${hostRuntimeDir(runner)}\\${HOST_ENTRY_POINT} host`, cause: err },
     );
   }

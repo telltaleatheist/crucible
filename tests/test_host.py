@@ -443,37 +443,55 @@ def test_a_guest_engine_whose_line_cannot_be_read_writes_NO_file(
     assert "worse than no file" in (tmp_path / "host.log").read_text(encoding="utf-8")
 
 
-def test_the_startup_shortcut_is_exactly_where_4_1_says() -> None:
-    path = str(startup.shortcut_path(WINDOWS_ENV))
-    assert path == (
-        r"C:\Users\tellt\AppData\Roaming\Microsoft\Windows\Start Menu\Programs"
-        r"\Startup\Crucible.lnk"
-    )
+TRAY_LAUNCHER = r"C:\Users\tellt\AppData\Local\Crucible\host\launchers\crucible-tray.pyw"
+LEGACY_LNK = r"C:\Users\tellt\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\Crucible.lnk"
+
+
+def test_the_login_entry_is_the_users_run_value_running_the_tray_launcher(login_system) -> None:
+    runner = Scripted()
+    outcome = startup.install(runner)
+    assert outcome.path == r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Crucible"
+    assert login_system.run_values == {
+        "Crucible": rf"C:\Users\tellt\AppData\Local\Crucible\host\pythonw.exe {TRAY_LAUNCHER}"
+    }
+    assert list(login_system.files) == [TRAY_LAUNCHER]
+
+
+def test_registering_at_login_starts_no_shell_and_carries_no_code(login_system) -> None:
+    """Victoria's laptop, 2026-10-24: Defender blocked an inline `powershell -Command`
+    writing a Startup shortcut to `pythonw -c "<code>"` (Trojan:Win32/Commando.A!ml)."""
+    runner = Scripted()
+    startup.install(runner)
+    assert runner.calls == []
+    command = login_system.run_values["Crucible"]
+    assert " -c " not in command and "runpy" not in command and "powershell" not in command.lower()
+
+
+def test_an_install_removes_the_old_startup_shortcut(login_system) -> None:
+    login_system.present.add(LEGACY_LNK)
+    startup.install(Scripted())
+    assert LEGACY_LNK not in login_system.present
 
 
 def test_appdata_unset_is_refused_by_name(tmp_path: Path) -> None:
     with pytest.raises(HostError) as caught:
-        startup.shortcut_path({})
+        startup.install(Scripted(env={"LOCALAPPDATA": WINDOWS_ENV["LOCALAPPDATA"]}))
     assert caught.value.code == "host_no_localappdata"
 
 
-def test_the_shortcut_points_at_pythonw_and_never_at_the_cmd() -> None:
-    argv = startup.install_argv(WINDOWS_ENV)
-    script = argv[-1]
-    assert r"\host\pythonw.exe" in script
-    assert "crucible.cmd" not in script
-    assert "runpy.run_module" in script
-    assert "local" in script and "tray" in script
-    assert argv[0] == "powershell.exe"
-    assert "WScript.Shell" in script
+def test_a_login_entry_that_cannot_be_written_is_refused_by_name(login_system) -> None:
+    login_system.fail = PermissionError(5, "Access is denied")
+    with pytest.raises(HostError) as caught:
+        startup.install(Scripted())
+    assert caught.value.code == "host_no_pack"
+    assert "Access is denied" in caught.value.message
 
 
-def test_install_startup_is_idempotent_because_CreateShortcut_rewrites() -> None:
-    runner = Scripted()
-    first = startup.install(runner)
-    second = startup.install(runner)
-    assert first.path == second.path
-    assert runner.calls[0] == runner.calls[1]
+def test_install_startup_is_idempotent(login_system) -> None:
+    startup.install(Scripted())
+    first = (dict(login_system.files), dict(login_system.run_values))
+    startup.install(Scripted())
+    assert (login_system.files, login_system.run_values) == first
 
 
 def test_login_preserves_custom_home_without_inherited_environment(monkeypatch) -> None:
@@ -487,22 +505,9 @@ def test_login_preserves_custom_home_without_inherited_environment(monkeypatch) 
     calls = []
     monkeypatch.setattr(runpy, "run_module", lambda module, **kwargs:
                         calls.append((module, kwargs, os.environ["CRUCIBLE_HOME"], list(sys.argv))))
-    exec(startup.startup_python(env), {})
+    exec(startup.launcher_source(env, ("local", "tray")), {})
     monkeypatch.delenv("CRUCIBLE_HOME")
     assert calls == [("crucible.cli", {"run_name": "__main__"}, home, ["crucible", "local", "tray"])]
-
-
-def test_the_remove_script_is_powershell_that_parses(monkeypatch) -> None:
-    script = startup.remove_argv(WINDOWS_ENV)[-1]
-    assert "}}" not in script and "{{" not in script
-    assert script.count("{") == script.count("}") == 2
-    assert script.startswith("if (Test-Path ")
-    assert "} else { Write-Output 'absent' }" in script
-
-
-def test_the_install_script_is_powershell_that_parses() -> None:
-    script = startup.install_argv(WINDOWS_ENV)[-1]
-    assert "}}" not in script and "{{" not in script
 
 
 def _install_ps1() -> str:
@@ -524,11 +529,13 @@ def test_install_ps1_ends_by_READING_the_outcome_and_never_by_asserting_one() ->
     assert script.count("{") == script.count("}")
 
 
-def test_remove_startup_says_whether_there_was_one() -> None:
-    there = Scripted(default=ok("removed\n"))
-    assert startup.remove(there).changed is True
-    absent = Scripted(default=ok("absent\n"))
-    outcome = startup.remove(absent)
+def test_remove_startup_says_whether_there_was_one(login_system) -> None:
+    startup.install(Scripted())
+    login_system.present.add(LEGACY_LNK)
+    there = startup.remove(Scripted())
+    assert there.changed is True and login_system.run_values == {}
+    assert LEGACY_LNK not in login_system.present and "Crucible.lnk removed" in there.detail
+    outcome = startup.remove(Scripted())
     assert outcome.changed is False
     assert "nothing to remove" in outcome.detail
 

@@ -101,12 +101,12 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
     host_parser.add_argument(
         "--install-startup",
         action="store_true",
-        help="write the Startup shortcut and exit (this verb OWNS that file)",
+        help="write the login entry (HKCU Run value + its launcher) and exit (this verb OWNS it)",
     )
     host_parser.add_argument(
         "--remove-startup",
         action="store_true",
-        help="delete the Startup shortcut and exit",
+        help="delete the login entry and exit",
     )
     host_parser.add_argument(
         "--try-again",

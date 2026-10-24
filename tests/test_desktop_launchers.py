@@ -43,10 +43,18 @@ def test_the_start_menu_item_sits_in_programs_not_in_startup() -> None:
 def test_the_start_menu_item_opens_the_window_windowless_with_the_icon() -> None:
     script = launchers.start_menu_install_argv(WINDOWS_ENV, r"C:\x\crucible.ico")[-1]
     assert r"\Crucible\host\pythonw.exe" in script and "crucible.cmd" not in script
-    assert "sys.argv=[''crucible'',''app'']" in script
-    assert "os.environ[''CRUCIBLE_HOME'']=''C:\\\\Users\\\\tellt\\\\AppData\\\\Local\\\\Crucible''" in script
+    assert r"$s.Arguments = 'C:\Users\tellt\AppData\Local\Crucible\host\launchers\crucible-app.pyw'" in script
+    assert "runpy" not in script and " -c " not in script
     assert "$s.IconLocation = 'C:\\x\\crucible.ico'" in script
     assert r"Start Menu\Programs\Crucible.lnk" in script and "Startup" not in script
+
+
+def test_the_app_launcher_binds_the_home_and_runs_crucible_app(login_system) -> None:
+    path = launchers.write_app_launcher(WINDOWS_ENV)
+    assert str(path) == r"C:\Users\tellt\AppData\Local\Crucible\host\launchers\crucible-app.pyw"
+    text = login_system.files[str(path)]
+    assert "os.environ[\"CRUCIBLE_HOME\"] = 'C:\\\\Users\\\\tellt\\\\AppData\\\\Local\\\\Crucible'" in text
+    assert "sys.argv = ['crucible', 'app']" in text
 
 
 def test_removing_the_start_menu_item_names_only_that_item() -> None:
@@ -54,14 +62,19 @@ def test_removing_the_start_menu_item_names_only_that_item() -> None:
     assert script.count("Programs\\Crucible.lnk") == 2 and "Startup" not in script
 
 
-def test_windows_install_desktop_writes_the_login_item_and_the_start_menu_item(monkeypatch, capsys) -> None:
+def test_windows_install_desktop_writes_the_login_item_and_the_start_menu_item(
+        monkeypatch, capsys, login_system) -> None:
     runner = Recorder()
     monkeypatch.setattr(desktop.sys, "platform", "win32")
     monkeypatch.setattr(desktop, "ProcessRunner", lambda platform, env: runner)
     desktop.install_desktop()
     joined = [" ".join(call) for call in runner.calls]
-    assert "Startup\\Crucible.lnk" in joined[0] and "Programs\\Crucible.lnk" in joined[1]
-    assert '"app": "C:\\\\Users\\\\tellt\\\\AppData\\\\Roaming' in capsys.readouterr().out
+    assert len(joined) == 1 and "Programs\\Crucible.lnk" in joined[0]
+    assert set(login_system.run_values) == {"Crucible"}
+    assert sorted(p.rsplit("\\", 1)[-1] for p in login_system.files) == ["crucible-app.pyw", "crucible-tray.pyw"]
+    out = capsys.readouterr().out
+    assert '"app": "C:\\\\Users\\\\tellt\\\\AppData\\\\Roaming' in out
+    assert '"login_item": "HKCU\\\\Software' in out
 
 
 def test_a_start_menu_item_that_cannot_be_written_says_what_to_run(monkeypatch) -> None:
@@ -70,7 +83,9 @@ def test_a_start_menu_item_that_cannot_be_written_says_what_to_run(monkeypatch) 
         desktop._install_start_menu(runner)
 
 
-def test_windows_remove_desktop_closes_the_window_then_removes_both_items(monkeypatch, tmp_path: Path) -> None:
+def test_windows_remove_desktop_closes_the_window_then_removes_both_items(
+        monkeypatch, tmp_path: Path, login_system) -> None:
+    login_system.run_values["Crucible"] = "pythonw.exe crucible-tray.pyw"
     runner = Recorder()
     closed: list[str] = []
     monkeypatch.setattr(desktop.sys, "platform", "win32")
@@ -81,7 +96,8 @@ def test_windows_remove_desktop_closes_the_window_then_removes_both_items(monkey
     desktop.remove_desktop()
     joined = [" ".join(call) for call in runner.calls]
     assert closed == ["app", "tray"]
-    assert "Startup\\Crucible.lnk" in joined[0] and "Programs\\Crucible.lnk" in joined[1]
+    assert login_system.run_values == {}
+    assert len(joined) == 1 and "Programs\\Crucible.lnk" in joined[0]
 
 
 def test_a_window_that_will_not_close_stops_the_removal_and_says_what_to_do(monkeypatch, tmp_path: Path) -> None:

@@ -314,7 +314,7 @@ test('install.ps1 needs no admin, and starts the tray with pythonw rather than t
   assert.equal(code.includes('-Verb RunAs'), false, 'install.ps1 never elevates');
   assert.match(ps1, /\$Pythonw = Join-Path \$HostDir "pythonw\.exe"/);
   assert.match(ps1, /Start-Process -WindowStyle Hidden -FilePath \$Pythonw -ArgumentList "-m","crucible\.cli","orchestrator"/);
-  // The Startup item has ONE owner and this script asks for it by verb.
+  // The login entry has ONE owner and this script asks for it by verb.
   assert.match(ps1, /& \$Cmd local \$action/);
   assert.equal(/New-Object -ComObject WScript\.Shell/.test(ps1), false, 'it does not write a .lnk of its own');
 });

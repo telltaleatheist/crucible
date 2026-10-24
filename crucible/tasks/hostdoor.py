@@ -155,7 +155,7 @@ def relay(
             f"the orchestrator's door at {door}{path} did not answer: "
             f"{type(exc).__name__}: {exc}. A host started this server "
             f"(${HOST_DOOR_ENV} is set) and its door is not answering "
-            "now. Start it from the Startup item, or run `crucible orchestrator` "
+            "now. Sign out and in again (Crucible starts at login), or run `crucible orchestrator` "
             "from the host runtime, and press it again",
             {"door": door},
         ) from None

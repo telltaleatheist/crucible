@@ -72,7 +72,7 @@ The verbs live in `cli/api_cmd.py` and the client core in `crucible/client/`
 - **`-m crucible.cli` is baked into installed machines**: `launcher.py`'s shims,
   `platform/installation.py`, `desktop.py`, `host/app.py`, `platform/runner.py` (which compares argv against
   `["-m", "crucible.cli", "serve", "--controller-stdin"]`), `uninstall.py`, the
-  bootstrapper's install scripts, and `platform/startup.py`, whose Startup item runs
+  bootstrapper's install scripts, and `platform/startup.py`, whose login entry runs
   `runpy.run_module('crucible.cli', run_name='__main__')`. So `crucible/cli/__main__.py`
   must exist and the package must keep that name. `pyproject.toml`'s console script is
   `crucible.cli:main`, and `python -m crucible` imports `main` from here too.
@@ -407,7 +407,7 @@ half-removed config, or a busy GPU.
 
 ## `orchestrator` and `guest`
 
-`orchestrator --install-startup` / `--remove-startup` manage the Startup item and exit.
+`orchestrator --install-startup` / `--remove-startup` manage the login entry (HKCU Run value + launcher) and exit.
 `--try-again` runs the Linux-engine move once more for a machine with no app, then prints
 the outcome's sentence. Bare, it runs the tray. `--headless` runs the controller with no
 tray. `crucible guest <words…>` forwards a command to the `crucible` inside the WSL engine

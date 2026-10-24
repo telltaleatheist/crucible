@@ -36,7 +36,7 @@ def mechanism_for_platform(platform: str) -> str:
             f"uninstall_no_mechanism: there is no Crucible supervisor on "
             f"{platform!r}; this command undoes {sorted(UNINSTALL_MECHANISM)} "
             f"({service.SYSTEMD} on linux, {service.LAUNCHD} on darwin, the "
-            "Startup shortcut and the tray on win32)"
+            "login entry and the tray on win32)"
         )
     return found
 
@@ -714,11 +714,11 @@ def _service_step(
         from .platform import startup as host_startup
 
         try:
-            lnk = host_startup.shortcut_path(env)
+            host_startup.legacy_shortcut_path(env)
         except CrucibleError as exc:
             return Step(
                 name="remove-service",
-                what="the Startup shortcut that runs `crucible local tray` at login",
+                what="the login entry that runs `crucible local tray` at login",
                 action=REMOVE,
                 target="(unknown)",
                 refused=Refusal(
@@ -729,9 +729,9 @@ def _service_step(
             )
         return Step(
             name="remove-service",
-            what="the Startup shortcut that runs `crucible local tray` at login (4.1)",
+            what="the login entry that runs `crucible local tray` at login (4.1)",
             action=REMOVE,
-            target=str(lnk),
+            target=host_startup.run_entry(),
             act=lambda: _remove_startup(env),
         )
 

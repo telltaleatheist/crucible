@@ -478,10 +478,10 @@ def test_a_service_that_will_not_stop_preserves_its_runtime_and_config(
     assert plan.to_dict()["ok"] is False
 
 
-def test_on_windows_the_service_is_the_startup_shortcut(installed_home: Path) -> None:
+def test_on_windows_the_service_is_the_login_entry(installed_home: Path) -> None:
     plan = make(installed_home, platform="win32")
     removal = step(plan, "remove-service")
-    assert removal.target.endswith("Startup\\Crucible.lnk")
+    assert removal.target == r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Crucible"
     assert "at login" in removal.what
 
 

@@ -166,7 +166,7 @@ is not the orchestrator, lives beside it so `lan.py`, `sharing.py`, `local.py` a
   share), `runner`
   (the argv runner; a stream past its budget is asked to stop, never killed; `RunResult.output_tail`
   is the tail of what a command printed), `lan_door` (the Windows portproxy and firewall rows),
-  `portholder`, `startup` (the Startup shortcut), `powershell` (the one `-Command` and RunAs
+  `portholder`, `startup` (the login entry), `powershell` (the one `-Command` and RunAs
   builder), `hostconfig` (the one host-side `config.toml` reader: token, backend kind, consent
   and the WSL decline), `installation` (the `installation.json` record and `release_order`)
   and `errors` (`HostError`, `LocalError`).
@@ -212,14 +212,14 @@ only as the wire words below. The **tray icon** is only the icon by the clock (`
 that lets other machines reach the engine; `lan.py` and `sharing.py` are the LAN and Tailscale
 verbs built on them.
 
-Wire words that keep their old spelling, because apps, the tray, the Startup shortcut and
+Wire words that keep their old spelling, because apps, the tray, the login entry and
 existing installs read them byte for byte:
 
 | Word | Where |
 |---|---|
 | `role: "orchestrator"` | `/v1/ping` and `/v1/info` from the door |
 | `crucible-orchestrator@<pc>` | the controller's name in claims and `/v1/info` |
-| `crucible orchestrator` | the CLI verb the Startup shortcut and the tray start |
+| `crucible orchestrator` | the CLI verb the login entry and the tray start |
 | `[orchestrator] distro`, `[orchestrator] wsl` | the Windows `config.toml` consent table |
 | `host-child` | the owner value of a Windows engine the controller started |
 | `host_*`, `orchestrator_*` error codes | `host_door_unavailable`, `host_already_running`, `host_no_pack`, `orchestrator_distro_invalid`, ... |
@@ -234,7 +234,7 @@ in WSL without them. `tray.py` draws the icon with Pillow imported inside the fu
 tray itself is `desktop.py`. Paths take the environment as a parameter (`platform/paths.py`)
 and `LOCALAPPDATA`/`APPDATA` are read, never assembled from a username.
 
-**The orchestrator has no icon of its own.** The Startup shortcut runs `crucible local tray`
+**The orchestrator has no icon of its own.** The login entry runs `crucible local tray`
 (`desktop.py`), which starts the orchestrator headless (`crucible orchestrator --headless`)
 when its door does not answer. `app.run` always runs headless; the in-process pystray menu it
 once carried never ran in production and is gone.
@@ -246,7 +246,7 @@ the guest, watches, and runs the install move.
 "another one is running" has a pid in it. A pid whose liveness check is access-denied is
 treated as alive.
 
-**Start order** (`app.run`): Startup item if absent → consent read (before the watcher,
+**Start order** (`app.run`): login entry (written every start) → consent read (before the watcher,
 because it decides which distro is watched) → presence → pairing file → claim (needs the
 owner and the pairing token) → door (before the carry thread, so a mid-move `POST /install`
 gets 409 and attaches) → watch → carry thread (waits on the watch's first settled
@@ -393,16 +393,30 @@ kept. Opened per write (no handler opened at import time). **ASCII only**: Windo
 5.1 reads BOM-less files as ANSI; known punctuation is transliterated, anything else becomes
 `?`, NULs from UTF-16 are dropped. Timestamps are local time.
 
-### Startup item
+### Login entry
 
-`%APPDATA%\...\Startup\Crucible.lnk`, per-user; no Task Scheduler (needs elevation), no
-service (cannot own a tray icon). Target is `pythonw.exe` with a small entry point that binds
-`CRUCIBLE_HOME` (Explorer does not inherit the installer's environment); a `.cmd` would flash a
-console. Written with PowerShell's `WScript.Shell` COM (no pywin32). `CreateShortcut` rewrites
-in place, so install is idempotent. The entry is what makes "restart, then Crucible continues"
-true. `platform/startup.launch_python(env, words)` builds that entry point for any `crucible`
-verb; the Startup item uses `local tray`, the Start Menu item (see "The desktop app") uses
-`app`.
+A `Crucible` value under the user's own Run key, `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+(per-user, no elevation; no Task Scheduler, which needs it, no service, which cannot own a
+tray icon). It runs `pythonw.exe <host>\launchers\crucible-tray.pyw`: `pythonw` so no console
+flashes, and a launcher FILE that binds `CRUCIBLE_HOME` (a login does not inherit the
+installer's environment) and runs `crucible local tray`. Python writes both itself, the value
+with `winreg` and the launcher as a file (`platform/startup.py`, through its one seam
+`startup.SYSTEM`, which tests replace), so registering starts no shell. Rewriting is
+idempotent. The entry is what makes "restart, then Crucible continues" true.
+
+**Why not a Startup shortcut** (2.0.21): until then this was `Startup\Crucible.lnk`, written by
+an inline `powershell -Command` through WScript.Shell COM and pointing at
+`pythonw.exe -c "<code>"`. On Victoria's laptop (2026-10-24) Microsoft Defender blocked that
+process as `Trojan:Win32/Commando.A!ml` - a hidden interpreter running inline code from an
+autostart that a shell one-liner wrote is how a persistence dropper looks - so the install
+stopped at `install-desktop`, and the tray, which writes its login entry at every start, was
+blocked at every login. Nothing registers itself through a shell now, and nothing runs code
+from a command line. An install removes the old `Startup\Crucible.lnk`, which would start a
+second tray.
+
+`startup.launcher_source(env, words)` writes a launcher for any `crucible` verb: the login
+entry's runs `local tray`, the Start Menu item's (`launchers\crucible-app.pyw`, see "The
+desktop app") runs `app`.
 
 ### Tray items from the move
 
@@ -668,16 +682,18 @@ on the Mac), so pystray and Tk never share a main loop.
   5 s) and then ends the window. So both Quits end both halves and neither leaves the other
   behind. The door's `quit` word ends only the window, since the tray that sends it is already
   quitting.
-- Login starts the tray only (the Startup item and the LaunchAgent both run
+- Login starts the tray only (the login entry and the LaunchAgent both run
   `crucible local tray`); the window appears when the icon is clicked. The installers open the
   window once, on a fresh install typed at the machine.
 
 **Launchers, written by `crucible local install-desktop`** (which both installers already
 run) **and removed by `remove-desktop`** (which `crucible uninstall` runs):
 
-- Windows: `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Crucible.lnk`, next to the
-  Startup item and built the same way (`pythonw.exe`, `launch_python(env, ("app",))`), with
-  the app icon. Removing it is a separate PowerShell call that names only that file.
+- Windows: `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Crucible.lnk`, running
+  `pythonw.exe <host>\launchers\crucible-app.pyw` (a launcher file Python writes, as the login
+  entry's, never code on the command line), with the app icon. The .lnk itself is still made
+  through WScript.Shell, the one writer of a shortcut without pywin32; it is not a login
+  item. Removing it is a separate PowerShell call that names only that file.
 - Mac: `~/Applications/Crucible.app`, written locally by the installer so it carries no
   quarantine flag. `Contents/MacOS/Crucible` is a shell script that execs the server Python
   with `-m crucible.cli app`; LaunchServices registers the process as `com.crucible.app`

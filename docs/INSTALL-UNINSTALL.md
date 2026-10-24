@@ -16,7 +16,7 @@ holds the engine.
 
 | machine | backend | supervisor | `CRUCIBLE_HOME` |
 |---|---|---|---|
-| Owen's PC, Windows side | `llama-windows` | the Startup shortcut + the tray | `%LOCALAPPDATA%\Crucible` |
+| Owen's PC, Windows side | `llama-windows` | the login entry (HKCU Run) + the tray | `%LOCALAPPDATA%\Crucible` |
 | Owen's PC, WSL2 guest (`crucible` distro) | `cuda-linux` | systemd user unit + linger | `~/.crucible` |
 | the Mac Studio | `mlx-darwin` | launchd agent `com.crucible.serve` | `~/.crucible` |
 | a rented Linux GPU box | `cuda-linux` | systemd user unit + linger | `~/.crucible` |
@@ -238,7 +238,7 @@ guest <verb>` reaches it from Windows); the Windows side has `pairing`, `host`,
 `installation.json` and the tray's own files.
 
 What the install creates on the Windows side: `%LOCALAPPDATA%\Crucible\host` (Python and
-Crucible), the Startup item that starts the tray at login, and the **Start Menu item
+Crucible), the login entry (HKCU Run) that starts the tray at login, and the **Start Menu item
 "Crucible"** that opens the Crucible window (`crucible app`). On a first install typed at
 the PC itself (not over ssh, not driven by an app), the window opens when the script
 finishes. `crucible uninstall` closes the window and removes both shortcuts. A left click
@@ -331,7 +331,7 @@ wsl --unregister crucible
 ```
 
 `-WslToo` makes it: stop the tray and its child → the guest's own `crucible uninstall`
-through `wsl.exe -d crucible` → the Startup shortcut → `%LOCALAPPDATA%\Crucible`'s contents
+through `wsl.exe -d crucible` → the login entry → `%LOCALAPPDATA%\Crucible`'s contents
 → the host pack. Without it, only the Windows half goes and the guest keeps serving on
 `127.0.0.1:7100`, which is a legitimate thing to want and is why it is a flag.
 
@@ -500,7 +500,7 @@ there is no second description of the work to drift.
   "dry_run": true,              // bool. true = nothing was touched.
   "home": "/home/telltale/.crucible",   // string. The CRUCIBLE_HOME this plan is against.
   "platform": "linux",          // "linux" | "darwin" | "win32".
-  "mechanism": "systemd",       // "systemd" | "launchd" | "startup" (win32's Startup item + tray).
+  "mechanism": "systemd",       // "systemd" | "launchd" | "startup" (win32's login entry + tray).
   "backend_kind": "cuda-linux", // string | null. READ from config.toml's [backend] kind,
                                 // never detected — an uninstall does not probe a card, and
                                 // null is the honest answer on a home with no readable config.

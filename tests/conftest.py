@@ -418,6 +418,46 @@ def _no_host_outlives_its_test() -> Iterator[None]:
     manifests.use_host_fit(None)
 
 
+class FakeLogin:
+    """startup.LoginSystem in memory: the files, the Run key's values, what was removed."""
+
+    def __init__(self) -> None:
+        self.files: dict[str, str] = {}
+        self.run_values: dict[str, str] = {}
+        self.present: set[str] = set()
+        self.fail: OSError | None = None
+
+    def write_text(self, path: str, text: str) -> None:
+        if self.fail is not None:
+            raise self.fail
+        self.files[path] = text
+
+    def remove_file(self, path: str) -> bool:
+        if path in self.present:
+            self.present.discard(path)
+            return True
+        return self.files.pop(path, None) is not None
+
+    def set_run_value(self, name: str, command: str) -> None:
+        if self.fail is not None:
+            raise self.fail
+        self.run_values[name] = command
+
+    def delete_run_value(self, name: str) -> bool:
+        return self.run_values.pop(name, None) is not None
+
+
+@pytest.fixture(autouse=True)
+def login_system(monkeypatch: pytest.MonkeyPatch) -> FakeLogin:
+    """No test writes this machine's Run key or Start Menu: every login entry and
+    launcher goes to a FakeLogin the test can read."""
+    from crucible.platform import startup
+
+    fake = FakeLogin()
+    monkeypatch.setattr(startup, "SYSTEM", fake)
+    return fake
+
+
 @pytest.fixture(autouse=True)
 def _never_the_real_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path / "unconfigured-home"))

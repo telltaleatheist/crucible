@@ -10,12 +10,14 @@ from pathlib import Path, PureWindowsPath
 from typing import Mapping
 
 from .. import VERSION
+from ..platform import startup
 from ..platform.paths import host_pack_dir, pythonw_path
 from ..platform.powershell import quote as ps_quote
 from ..platform.powershell import script_argv
-from ..platform.startup import launch_python, startup_dir, write_script
+from ..platform.startup import launcher_path, launcher_source, startup_dir
 
 APP_WORDS = ("app",)
+APP_LAUNCHER = "crucible-app.pyw"
 
 APP_ID = "com.crucible.app"
 OWNED_IDS = frozenset({APP_ID, "com.crucible.tray"})
@@ -40,13 +42,33 @@ def start_menu_path(env: Mapping[str, str]) -> PureWindowsPath:
     return startup_dir(env).parent / START_MENU_NAME
 
 
+def write_app_launcher(env: Mapping[str, str]) -> PureWindowsPath:
+    """The file the Start Menu item runs (`crucible app`); written by Python, so the
+    shortcut carries a path and never code (startup.py says why)."""
+    path = launcher_path(env, APP_LAUNCHER)
+    startup.SYSTEM.write_text(str(path), launcher_source(env, APP_WORDS))
+    return path
+
+
 def start_menu_install_argv(env: Mapping[str, str], icon: str) -> list[str]:
+    """The Start Menu item: `pythonw.exe <app launcher>`. Not a login item, so it is
+    still made through WScript.Shell, the one writer of a .lnk without pywin32."""
     lnk = start_menu_path(env)
-    arguments = subprocess.list2cmdline(["-c", launch_python(env, APP_WORDS)])
+    arguments = subprocess.list2cmdline([str(launcher_path(env, APP_LAUNCHER))])
     return script_argv(
         f"New-Item -ItemType Directory -Force -Path {ps_quote(str(lnk.parent))} | Out-Null; "
-        + write_script(str(pythonw_path(env)), arguments, str(host_pack_dir(env)), str(lnk),
-                       description=START_MENU_DESCRIPTION, icon=icon)
+        + _shortcut_script(str(pythonw_path(env)), arguments, str(host_pack_dir(env)), str(lnk),
+                           START_MENU_DESCRIPTION, icon)
+    )
+
+
+def _shortcut_script(target: str, arguments: str, working_dir: str, lnk: str,
+                     description: str, icon: str) -> str:
+    return (
+        f"$s = (New-Object -ComObject WScript.Shell).CreateShortcut({ps_quote(lnk)}); "
+        f"$s.TargetPath = {ps_quote(target)}; $s.Arguments = {ps_quote(arguments)}; "
+        f"$s.WorkingDirectory = {ps_quote(working_dir)}; $s.Description = {ps_quote(description)}; "
+        f"$s.IconLocation = {ps_quote(icon)}; $s.Save()"
     )
 
 

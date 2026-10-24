@@ -90,10 +90,22 @@ def _load_mac_agent(binary: Path) -> Path:
 
 
 def _install_start_menu(runner: ProcessRunner) -> str:
-    from .desktop_app.launchers import assets_dir, start_menu_install_argv, start_menu_path
+    from .desktop_app.launchers import (
+        assets_dir,
+        start_menu_install_argv,
+        start_menu_path,
+        write_app_launcher,
+    )
 
     lnk = start_menu_path(runner.env)
     icon = str(assets_dir() / "crucible.ico")
+    try:
+        write_app_launcher(runner.env)
+    except OSError as exc:
+        raise LocalError(
+            f"start_menu_failed: the launcher the Start Menu item {lnk} runs could not be "
+            f"written: {exc}. Run `crucible local install-desktop` again"
+        ) from exc
     result = runner.run(start_menu_install_argv(runner.env, icon), timeout_s=SHORTCUT_SECONDS)
     if not result.ok:
         raise LocalError(
