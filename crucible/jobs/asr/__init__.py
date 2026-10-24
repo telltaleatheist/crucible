@@ -537,17 +537,29 @@ class AsrJobType:
             aligner = qwen.plan_aligner(self._config, spec, backend_kind)
         return manifest, spec, python, weights_dir, aligner
 
-    def _need_bytes(self, manifest: Any, spec: Any, params: AsrParams) -> int:
+    def _need_bytes(self, spec: Any, params: AsrParams, width: int | None) -> int:
         if spec.engine in QWEN_ASR_ENGINES:
             return qwen.need_bytes(
                 spec,
                 self._backend.kind,
                 with_aligner=params.word_timestamps,
-                width=self._width(manifest, spec, params),
+                width=width,
             )
         return spec.memory_bytes_estimate
 
-    def _width(self, manifest: Any, spec: Any, params: AsrParams) -> int | None:
+    def _free_bytes(self) -> int | None:
+        """The card's free memory as read now, for the width; None when it cannot be
+        read here, in which case card_guard, reading it next, refuses by name."""
+        try:
+            return accelerator.read_state(
+                self._backend.kind, self._config.desktop_allowance_bytes
+            ).free_bytes
+        except accelerator.ProbeError:
+            return None
+
+    def _width(
+        self, manifest: Any, spec: Any, params: AsrParams, free_bytes: int | None
+    ) -> int | None:
         if spec.engine not in QWEN_ASR_ENGINES:
             return None
         return qwen.serving_width(
@@ -557,6 +569,7 @@ class AsrJobType:
             total_bytes=self._backend.gpu.vram_bytes,
             desktop_allowance_bytes=self._config.desktop_allowance_bytes,
             with_aligner=params.word_timestamps,
+            free_bytes=free_bytes,
         )
 
     def _refuse_what_this_engine_has_not_got(
@@ -642,19 +655,27 @@ class AsrJobType:
 
     def requirements(
         self, model_id: str, params: AsrParams
-    ) -> tuple[str, AsrManifest, Any, Path, Path, "qwen.AlignerPlan | None", Any]:
+    ) -> tuple[
+        str, AsrManifest, Any, Path, Path, "qwen.AlignerPlan | None", Any, int | None
+    ]:
         self._refuse_what_this_engine_has_not_got(model_id, params)
         ffmpeg = hosttools.require_ffmpeg(JOB_TYPE, FFMPEG_WHY)
         manifest, spec, python, weights_dir, aligner = self._require_runnable(
             model_id, params
         )
+        width = self._width(
+            manifest,
+            spec,
+            params,
+            self._free_bytes() if spec.engine in QWEN_ASR_ENGINES else None,
+        )
         state = card_guard(
             self._config,
             model=model_id,
-            need_bytes=self._need_bytes(manifest, spec, params),
+            need_bytes=self._need_bytes(spec, params, width),
             owned_pids=self._owned_pids(),
         )
-        return ffmpeg, manifest, spec, python, weights_dir, aligner, state
+        return ffmpeg, manifest, spec, python, weights_dir, aligner, state, width
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         model = require_model(model, self.name)
@@ -700,7 +721,7 @@ class AsrJobType:
         params = AsrParams.model_validate(job.params)
         model = run_model(job.model, self.name)
         audio = self._one_input(ctx)
-        ffmpeg, manifest, spec, python, weights_dir, aligner, state = as_job_error(
+        ffmpeg, manifest, spec, python, weights_dir, aligner, state, width = as_job_error(
             self.requirements, model, params
         )
         ctx.warming(state.detail)
@@ -726,7 +747,7 @@ class AsrJobType:
                 word_timestamps=params.word_timestamps,
                 piece_s=params.piece_seconds(),
                 overlap_s=params.overlap_seconds(),
-                width=self._width(manifest, spec, params),
+                width=width,
                 speech=speech,
                 journal=ctx.journal,
                 resumed=ctx.resumed,

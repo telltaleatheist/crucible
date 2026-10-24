@@ -201,6 +201,12 @@ def _install_package(
 
 
 def cmd_install(args: argparse.Namespace) -> int:
+    code = _cmd_install(args)
+    common.give_back_cache()
+    return code
+
+
+def _cmd_install(args: argparse.Namespace) -> int:
     if args.job_type in PACKAGE_NAMES:
         config, backend = common.here()
         return _install_package(config, backend, args.job_type, args)

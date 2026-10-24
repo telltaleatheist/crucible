@@ -9,7 +9,7 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, hosttools, jobenv, tasks
+from crucible import accelerator, asrmodels, hosttools, jobenv, tasks
 from crucible.alignmodels import load_align_manifest
 from crucible.asrmodels import (
     QWEN_CONTEXT_MAX_TOKENS,
@@ -405,6 +405,34 @@ def test_the_guard_asks_for_the_asr_engine_and_the_aligner_together(
     assert refused.json()["error"]["code"] == "insufficient_memory"
     accepted = submit(qwen_client, auth, params={**PARAMS, "word_timestamps": False})
     assert accepted.status_code == 202, accepted.json()
+
+
+def test_a_desktop_holding_more_than_its_allowance_narrows_the_width_not_the_load(
+    make_client: Callable[..., TestClient], home: Path, auth: dict[str, str],
+    sent: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Victoria's laptop, 2026-10-24: the plan from the allowance needed more than the card
+    had free once her desktop held 0.6-0.9 GiB over it (under the 1 GiB a stray process
+    must hold to be refused). The width is planned from what is free at load, so the job
+    runs fewer pieces at a time instead of being refused. Here: a 13 GiB allowance plans 8
+    pieces in 11 GiB; the desktop holds 0.9 GiB over it, leaving 10.1 GiB, which holds 7."""
+    _stage(home, monkeypatch, FAKE_BACKEND.kind)
+    total = FAKE_BACKEND.gpu.vram_bytes
+    monkeypatch.setattr(accelerator, "probe_vram", lambda: (total - int(13.9 * GIB), total))
+    with make_client(enable_asr=True, desktop_allowance_bytes=13 * GIB) as client:
+        job_id, events = run_job(client, auth, params={**PARAMS, "word_timestamps": False})
+    assert events[-1]["event"] == "done", events[-1]
+    load = lines(sent["asr"])[0]
+    assert load["op"] == "load" and load["max_batch"] == 7
+
+
+def test_the_allowance_still_caps_the_width_when_the_card_is_freer() -> None:
+    manifest = asrmodels.load_asr_manifest("qwen3-asr-0.6b")
+    spec = manifest.spec("cuda-linux")
+    plan = dict(total_bytes=8 * GIB, desktop_allowance_bytes=GIB, with_aligner=False)
+    assert qwen.serving_width(manifest, spec, "cuda-linux", **plan) == 6
+    assert qwen.serving_width(manifest, spec, "cuda-linux", **plan, free_bytes=8 * GIB) == 6
+    assert qwen.serving_width(manifest, spec, "cuda-linux", **plan, free_bytes=6 * GIB) == 4
 
 
 def test_word_timestamps_without_the_align_env_install_the_aligner_on_submit(

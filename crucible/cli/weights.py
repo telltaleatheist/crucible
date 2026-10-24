@@ -264,6 +264,12 @@ def _form_detail(
 
 
 def cmd_models_pull(args: argparse.Namespace) -> int:
+    code = _cmd_models_pull(args)
+    common.give_back_cache()
+    return code
+
+
+def _cmd_models_pull(args: argparse.Namespace) -> int:
     config, backend = common.here()
     try:
         manifests = _all_manifests()

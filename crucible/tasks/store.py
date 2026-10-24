@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from .. import catalog, jobflags, tasks, voicecatalog
+from .. import catalog, jobflags, pagecache, tasks, voicecatalog
 from ..backend import Backend
 from ..clock import utcnow
 from ..config import Config, load_config
@@ -32,6 +32,9 @@ from .validate import (
     validate_module,
     validate_request,
 )
+
+# Task types whose work writes files (an env, weights) a WSL guest then holds in cache.
+WRITES_FILES = frozenset({"pull", "install", "module"})
 
 ALREADY_TRUE = (
     "A module or an install says what must be true, so what is already true is "
@@ -264,6 +267,15 @@ class TaskStore:
             )
         else:
             self._finish(task, DONE, None)
+        if task.type in WRITES_FILES:
+            await self._give_back_cache(task)
+
+    async def _give_back_cache(self, task: Task) -> None:
+        """Under WSL, the file cache an install or a download left is handed back to
+        Windows once the task has ended, whichever way (crucible/pagecache.py)."""
+        said = await asyncio.to_thread(pagecache.release_after_install, self._config.home)
+        if said is not None:
+            print(f"crucible: task {task.id} ({task.type}): {said}", file=sys.stderr)
 
     def _finish(
         self, task: Task, state: str, error: dict[str, str] | None

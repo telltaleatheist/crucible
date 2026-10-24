@@ -111,6 +111,17 @@ def here(
     return config, backend
 
 
+def give_back_cache() -> None:
+    """After a CLI install or pull, the WSL guest's file cache of what it wrote goes back to
+    Windows (crucible/pagecache.py); says what it gave, and nothing off WSL."""
+    from ..config import crucible_home
+    from ..pagecache import release_after_install
+
+    said = release_after_install(crucible_home())
+    if said is not None:
+        print(f"memory: {said}")
+
+
 def loopback_url(config: Config) -> str:
     host = config.host
     if host == "0.0.0.0":

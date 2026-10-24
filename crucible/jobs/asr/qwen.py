@@ -109,11 +109,21 @@ def serving_width(
     total_bytes: int,
     desktop_allowance_bytes: int,
     with_aligner: bool,
+    free_bytes: int | None = None,
 ) -> int | None:
+    """How many pieces at a time this card serves `asr` at: the widest whose need fits
+    the job's budget. With `free_bytes` (the card as read at load), the budget is the
+    smaller of the allowance's and what is free, so a desktop holding more than its
+    allowance narrows the width rather than refusing the load (Victoria's 8 GiB laptop,
+    2026-10-24: the desktop held 1.6-1.9 GiB against a 1.0 GiB allowance, so the six
+    pieces planned from the allowance needed 6.7 GiB where about 6.1 GiB was free). The
+    allowance still caps it: a desktop holding less never widens it past the plan."""
     ladder = asrplan.ladder_for(manifest, asr, backend_kind)
     if ladder is None:
         return None
     budget = available_bytes(total_bytes, desktop_allowance_bytes)
+    if free_bytes is not None:
+        budget = min(budget, free_bytes)
     extra = aligner_bytes(asr, backend_kind) if with_aligner else 0
     width = asrplan.width_for(asr, backend_kind, manifest, budget, extra)
     if width is None:
