@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 2.0.22 — 2026-10-24
+
 - Installing a package is one press (Owen, 2026-10-24: "click install package, and itll activate it in wsl and download the models. the user can pick which models they want to download"). The desktop app's Packages > Install opens a checklist of the package's models, each saying whether it runs on this card and why, with the one this server would use ticked; Install sends ONE `module` task that builds the env, downloads the ticked models and turns the type on, with one progress under the row. Before, Install built the env only and each model was a separate Download under Models. `GET /v1/capability/plan?job_type=` answers `models` (`id`, `usable`, `recommended`, `lines`) for it. On the command line the two steps stay (`crucible install <package>`, then `crucible models pull <id>`), and a pull whose package is not installed or not on now ends by saying so and naming the install command, instead of leaving the model unusable without a word.
 
 ## 2.0.21 — 2026-10-24
