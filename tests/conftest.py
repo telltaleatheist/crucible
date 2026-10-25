@@ -275,6 +275,17 @@ def unmeasured_loads(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def no_real_vendor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test reaches api.anthropic.com or api.openai.com with a test key: GET
+    /v1/openai/models asks every configured upstream what it serves. Both point at a
+    port nothing listens on; a test that wants a vendor points them at a FakeUpstream."""
+    from crucible import upstreams
+
+    monkeypatch.setattr(upstreams, "ANTHROPIC_BASE", "http://127.0.0.1:9")
+    monkeypatch.setattr(upstreams, "OPENAI_BASE", "http://127.0.0.1:9")
+
+
+@pytest.fixture(autouse=True)
 def settled_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """A load reads the card until its free memory stops rising (crucible/accelerator.py
     read_settled_state); a test's card is read again without the half-second between."""

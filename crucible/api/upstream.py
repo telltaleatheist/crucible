@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 import httpx
@@ -26,30 +30,111 @@ from .proxy import (
 )
 
 __all__ = [
+    "UPSTREAM_LIST_SECONDS",
+    "UpstreamLists",
     "forward_to_upstream",
-    "routed_upstream_rows",
+    "upstream_facts",
+    "upstream_model_rows",
 ]
 
 
-def routed_upstream_rows(config: Config) -> list[dict[str, Any]]:
+# How long a vendor's model list is served from memory before it is asked again. A
+# picker reads the list every time a job modal opens (bookforge, 2026-10-25); the vendors'
+# lists change on the scale of weeks.
+UPSTREAM_LIST_SECONDS = 600.0
+
+
+@dataclass(frozen=True)
+class _Listing:
+    record: upstreamrecord.UpstreamRecord
+    models: tuple[str, ...]
+    at: float
+    wall: str
+
+
+class UpstreamLists:
+    """Each configured upstream's model list, asked of the vendor at most once per
+    UPSTREAM_LIST_SECONDS and again at once when its key or URL changes. A vendor that
+    does not answer is weather: the last list it gave is served, marked stale, with the
+    reason, and an upstream that has never answered lists only what a route names."""
+
+    def __init__(self) -> None:
+        self._listings: dict[str, _Listing] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    async def read(
+        self, client: httpx.AsyncClient, record: upstreamrecord.UpstreamRecord
+    ) -> tuple[tuple[str, ...], dict[str, Any]]:
+        lock = self._locks.setdefault(record.name, asyncio.Lock())
+        async with lock:
+            held = self._listings.get(record.name)
+            if held is not None and held.record != record:
+                held = None
+            if held is not None and time.monotonic() - held.at < UPSTREAM_LIST_SECONDS:
+                return held.models, {"listed_at": held.wall, "stale": False, "error": None}
+            try:
+                models = tuple(await upstreams.list_models(client, record))
+            except ApiError as exc:
+                error = {"code": exc.code, "message": exc.message}
+                if held is None:
+                    return (), {"listed_at": None, "stale": False, "error": error}
+                return held.models, {"listed_at": held.wall, "stale": True, "error": error}
+            wall = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            self._listings[record.name] = _Listing(record, models, time.monotonic(), wall)
+            return models, {"listed_at": wall, "stale": False, "error": None}
+
+
+def upstream_facts(name: str, model_id: str) -> dict[str, Any] | None:
+    """What Crucible itself knows about forwarding a chat to this model, for a picker:
+    the `tool_choice` values it sends on, and for Anthropic its rule row. None: Crucible
+    has no rule for it and forwards the chat as sent."""
+    if name == "ollama":
+        return {"tool_choice": ["auto"], "reasoning_efforts": None, "sampling": None,
+                "structured_output": None}
+    if name != "anthropic":
+        return None
+    found = upstreams.anthropic_rule(model_id)
+    if found is None:
+        return None
+    _, rule = found
+    return {
+        "tool_choice": ["auto", "none", "required", "function"] if rule.forced_tool
+        else ["auto", "none"],
+        "reasoning_efforts": list(rule.efforts),
+        "sampling": rule.sampling,
+        "structured_output": rule.structured_output,
+    }
+
+
+async def upstream_model_rows(
+    config: Config, client: httpx.AsyncClient, lists: UpstreamLists
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Every model each configured upstream serves, as `<upstream>/<id>`, plus every
+    upstream model a route names; and, per configured upstream, when its list was read
+    and why it could not be."""
     routed_for: dict[str, list[str]] = {}
     for entry in config.routes:
         routed_for.setdefault(entry.model, []).append(entry.capability)
     rows: list[dict[str, Any]] = []
+    status: dict[str, dict[str, Any]] = {}
     for name in upstreamrecord.UPSTREAM_NAMES:
-        for model, classes in routed_for.items():
-            if model.partition("/")[0] != name:
-                continue
-            rows.append(
-                {
-                    "id": model,
-                    "object": "model",
-                    "owned_by": name,
-                    "upstream": name,
-                    "routed_for": classes,
-                }
-            )
-    return rows
+        record = config.upstream(name)
+        served: tuple[str, ...] = ()
+        if record is not None:
+            served, status[name] = await lists.read(client, record)
+        ids = [f"{name}/{model}" for model in served]
+        ids += [m for m in routed_for if m.partition("/")[0] == name and m not in ids]
+        for model in ids:
+            rows.append({
+                "id": model,
+                "object": "model",
+                "owned_by": name,
+                "upstream": name,
+                "routed_for": routed_for.get(model, []),
+                "listed": model.partition("/")[2] in served,
+                "facts": upstream_facts(name, model.partition("/")[2]),
+            })
+    return rows, status
 
 
 # The upstreams whose chats are billed. Ollama's are not, and a request the wire lost on

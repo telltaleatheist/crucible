@@ -158,6 +158,10 @@ import {
   type ModelDescriptor,
   type ModelFormInfo,
   type ModelInfo,
+  type UpstreamListStatus,
+  type UpstreamModel,
+  type UpstreamModelFacts,
+  type UpstreamModels,
   type PagesEngine,
   type Ping,
   type PlaygroundField,
@@ -1335,6 +1339,30 @@ export class CrucibleClient {
     return entries.map((entry, index) =>
       readModelInfo(asObject(entry, `models[${index}]`), `models[${index}]`),
     );
+  }
+
+  /**
+   * `GET /v1/openai/models`, its upstream rows: every model each configured upstream
+   * (`anthropic`, `openai`, `ollama`) serves, by the id a chat sends to reach it, with what
+   * Crucible knows about forwarding to it, and per upstream when its list was read (2.0.31+).
+   * The server keeps each vendor's list for 10 minutes and serves the last one, marked
+   * `stale`, while the vendor does not answer; read it whenever a picker opens.
+   */
+  async upstreamModels(): Promise<UpstreamModels> {
+    const body = asObject(await this.#jsonValue('/v1/openai/models', { method: 'GET' }, 'upstreamModels'), 'upstreamModels');
+    const models: UpstreamModel[] = [];
+    arrayField(body, 'data', 'upstreamModels').forEach((entry, index) => {
+      const where = `upstreamModels.data[${index}]`;
+      const row = asObject(entry, where);
+      if (!('upstream' in row)) return; // the resident model, not an upstream's
+      models.push(readUpstreamModel(row, where));
+    });
+    const upstreams: Record<string, UpstreamListStatus> = {};
+    const status = objectField(body, 'upstreams', 'upstreamModels');
+    for (const [name, value] of Object.entries(status)) {
+      upstreams[name] = readUpstreamListStatus(asObject(value, `upstreamModels.upstreams.${name}`), `upstreamModels.upstreams.${name}`);
+    }
+    return { models, upstreams };
   }
 
   /**
@@ -4285,6 +4313,35 @@ function readSegmentPoints(entries: unknown[] | null, where: string): SegmentPoi
     }
     return { x: num(point, 'x', at), y: num(point, 'y', at), label: label as 0 | 1 };
   });
+}
+
+function readUpstreamModel(row: Json, where: string): UpstreamModel {
+  const facts = nullableObject(row, 'facts', where);
+  return {
+    id: str(row, 'id', where),
+    upstream: str(row, 'upstream', where),
+    routedFor: strArray(row, 'routed_for', where),
+    listed: bool(row, 'listed', where),
+    facts: facts === null ? null : readUpstreamModelFacts(facts, `${where}.facts`),
+  };
+}
+
+function readUpstreamModelFacts(facts: Json, where: string): UpstreamModelFacts {
+  return {
+    toolChoice: strArray(facts, 'tool_choice', where),
+    reasoningEfforts: nullableStrArray(facts, 'reasoning_efforts', where),
+    sampling: nullableBool(facts, 'sampling', where),
+    structuredOutput: nullableBool(facts, 'structured_output', where),
+  };
+}
+
+function readUpstreamListStatus(status: Json, where: string): UpstreamListStatus {
+  const error = nullableObject(status, 'error', where);
+  return {
+    listedAt: nullableStr(status, 'listed_at', where),
+    stale: bool(status, 'stale', where),
+    error: error === null ? null : { code: str(error, 'code', `${where}.error`), message: str(error, 'message', `${where}.error`) },
+  };
 }
 
 function readNumbers(entries: unknown[] | null, where: string): number[] | null {

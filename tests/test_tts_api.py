@@ -710,7 +710,7 @@ def test_the_openai_proxy_does_not_see_a_voice_as_a_model(
     with make_client(enable_llm=True, enable_tts=True) as client:
         client.app.state.residency._resident = resident_voice(VOICE)
         listed = client.get("/v1/openai/models", headers=auth).json()
-        assert listed == {"object": "list", "data": []}
+        assert listed == {"object": "list", "data": [], "upstreams": {}}
         response = client.post(
             "/v1/openai/chat/completions",
             headers=auth,

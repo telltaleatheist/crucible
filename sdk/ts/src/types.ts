@@ -916,6 +916,49 @@ export interface Provenance {
 }
 
 /** One model this server knows about, as `GET /v1/models` describes it. */
+/** One model an upstream can be sent a chat for, as {@link CrucibleClient.upstreamModels} reads it. */
+export interface UpstreamModel {
+  /** The id a chat sends to reach it: `<upstream>/<vendor id>`, e.g. `anthropic/claude-opus-5-5`. */
+  readonly id: string;
+  /** `anthropic`, `openai` or `ollama`. */
+  readonly upstream: string;
+  /** The capability classes a server route sends to this model; empty when none does. */
+  readonly routedFor: readonly string[];
+  /** The vendor's own list names it. False only for a model a route names that the vendor did not list. */
+  readonly listed: boolean;
+  /** What Crucible knows about forwarding to it; null where it has no rule and forwards the chat as sent. */
+  readonly facts: UpstreamModelFacts | null;
+}
+
+/** {@link UpstreamModel.facts}. */
+export interface UpstreamModelFacts {
+  /** The `tool_choice` values Crucible sends on (`function` = a named function); others are refused. */
+  readonly toolChoice: readonly string[];
+  /** The `reasoning_effort` levels the model takes; null where Crucible does not check them. */
+  readonly reasoningEfforts: readonly string[] | null;
+  /** Whether it takes temperature/top_p/top_k; null where Crucible does not check. */
+  readonly sampling: boolean | null;
+  /** Whether it takes a `response_format`; null where Crucible does not check. */
+  readonly structuredOutput: boolean | null;
+}
+
+/** Per configured upstream: when its model list was read, and why it could not be read again. */
+export interface UpstreamListStatus {
+  /** When the vendor last answered, ISO 8601; null if it never has since the server started. */
+  readonly listedAt: string | null;
+  /** The list is the last one the vendor gave; it did not answer this time. */
+  readonly stale: boolean;
+  /** Why the vendor's list could not be read (`upstream_unreachable`, `upstream_rejected`), or null. */
+  readonly error: { readonly code: string; readonly message: string } | null;
+}
+
+/** {@link CrucibleClient.upstreamModels}'s answer (2.0.31+). */
+export interface UpstreamModels {
+  readonly models: readonly UpstreamModel[];
+  /** Keyed by upstream name; only the upstreams this server has a key or URL for. */
+  readonly upstreams: Readonly<Record<string, UpstreamListStatus>>;
+}
+
 export interface ModelInfo {
   /** Crucible's id, stable across backends, e.g. `qwen3.5-9b`. */
   readonly id: string;

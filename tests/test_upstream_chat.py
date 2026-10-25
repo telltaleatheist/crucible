@@ -449,25 +449,82 @@ def test_load_model_naming_an_upstream_model_is_refused_the_same_way(
     assert body.json()["error"]["code"] == "upstream_never_resident"
 
 
-def test_openai_models_lists_the_routed_upstream_models_and_no_catalog(
-    routed, auth
-) -> None:
-    rows = routed.get("/v1/openai/models", headers=auth).json()["data"]
-    by_id = {row["id"]: row for row in rows}
+def test_openai_models_lists_every_model_each_upstream_serves(routed, auth) -> None:
+    listed = routed.get("/v1/openai/models", headers=auth).json()
+    by_id = {row["id"]: row for row in listed["data"]}
     assert set(by_id) == {
-        "anthropic/claude-sonnet-5",
-        "openai/gpt-5",
-        "ollama/qwen3.5:9b",
+        *(f"anthropic/{m}" for m in fake_upstream.ANTHROPIC_MODELS),
+        *(f"openai/{m}" for m in fake_upstream.OPENAI_MODELS),
+        *(f"ollama/{m}" for m in fake_upstream.OLLAMA_MODELS),
     }
     row = by_id["anthropic/claude-sonnet-5"]
-    assert row["upstream"] == "anthropic"
-    assert row["owned_by"] == "anthropic"
-    assert row["routed_for"] == ["translate"]
-    assert "max_model_len" not in row
-    assert "defaults" not in row
-    assert "created" not in row
-    assert "anthropic/claude-haiku-5" not in by_id
+    assert (row["upstream"], row["owned_by"], row["routed_for"], row["listed"]) == (
+        "anthropic", "anthropic", ["translate"], True)
+    assert by_id["anthropic/claude-haiku-5"]["routed_for"] == [], (
+        "a model no route names is listed all the same: an app picks it per job"
+    )
+    assert row["facts"] == {
+        "tool_choice": ["auto", "none", "required", "function"],
+        "reasoning_efforts": list(upstreams.ANTHROPIC_MODEL_RULES["claude-sonnet-5"].efforts),
+        "sampling": False, "structured_output": True,
+    }
+    assert by_id["ollama/llama3:8b"]["facts"]["tool_choice"] == ["auto"]
+    assert by_id["openai/gpt-5"]["facts"] is None
+    for key in ("max_model_len", "defaults", "created"):
+        assert key not in row
+    assert set(listed["upstreams"]) == {"anthropic", "openai", "ollama"}
+    assert all(s["error"] is None and not s["stale"] and s["listed_at"]
+               for s in listed["upstreams"].values())
 
+
+def test_the_vendor_lists_are_kept_and_a_vendor_that_stops_answering_is_served_stale(
+    routed, auth, upstream, monkeypatch
+) -> None:
+    from crucible.api import upstream as upstream_api
+
+    def vendor_reads() -> int:
+        return sum(1 for h in upstream.headers_seen if "x-api-key" in h)
+
+    routed.get("/v1/openai/models", headers=auth)
+    first = vendor_reads()
+    routed.get("/v1/openai/models", headers=auth)
+    assert vendor_reads() == first, "a second read inside the window asks no vendor"
+
+    monkeypatch.setattr(upstream_api, "UPSTREAM_LIST_SECONDS", 0.0)
+    upstream.status = 503
+    listed = routed.get("/v1/openai/models", headers=auth).json()
+    assert vendor_reads() > first
+    anthropic = listed["upstreams"]["anthropic"]
+    assert anthropic["stale"] is True and anthropic["error"]["code"] == "upstream_rejected"
+    assert "anthropic/claude-haiku-5" in {r["id"] for r in listed["data"]}, (
+        "weather: the last list the vendor gave is served, and says it is stale"
+    )
+
+
+def test_an_upstream_that_never_answered_lists_only_what_a_route_names(
+    make_client, auth, upstream, monkeypatch
+) -> None:
+    monkeypatch.setattr(upstreams, "ANTHROPIC_BASE", upstream.url)
+    upstream.status = 503
+    with make_client(enable_llm=True, capability=decided()) as client:
+        client.put("/v1/settings", headers=auth, json={
+            "upstreams": {"anthropic": {"key": ANTHROPIC_KEY}},
+            "routes": {"translate": "anthropic/claude-sonnet-5"},
+        })
+        listed = client.get("/v1/openai/models", headers=auth).json()
+    assert [(r["id"], r["listed"]) for r in listed["data"]] == [
+        ("anthropic/claude-sonnet-5", False)]
+    assert listed["upstreams"]["anthropic"]["listed_at"] is None
+    assert listed["upstreams"]["anthropic"]["error"]["code"] == "upstream_rejected"
+
+
+def test_a_new_key_reads_the_vendor_list_again_at_once(routed, auth, upstream) -> None:
+    routed.get("/v1/openai/models", headers=auth)
+    before = sum(1 for h in upstream.headers_seen if "x-api-key" in h)
+    routed.put("/v1/settings", headers=auth,
+               json={"upstreams": {"anthropic": {"key": ANTHROPIC_KEY + "x"}}})
+    routed.get("/v1/openai/models", headers=auth)
+    assert sum(1 for h in upstream.headers_seen if "x-api-key" in h) == before + 1
 
 def test_two_classes_on_one_model_are_one_row(routed, auth) -> None:
     routed.put(

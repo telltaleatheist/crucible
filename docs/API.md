@@ -64,7 +64,7 @@ Every route this server answers and every job type it runs, one line each. The s
 | --- | --- |
 | `POST /openai/v1/chat/completions` | An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream. |
 | `POST /openai/v1/embeddings` | OpenAI's embeddings: `{object: "list", data: [{embedding, index}], model, usage}`, unit-length vectors, with what wrote them under `crucible` (its `model.fingerprint` is what to store beside them; docs/internals/api.md "Embed"). |
-| `GET /openai/v1/models` | The resident model in OpenAI's list shape, plus every upstream model a route names. |
+| `GET /openai/v1/models` | The resident model in OpenAI's list shape, then every model each configured upstream serves, as `<upstream>/<id>` (the id a chat sends to reach it). |
 | `POST /openai/v1/rerank` | Cohere's and Jina's rerank: `{results: [{index, relevance_score, document?}], model, usage}`, most relevant first, `top_n` of them, with what judged them and every score in document order under `crucible`. |
 | `GET /v1/accelerator` | What is on the card right now and which holders are Crucible's own processes. |
 | `GET /v1/activity` | What this server is doing and how far along, in one read with no job id. |
@@ -90,7 +90,7 @@ Every route this server answers and every job type it runs, one line each. The s
 | `GET /v1/models` | Every model this build has a manifest for, and where it stands here. |
 | `POST /v1/openai/chat/completions` | An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream. |
 | `POST /v1/openai/embeddings` | OpenAI's embeddings: `{object: "list", data: [{embedding, index}], model, usage}`, unit-length vectors, with what wrote them under `crucible` (its `model.fingerprint` is what to store beside them; docs/internals/api.md "Embed"). |
-| `GET /v1/openai/models` | The resident model in OpenAI's list shape, plus every upstream model a route names. |
+| `GET /v1/openai/models` | The resident model in OpenAI's list shape, then every model each configured upstream serves, as `<upstream>/<id>` (the id a chat sends to reach it). |
 | `POST /v1/openai/rerank` | Cohere's and Jina's rerank: `{results: [{index, relevance_score, document?}], model, usage}`, most relevant first, `top_n` of them, with what judged them and every score in document order under `crucible`. |
 | `POST /v1/pairing/decision` | Approve (`allow: true`) or deny a pairing request, naming its `id` and the `user_code` the asking client shows. |
 | `POST /v1/pairing/poll` | How a pairing request stands: `pending`, `approved` (the answer then carries the server's `name` and its `token`), `denied` or `expired`. |
@@ -1256,7 +1256,7 @@ OpenAI's embeddings: `{object: "list", data: [{embedding, index}], model, usage}
 
 ### `GET /openai/v1/models`
 
-The resident model in OpenAI's list shape, plus every upstream model a route names.
+The resident model in OpenAI's list shape, then every model each configured upstream serves, as `<upstream>/<id>` (the id a chat sends to reach it). An upstream row carries `upstream`, `routed_for` (the classes a route sends there), `listed` (the vendor's own list names it; false only for a model a route names that the vendor did not list) and `facts`: the `tool_choice` values Crucible sends on, and for an `anthropic/<id>` model its rule row (`reasoning_efforts`, `sampling`, `structured_output`), or null where Crucible has no rule and forwards the chat as sent. `upstreams` says, per configured upstream, when its list was read (`listed_at`), whether that list is `stale`, and the `error` that kept it from being read again: each vendor's list is kept for 10 minutes, a vendor that does not answer is served its last list, and a key or URL change reads it again at once.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -1342,7 +1342,7 @@ OpenAI's embeddings: `{object: "list", data: [{embedding, index}], model, usage}
 
 ### `GET /v1/openai/models`
 
-The resident model in OpenAI's list shape, plus every upstream model a route names.
+The resident model in OpenAI's list shape, then every model each configured upstream serves, as `<upstream>/<id>` (the id a chat sends to reach it). An upstream row carries `upstream`, `routed_for` (the classes a route sends there), `listed` (the vendor's own list names it; false only for a model a route names that the vendor did not list) and `facts`: the `tool_choice` values Crucible sends on, and for an `anthropic/<id>` model its rule row (`reasoning_efforts`, `sampling`, `structured_output`), or null where Crucible has no rule and forwards the chat as sent. `upstreams` says, per configured upstream, when its list was read (`listed_at`), whether that list is `stale`, and the `error` that kept it from being read again: each vendor's list is kept for 10 minutes, a vendor that does not answer is served its last list, and a key or URL change reads it again at once.
 
 *Door:* token + `X-Crucible-Api: 1`
 

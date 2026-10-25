@@ -64,7 +64,7 @@ from ..proxy import (
     sent_across_the_wire,
     settle_after_chat,
 )
-from ..upstream import forward_to_upstream, routed_upstream_rows
+from ..upstream import UpstreamLists, forward_to_upstream, upstream_model_rows
 
 
 class ChatCompletionBody(BaseModel):
@@ -285,17 +285,28 @@ def refuse_unservable(requested: str, form: str | None, backend_kind: str) -> No
 def register(routers: Routers, ctx: AppContext) -> None:
     private, openai = routers.private, routers.openai
     config, residency = ctx.config, ctx.residency
+    lists = UpstreamLists()
 
     @private.get("/openai/models")
     @openai.get("/models")
     async def openai_models() -> dict[str, Any]:
-        """The resident model in OpenAI's list shape, plus every upstream model a route
-        names.
+        """The resident model in OpenAI's list shape, then every model each configured
+        upstream serves, as `<upstream>/<id>` (the id a chat sends to reach it). An
+        upstream row carries `upstream`, `routed_for` (the classes a route sends there),
+        `listed` (the vendor's own list names it; false only for a model a route names
+        that the vendor did not list) and `facts`: the `tool_choice` values Crucible
+        sends on, and for an `anthropic/<id>` model its rule row (`reasoning_efforts`,
+        `sampling`, `structured_output`), or null where Crucible has no rule and
+        forwards the chat as sent. `upstreams` says, per configured upstream, when its
+        list was read (`listed_at`), whether that list is `stale`, and the `error` that
+        kept it from being read again: each vendor's list is kept for 10 minutes, a
+        vendor that does not answer is served its last list, and a key or URL change
+        reads it again at once.
         """
         resident = residency.resident_model
-        data: list[dict[str, Any]] = routed_upstream_rows(config)
+        data, status = await upstream_model_rows(config, ctx.http, lists)
         if resident is None:
-            return {"object": "list", "data": data}
+            return {"object": "list", "data": data, "upstreams": status}
         return {
             "object": "list",
             "data": [
@@ -315,6 +326,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 },
                 *data,
             ],
+            "upstreams": status,
         }
 
     @private.post("/openai/chat/completions", openapi_extra=_documented_body())
