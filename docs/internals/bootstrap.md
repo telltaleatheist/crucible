@@ -109,6 +109,12 @@ the code does not say by itself.
   TypeScript side, and `$BIND` would reach `spawn()` as a literal.
 - The three program steps (host probe, server runtime, linger) carry their
   shell beside the TypeScript; the iteration is written twice, the facts once.
+- `env-sync` runs `crucible env sync` first: an upgrade installs a new wheel, whose recipe files may pin a
+  different package (narrator's commit, 2.0.24), but rebuilds no env, so the Mac's tts env stayed on the
+  old narrator and every Higgs voice read `loadable: false` (2026-10-25). It brings each env installed
+  here that no longer matches its recipe to it, through `crucible install`'s own build (only what moved
+  is installed), leaves envs that are not installed alone, and fails the install by name when one cannot
+  be brought to its recipe. It gets the `envMs` budget, since a sync can be a package install.
 - `env-patch-llm` runs `crucible env patch llm` while the server is down, because
   an upgrade installs a new wheel without rebuilding an unchanged env and so skips
   `install_env`'s own patch step. It reports `not_applicable` where there is

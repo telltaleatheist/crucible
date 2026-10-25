@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- A deploy and an update bring every job-type env installed on the machine to its recipe: a new installer step, `env-sync` (`crucible env sync`), before `env-patch-llm`. An upgrade installs a new wheel, whose recipes may pin a different package, but rebuilt no env, so when narrator's pin moved to dc05e7e7 (2.0.24) the Mac's tts env stayed on the old narrator and every Higgs voice there read `loadable: false` until `crucible install tts` was run by hand (2026-10-25). It rebuilds through `crucible install`'s own path (only what moved is installed), leaves envs that are not installed alone, and fails the update by name (`env_sync_failed`) when an env cannot be brought to its recipe.
+
 ## 2.0.28 — 2026-10-25
 
 - A queue session that leaves the line after its own load finished, before it opened, now takes that model off the card. The line cancelled a load still running, but one already DONE was left resident with nothing holding it: on owens-pc (2026-10-25) BookForge quit while its pronunciation guide's session waited on qwen3.8-27b-4bit, the load finished, the session was gone, and the 27B sat on the card until it was unloaded by hand (bookforge pc 1's report). The line hands every removed waiting session to `sessionqueue.settle_a_left_sessions_load`, which settles the card (on a thread, as SessionCloser.end does) only when the session's own load ended DONE and the resident is still the session's model; the settlement unloads nothing else holds, so an operator's load and a session still wanting the model keep it.

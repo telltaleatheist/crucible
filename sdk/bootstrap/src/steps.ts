@@ -329,6 +329,20 @@ export function installSteps(plan: StepPlan): StepDef[] {
       timeout: 'envMs',
     });
   }
+  // An upgrade runs no `crucible install`, and nothing else re-syncs an env, so a recipe pin
+  // that moved (narrator to dc05e7e7, 2.0.24) reached the recipe file but not the env: the
+  // Mac's tts env stayed on the old narrator and every Higgs voice read `loadable: false`
+  // until it was installed by hand (2026-10-25). This brings each env installed here that no
+  // longer matches its recipe to it, before the llm patches are applied to what it built.
+  const syncWords: Word[] = [crucible, 'env', 'sync'];
+  steps.push({
+    name: 'env-sync',
+    what: 'bring each installed job-type env that no longer matches its recipe to it',
+    words: syncWords,
+    sh: `${renderSh(syncWords)} || die "step_failed: env-sync"\n`,
+    skip: null,
+    timeout: 'envMs',
+  });
   const patchWords: Word[] = [crucible, 'env', 'patch', 'llm'];
   steps.push({
     name: 'env-patch-llm',

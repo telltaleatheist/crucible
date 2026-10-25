@@ -412,6 +412,42 @@ def _ensure_tools(config: Config, args: argparse.Namespace) -> str | None:
     return None
 
 
+def cmd_env_sync(args: argparse.Namespace) -> int:
+    """`crucible env sync`: every job-type env installed here that no longer matches its
+    recipe is brought to it, through the same `_build_env` as `crucible install` (which
+    installs only what moved). The installer's `env-sync` step, so a deploy and an update
+    carry a moved pin into the envs.
+
+    2026-10-25: narrator's pin moved to dc05e7e7 (the PC hiss fix) and the deploy put the
+    new recipe on both machines, but no deploy step re-syncs an env, so the Mac's tts env
+    stayed on 94c1f49d and every Higgs voice there read `loadable: false` ("does not match
+    mlx-darwin.txt: narrator was installed from 94c1f49d…, recipe pins dc05e7e7…") until
+    `crucible install tts` was run on it by hand. An env that is not installed here is not
+    this step's: installing a type is an install. One that cannot be brought to its recipe
+    fails the step by name."""
+    config, backend = common.here()
+    if backend.kind == LLAMA_WINDOWS:
+        print(f"envs: {LLAMA_WINDOWS} builds no job-type env to sync")
+        return common.EXIT_OK
+    stale = []
+    for spec in jobenv.every_env(backend.kind):
+        if not jobenv.env_python(config.home, spec).is_file():
+            continue
+        status = jobenv.env_status(config.home, spec, backend.kind)
+        if not status.installed:
+            stale.append((spec, status.detail))
+    if not stale:
+        print("envs: every env installed here matches its recipe")
+        return common.EXIT_OK
+    rebuild = argparse.Namespace(force=False, verbose=args.verbose)
+    for spec, why in stale:
+        print(f"env {spec.key}: {why}; bringing it to its recipe")
+        refusal = _build_env(config, backend, spec, rebuild)
+        if refusal is not None:
+            return _fail(f"env_sync_failed: env {spec.key}: {refusal}")
+    return common.EXIT_OK
+
+
 def cmd_env_tools(args: argparse.Namespace) -> int:
     """`crucible env tools`: every pinned host tool an installed job type uses, placed at
     THIS release's pin. The installer's `env-tools` step.

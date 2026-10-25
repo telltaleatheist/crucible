@@ -324,6 +324,9 @@ if [ -n "$JOB_TYPES" ]; then
   done
 fi
 
+say "env-sync"
+"$CRUCIBLE" 'env' 'sync' || die "step_failed: env-sync"
+
 say "env-patch-llm"
 "$CRUCIBLE" 'env' 'patch' 'llm' || die "step_failed: env-patch-llm"
 

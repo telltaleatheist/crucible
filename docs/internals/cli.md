@@ -373,6 +373,14 @@ It never chooses a backend. `crucible orchestrator` passes `--backend llama-wind
   already states the one cause. An llm patch in `no_env` is not a second problem for the
   same reason.
 
+## `env sync`
+
+The installer's `env-sync` step, before `env-patch-llm`. Every job-type env installed here whose contents
+no longer match its recipe (`jobenv.env_status`: a pin or a direct reference that moved) is rebuilt through
+`_build_env`, the path `crucible install` takes, which installs only what moved. An env that is not
+installed is not touched: installing a type is an install. It exits 0 when every installed env matches,
+and non-zero by name (`env_sync_failed`) when one cannot be brought to its recipe.
+
 ## `env patch`
 
 The installer's `env-patch-llm` step. An upgrade installs a new wheel and never runs

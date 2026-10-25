@@ -38,7 +38,7 @@ from ..narratorengines import NARRATOR_ENGINE_SAMPLING
 from . import common
 from .capability import _card_facts, _card_line
 from .common import EXIT_OK, EXIT_REFUSED, _env_spec, _fail
-from .install import cmd_env_tools
+from .install import cmd_env_sync, cmd_env_tools
 
 CAPABILITY_WRITE = "crucible capability --write"
 DOCTOR_JSON = "crucible doctor --json"
@@ -1276,3 +1276,16 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
         "--verbose", action="store_true", help="say each download as it starts"
     )
     env_tools.set_defaults(func=cmd_env_tools)
+    env_sync = env_commands.add_parser(
+        "sync",
+        help=(
+            "bring every job-type env installed here that no longer matches its recipe "
+            "(a moved pin, e.g. narrator's) to it, installing only what moved; envs not "
+            "installed are left alone. Exits non-zero by name when one cannot be (a deploy "
+            "and an update run it)"
+        ),
+    )
+    env_sync.add_argument(
+        "--verbose", action="store_true", help="print the package installer's lines"
+    )
+    env_sync.set_defaults(func=cmd_env_sync)
