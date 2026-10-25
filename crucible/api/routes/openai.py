@@ -103,8 +103,8 @@ class ChatCompletionBody(BaseModel):
     none. A local model writes them in the format its manifest declares (`[tools]`) and
     the reply carries its calls as `tool_calls`; a model with no format is refused
     `tools_unsupported`, and `tools` beside a `response_format` is refused
-    `tools_with_response_format` (docs/internals/engines-and-capability.md, "Tool
-    calling")."""
+    `tools_with_response_format` (docs/internals/engines-and-capability.md,
+    "Tool calling")."""
     tool_choice: str | dict[str, Any] | None = None
     """OpenAI's: `auto` (the default with tools), `none`, `required`, or
     `{"type": "function", "function": {"name": ...}}`."""

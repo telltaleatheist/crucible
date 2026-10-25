@@ -639,6 +639,7 @@ def test_the_engine_applies_the_items_patches_itself_at_start(
         envpatches.MLX_LM_STRUCTURED_OUTPUT_HELPER.script,
         envpatches.MLX_LM_STRUCTURED_OUTPUT.script,
         BARE.script,
+        envpatches.MLX_LM_TOOLS_ONLY_WHEN_SENT.script,
     ]
     assert ITEMS.marker in server_of(env).read_text(encoding="utf-8")
     assert helper_of(env).is_file()
