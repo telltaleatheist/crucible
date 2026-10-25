@@ -45,3 +45,7 @@ overhead_bytes = 700_000_000
 kv_bytes_per_token = 46_581
 basis = "measured"
 measured_at_context = 8192
+
+[tools]
+format = "qwen3-xml"
+basis = """the same family and chat template as qwen3.5-4b, whose template was read 2026-10-25 (Qwen3-Coder's XML form); this variant's own template was not on any machine to read."""

@@ -223,6 +223,25 @@ MLX_LM_FP32_LOGPROBS = EnvPatch(
     ),
 )
 
+MLX_LM_TOOLS_ONLY_WHEN_SENT = EnvPatch(
+    id="mlx-lm-tools-only-when-sent",
+    distribution="mlx-lm",
+    rel_path="mlx_lm/server.py",
+    marker="cache_key = (model_key, tuple(stop_words), initial_state, bool(tools))",
+    absent_marker="cache_key = (model_key, tuple(stop_words), initial_state)\n",
+    stale_marker=None,
+    script="patch_mlx_lm_tools_only_when_sent.py",
+    why=(
+        "stock mlx-lm 0.31.3 reads the model's tool-call token as a tool call even "
+        "when the request sent no tools; its parser then had no tools, failed, and "
+        "the call was dropped, so the answer came back finish_reason tool_calls with "
+        "neither content nor tool_calls (Briefcase, qwen3.5-9b, 2026-10-25). Patched, "
+        "a request with no tools gets the token as text, as vLLM and llama-server "
+        "do. MlxLmEngine applies it itself at start"
+    ),
+)
+
+
 MLX_LM_FATAL_GENERATION_THREAD = EnvPatch(
     id="mlx-lm-fatal-generation-thread",
     distribution="mlx-lm",
@@ -402,6 +421,7 @@ SELF_APPLIED_LLM_PATCHES: tuple[EnvPatch, ...] = (
     MLX_LM_STRUCTURED_OUTPUT,
     MLX_LM_STRUCTURED_OUTPUT_BATCH,
     MLX_LM_QWEN3_BARE_CHECKPOINT,
+    MLX_LM_TOOLS_ONLY_WHEN_SENT,
 )
 
 LLM_PATCHES: tuple[EnvPatch, ...] = (
@@ -664,6 +684,7 @@ __all__ = [
     "MLX_LM_DECIDE_ITEMS_HELPER",
     "MLX_LM_DETOKENIZER_TOKENMAP",
     "MLX_LM_FATAL_GENERATION_THREAD",
+    "MLX_LM_TOOLS_ONLY_WHEN_SENT",
     "MLX_LM_FP32_LOGPROBS",
     "MLX_LM_STRUCTURED_OUTPUT",
     "MLX_LM_STRUCTURED_OUTPUT_BATCH",

@@ -23,7 +23,7 @@ from ...engines import (
 from ...errors import ApiError
 from ...formrequest import refuse_unknown_form, refuse_upstream_form, take_form
 from ...inflight import read_act
-from ...manifests import ManifestError, load_manifest
+from ...manifests import ManifestError, load_all_manifests, load_manifest
 from ...prefill import (
     refuse_unkeepable_prefill,
     refuse_upstream_prefill,
@@ -130,6 +130,54 @@ def _documented_body() -> dict[str, Any]:
     return {"requestBody": {"required": True, "content": {"application/json": {"schema": schema}}}}
 
 
+def refuse_tools_this_model_cannot_take(
+    body: dict[str, Any], model: str, backend_kind: str
+) -> None:
+    """A local chat that sends `tools` is answered by a model whose manifest declares the
+    tool-call format its chat template is trained on ([tools]), so the engine writes the
+    tools in that form and reads the model's calls back as OpenAI `tool_calls`. Without
+    one, Crucible would be guessing a format: refused by name (a misconfiguration, not
+    weather). `tools` beside `response_format` / a structured output is refused too: on
+    the local engines the constraint covers the whole answer, so a tool call could never
+    be written. A model with no manifest is left to the door's own refusal."""
+    tools = body.get("tools")
+    if tools is None or tools == []:
+        return
+    if not isinstance(tools, list):
+        raise ApiError(
+            400, "invalid_request",
+            f"`tools` is a list of OpenAI function tools; got {type(tools).__name__}",
+        )
+    try:
+        manifest = load_manifest(model)
+    except ManifestError:
+        return
+    if manifest.tools is None:
+        takers = sorted(
+            found.id for found in load_all_manifests().values()
+            if found.tools is not None and found.supports(backend_kind)
+        )
+        raise ApiError(
+            400,
+            "tools_unsupported",
+            f"{model!r} declares no tool-call format (its manifest has no [tools]), so "
+            "Crucible cannot write `tools` in the form it was trained on. Send the chat "
+            f"without `tools`, or name a model that declares one: {takers}",
+            {"model": model, "models_with_tools": takers},
+        )
+    constrained = constrained_fields(body)
+    if constrained:
+        raise ApiError(
+            400,
+            "tools_with_response_format",
+            f"a chat to {model!r} sent `tools` beside {constrained}: on this engine a "
+            "constraint covers the whole answer, so the model could never write a tool "
+            "call. Send the tools without the constraint, and constrain the final round "
+            "(the one after the tool results) instead",
+            {"model": model, "constrained": constrained},
+        )
+
+
 def _refuse_before_waiting(
     body: dict[str, Any],
     model: str,
@@ -141,6 +189,7 @@ def _refuse_before_waiting(
     before it waits or a model is loaded for it: a prefill the engine cannot keep, a
     constraint it does not enforce, compact JSON it cannot keep. A model with no
     manifest, or no block here, is left to the door's own refusal."""
+    refuse_tools_this_model_cannot_take(body, model, backend_kind)
     if prefill is None and not constrained_fields(body):
         return
     try:

@@ -85,8 +85,8 @@ def _images(raw: str | None, verb: str) -> int:
 
 
 def _no_ceiling(verb: str, ceiling: float | None) -> None:
-    """decide's door and the image job take no ceiling: a body that sent one would be
-    refused as a field they do not have."""
+    """The image job takes no ceiling: a body that sent one would be refused as a field
+    it does not have. (decide takes one, as chat does.)"""
     if ceiling is None:
         return
     if verb == IMAGE:
@@ -127,10 +127,16 @@ def _choose(
             engine = manifest.spec(backend.kind).engine
             rerank.refuse_unscorable(chosen.model, manifest, engine, likelihood_reading(engine))
         return chosen.model, verbmodel.source_of(chosen, verb, config)
-    _no_ceiling(verb, ceiling)
     if verb == "decide":
-        picked = decide_model(config, backend.kind, model, form, images)
+        picked = decide_model(config, backend, model, form, images, ceiling)
+        if ceiling is not None:
+            chosen = verbmodel.resolve(
+                verb, config, backend, model=None, form=form, max_params_b=ceiling,
+                resident=resident_id,
+            )
+            return picked, verbmodel.source_of(chosen, verb, config)
     else:
+        _no_ceiling(verb, ceiling)
         plugin = jobs_module.resolve(ctx.store.registry, IMAGE, config)
         picked = jobs_module.resolve_model(plugin, model, {})
         if picked is None:

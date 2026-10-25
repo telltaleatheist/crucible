@@ -203,6 +203,14 @@ class DecideRequest(_Strict):
     form of the same weights when it fits, else the largest model that reads
     images and fits at or below decide's 9B goal). The answer's `model` names
     which one served it."""
+    max_params_b: Annotated[float, Field(gt=0)] | None = None
+    """A ceiling, in billions of parameters, on this server's own pick for `decide`, as
+    a chat's `max_params_b` is (docs/VERB-SIZING.md rule 8): the registered model is
+    kept when it is at or below the ceiling, and only a pick above it is replaced by the
+    biggest decide model that fits at or below it; it never raises the pick. Refused
+    beside a `model` (`model_with_ceiling`) and beside `images` (a decision with images
+    is served by the model registered for one). The answer's `model` names the model
+    chosen."""
     form: _NonEmpty | None = None
     """Which form of the model serves the decision, for a model whose block here
     states more than one (`GET /v1/models`, the row's `forms`). Absent: whichever

@@ -428,9 +428,14 @@ def test_the_preview_names_the_source_the_fit_and_the_facts(
     assert (decide["model"], decide["source"]) == ("qwen3.5-9b", "auto")
     with_images = _preview(client, auth, verb="decide", images=1)
     assert with_images["model"] == "qwen3.5-4b", "the PC's decide with images (section 8a)"
-    assert _preview(client, auth, verb="decide", max_params_b=4)["refused"]["code"] == (
-        "invalid_request"
-    )
+    capped_decide = _preview(client, auth, verb="decide", max_params_b=4)
+    assert (capped_decide["model"], capped_decide["source"]) == ("qwen3.5-4b", "max_params_b")
+    kept = _preview(client, auth, verb="decide", max_params_b=9)
+    assert kept["model"] == "qwen3.5-9b", "a ceiling at the pick keeps it (bookforge, 2026-10-25)"
+    assert _preview(client, auth, verb="decide", max_params_b=4, images=1)["refused"][
+        "code"] == "invalid_request"
+    assert _preview(client, auth, verb="decide", model="qwen3.5-4b", max_params_b=4)[
+        "refused"]["code"] == "model_with_ceiling"
     assert _preview(client, auth, verb="tts")["refused"]["code"] == "verb_not_previewed"
     embed = _preview(client, auth, verb="embed")
     door = client.post("/v1/embed", headers=auth,

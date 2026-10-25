@@ -5,6 +5,7 @@ from typing import Any
 
 from ..enginespec import VLLM_ENGINE
 from ..errors import EngineError
+from ..toolformats import TOOL_FORMATS
 from .base import SubprocessEngine, int_flag, plan_flags
 
 MODULE = "vllm.entrypoints.openai.api_server"
@@ -12,6 +13,9 @@ MODULE = "vllm.entrypoints.openai.api_server"
 MAX_LOGPROBS = 32
 
 LOGPROBS_MODE = "raw_logprobs"
+
+# Derived from a model's [tools] (model_args); never stated in a manifest.
+TOOL_FLAGS: tuple[str, ...] = ("--enable-auto-tool-choice", "--tool-call-parser")
 
 DECIDE_ARGS: tuple[str, ...] = (
     "--max-logprobs",
@@ -189,6 +193,28 @@ class VllmEngine(SubprocessEngine):
             *card_flags,
             *plan_flags(plan),
         ]
+
+    @classmethod
+    def model_args(
+        cls, manifest: Any, args: list[str], weights_dir: Path, context: int
+    ) -> list[str]:
+        """Tool calling, derived from the model's [tools] (one owner): the parser for the
+        format its chat template writes, so a request's `tools` are rendered through the
+        template and the model's calls come back as OpenAI `tool_calls`. vLLM only reads
+        calls for a request that sends `tools`. A manifest stating the flags itself is
+        refused."""
+        stated = [flag for flag in TOOL_FLAGS if flag in args]
+        if stated:
+            raise EngineError(
+                f"tool_flags_stated: {manifest.path.name} states {stated} in engine_args "
+                f"({args}); Crucible derives them from the manifest's [tools] table. "
+                "Remove them from engine_args"
+            )
+        tools = getattr(manifest, "tools", None)
+        if tools is None:
+            return args
+        parser = TOOL_FORMATS[tools.format]["vllm"]
+        return [*args, "--enable-auto-tool-choice", "--tool-call-parser", parser]
 
     def start(
         self, model_dir: Path, served_name: str, port: int, args: list[str]

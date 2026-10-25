@@ -14,6 +14,7 @@ from .errors import CrucibleError
 from .memorybudget import available_bytes, gib_text
 from .precision import MIN_WEIGHT_BITS, below_floor, gguf_bits, implied_bits
 from .tomltable import HF_REPO_PATTERN, MODEL_ID_PATTERN, REVISION_PATTERN, check_table
+from .toolformats import TOOL_FORMATS
 from .verbspec import EmbedSpec, RerankSpec, VerbSpecError, parse_embed, parse_rerank
 
 MODELS_DIR_ENV = "CRUCIBLE_MODELS_DIR"
@@ -578,6 +579,39 @@ class GgufLocal(LocalForm):
 
 
 @dataclass(frozen=True)
+class ToolsSpec:
+    """A chat model's [tools] table: the tool-call `format` its chat template is trained
+    on, and the `basis` sentence saying where that was read."""
+
+    format: str
+    basis: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"format": self.format, "basis": self.basis}
+
+
+def _parse_tools(table: Any, path: Path) -> ToolsSpec:
+    where = f"{path.name} [tools]"
+    if not isinstance(table, dict):
+        raise ManifestError(f"{where} must be a table")
+    stray = sorted(set(table) - {"format", "basis"})
+    if stray:
+        raise ManifestError(f"{where}: unknown key(s) {stray}; it has exactly format and basis")
+    fmt, basis = table.get("format"), table.get("basis")
+    if fmt not in TOOL_FORMATS:
+        raise ManifestError(
+            f"{where}: format {fmt!r} is not a tool-call format this build knows; "
+            f"they are {sorted(TOOL_FORMATS)}"
+        )
+    if not isinstance(basis, str) or not basis.strip():
+        raise ManifestError(
+            f"{where}: `basis` must say where the format was read (the model's chat "
+            "template, its card)"
+        )
+    return ToolsSpec(format=fmt, basis=basis.strip())
+
+
+@dataclass(frozen=True)
 class ModelManifest:
     id: str
     family: str
@@ -599,6 +633,8 @@ class ModelManifest:
     # (`rerank`): its [embed] or [rerank] table (crucible/verbspec.py).
     embed: EmbedSpec | None = None
     rerank: RerankSpec | None = None
+    # The tool-call format its chat template is trained on; None refuses `tools`.
+    tools: ToolsSpec | None = None
 
     weights_family = "models"
 
@@ -702,6 +738,7 @@ class ModelManifest:
             "defaults": self.defaults.to_dict(),
             "weights_of": self.weights_of,
             "embed": None if self.embed is None else self.embed.to_dict(),
+            "tools": None if self.tools is None else self.tools.to_dict(),
             "rerank": None if self.rerank is None else self.rerank.to_dict(),
             "backends": {k: v.to_dict() for k, v in sorted(self.backends.items())},
         }
@@ -973,7 +1010,9 @@ def _parse_serves(
     return tuple(served)
 
 
-_TOP_LEVEL_TABLES = frozenset({"model", "backends", "defaults", "local", "embed", "rerank"})
+_TOP_LEVEL_TABLES = frozenset(
+    {"model", "backends", "defaults", "local", "embed", "rerank", "tools"}
+)
 
 
 def _check_document(document: dict[str, Any], path: Path) -> None:
@@ -982,8 +1021,8 @@ def _check_document(document: dict[str, Any], path: Path) -> None:
         raise ManifestError(
             f"{path.name}: unknown top-level table(s) {unknown}; a manifest has "
             "exactly [model], [backends.<kind>], an optional [defaults], an "
-            "optional [local] and, for a model that embeds or reranks, its [embed] "
-            "or [rerank]"
+            "optional [local], an optional [tools] and, for a model that embeds or "
+            "reranks, its [embed] or [rerank]"
         )
     if "model" not in document:
         raise ManifestError(f"{path.name}: missing the [model] table")
@@ -1571,6 +1610,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
         local=None if "local" not in document else _parse_local(local, path, modalities),
         embed=embed,
         rerank=rerank,
+        tools=None if "tools" not in document else _parse_tools(document["tools"], path),
     )
 
 

@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from starlette.background import BackgroundTask
 
 from ... import decide as decide_core
-from ... import decide_items, decide_likelihood, enginespec, upstreamrecord
+from ... import decide_items, decide_likelihood, enginespec, upstreamrecord, verbmodel
 from ...callqueue import take_a_turn
 from ...capabilityclasses import BY_NAME
 from ...config import Config
@@ -192,15 +192,32 @@ def _registered_model(config: Config, n_images: int) -> str:
 
 
 def decide_model(
-    config: Config, backend_kind: str, model: str | None, form: str | None, n_images: int
+    config: Config, backend: Any, model: str | None, form: str | None, n_images: int,
+    max_params_b: float | None = None,
 ) -> str:
     """The model a decision is served by, and what the door refuses about it before
     anything waits: the named one, else the registered one (with images, the one
-    registered for a decision with images). The door and the preview (GET /v1/resolve)
-    both call this."""
-    chosen = model if model is not None else _registered_model(config, n_images)
+    registered for a decision with images), capped by `max_params_b` the way a chat's
+    pick is (verbmodel.resolve: the ceiling only lowers the server's pick). The door and
+    the preview (GET /v1/resolve) both call this."""
+    if max_params_b is not None:
+        if n_images:
+            raise ApiError(
+                400,
+                "invalid_request",
+                "a decision with images is served by the model this server registered "
+                "for one (GET /v1/capability, the decide row's `with_images`); "
+                "`max_params_b` sizes a text decision. Send one or the other",
+                {"max_params_b": max_params_b, "images": n_images},
+            )
+        chosen = verbmodel.resolve(
+            "decide", config, backend, model=model, form=form,
+            max_params_b=max_params_b, resident=None,
+        ).model
+    else:
+        chosen = model if model is not None else _registered_model(config, n_images)
     _refuse_an_upstream(chosen)
-    refuse_unknown_form(chosen, form, backend_kind)
+    refuse_unknown_form(chosen, form, backend.kind)
     refuse_vectors_only(chosen, "decide")
     return chosen
 
@@ -331,8 +348,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
         arrived = time.monotonic()
         act = read_act(request.headers)
         model = decide_model(
-            ctx.config, backend.kind, body.model, body.form,
-            decide_core.check_image_count(body.images),
+            ctx.config, backend, body.model, body.form,
+            decide_core.check_image_count(body.images), body.max_params_b,
         )
         inflight = ctx.inflight
         chat_over = settle_after_chat(ctx.settlement)

@@ -16,6 +16,9 @@ FATAL_SCAN_LINES = 200
 
 EMBED_FLAGS: tuple[str, ...] = ("--embedding", "--embeddings", "--pooling")
 
+# Derived from a model's [tools] (model_args): llama.cpp runs the GGUF's own chat template.
+JINJA_FLAG = "--jinja"
+
 FATAL_LINES: tuple[tuple[str, str, str], ...] = (
     (
         "cuda error: out of memory",
@@ -245,6 +248,16 @@ class LlamaServerEngine(SubprocessEngine):
                 f"({args}); Crucible derives them from the manifest's [embed] table. "
                 "Remove them from engine_args"
             )
+        if JINJA_FLAG in args:
+            raise EngineError(
+                f"tool_flags_stated: {manifest.path.name} states {JINJA_FLAG} in "
+                f"engine_args ({args}); Crucible derives it from the manifest's [tools] "
+                "table. Remove it from engine_args"
+            )
+        if getattr(manifest, "tools", None) is not None:
+            # The GGUF's own chat template renders `tools` and llama.cpp reads the
+            # model's calls back by the format it detects in that template.
+            args = [*args, JINJA_FLAG]
         embed = getattr(manifest, "embed", None)
         if embed is None:
             return args

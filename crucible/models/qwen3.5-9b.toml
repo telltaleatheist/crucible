@@ -77,3 +77,7 @@ overhead_bytes = 963_129_088
 kv_bytes_per_token = 32_768
 basis = "declared"
 measured_at_context = 16384
+
+[tools]
+format = "qwen3-xml"
+basis = """read 2026-10-25 from the cuda-linux and mlx-darwin chat_template.jinja on owens-pc and owens-mac-studio: it writes calls as <tool_call><function=NAME><parameter=P>V</parameter></function></tool_call> (Qwen3-Coder's XML form, not Qwen 2.5/3's JSON)."""

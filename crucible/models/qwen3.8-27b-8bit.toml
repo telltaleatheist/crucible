@@ -29,3 +29,7 @@ overhead_bytes = 11_381_997_601
 kv_bytes_per_token = 65_536
 basis = "computed"
 measured_at_context = 12288
+
+[tools]
+format = "qwen3-xml"
+basis = """read 2026-10-25 from the mlx-darwin chat_template.jinja on owens-mac-studio: it writes calls as <tool_call><function=NAME><parameter=P>V</parameter></function></tool_call> (Qwen3-Coder's XML form, not Qwen 2.5/3's JSON)."""
