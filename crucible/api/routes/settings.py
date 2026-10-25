@@ -70,7 +70,10 @@ def register(routers: Routers, ctx: AppContext) -> None:
         [video_desktop] keys, every job type's flag and verdict, the address it listens
         on now (`bound`) and the keys that wait for a restart (`restart_pending`). No
         secret is returned: `key_hint`, `token_hint` and `hf.token_hint` show the last
-        four characters.
+        four characters. `local_model_choices[<class>]` lists what a picker may offer;
+        `choice_problems[<class>]` names any candidate left out of that list because the
+        catalog has no row for it (a server defect, said rather than failing the whole
+        document), and is `{}` when the two agree.
         """
         return _document(config)
 

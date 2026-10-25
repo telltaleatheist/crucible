@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
@@ -91,30 +92,46 @@ def local_selection(config: Config, name: str) -> str | None:
     return row.selected
 
 
+CATALOG_INCOMPLETE = "catalog_incomplete"
+
+
 def _choices(
     config: Config, installed: Mapping[str, bool]
-) -> dict[str, list[dict[str, Any]]]:
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+    """Each selectable class's candidates, and per class what disagreed with the catalog.
+
+    The catalog and the candidates read the same manifests and must agree; a candidate
+    with no catalog row is a defect. It is said by name, on the server log and under
+    `choice_problems[<class>]`, and left out of that class's list only: one class's defect
+    must not blank every picker (2026-10-25, a local tts voice made the whole document a
+    500 and Briefcase's LLM picker showed no models)."""
     record = config.capability
     if record is None:
-        return {}
+        return {}, {}
     budget = memorybudget.available_bytes(
         record.total_bytes, config.desktop_allowance_bytes
     )
     found: dict[str, list[dict[str, Any]]] = {}
+    problems: dict[str, list[dict[str, Any]]] = {}
     for name in classnames.SELECTABLE_CLASSES:
         entry = capabilityclasses.BY_NAME[name]
         assert entry.candidates is not None
         rows: list[dict[str, Any]] = []
         for candidate in on_host(entry.candidates(record.backend_kind), config.audio_low_vram):
             if candidate.id not in installed:
-                raise ApiError(
-                    500,
-                    "catalog_incomplete",
-                    f"the catalog has no row for {candidate.id!r}, which "
-                    f"{name} offers as a candidate; these two read the same "
-                    "manifests and must agree",
-                    {"capability": name, "model": candidate.id},
-                )
+                problem = {
+                    "code": CATALOG_INCOMPLETE,
+                    "message": (
+                        f"the catalog has no row for {candidate.id!r}, which {name} "
+                        "offers as a candidate; these two read the same manifests and "
+                        "must agree, so it is left out of this list"
+                    ),
+                    "details": {"capability": name, "model": candidate.id},
+                }
+                problems.setdefault(name, []).append(problem)
+                print(f"crucible: settings: {CATALOG_INCOMPLETE}: {problem['message']}",
+                      file=sys.stderr)
+                continue
             rows.append(
                 {
                     "id": candidate.id,
@@ -125,7 +142,7 @@ def _choices(
                 }
             )
         found[name] = rows
-    return found
+    return found, problems
 
 
 def document(
@@ -146,12 +163,14 @@ def document(
             if record is None
             else upstreamrecord.settings_entry(record)
         )
+    choices, choice_problems = _choices(config, installed)
     return {
         "local_models": {
             name: config.local_model(name)
             for name in classnames.SELECTABLE_CLASSES
         },
-        "local_model_choices": _choices(config, installed),
+        "local_model_choices": choices,
+        "choice_problems": choice_problems,
         "routes": routes,
         "upstreams": upstreams,
         "upstream_labels": dict(UPSTREAM_DISPLAY),

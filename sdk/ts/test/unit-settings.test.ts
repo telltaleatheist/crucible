@@ -110,6 +110,7 @@ const DOCUMENT = {
     clean: [{ id: 'qwen3.5-9b', memory_bytes_estimate: 20950548480, held_by: null, unclaimed_since: null, fits: true, installed: true }],
     translate: [], simplify: [], analysis: [],
   },
+  choice_problems: {},
 };
 
 // ------------------------------------------------------------------ settings
@@ -438,6 +439,16 @@ test('the refusal names this package exports are the contract spelling', () => {
   assert.equal(UPSTREAM_IN_USE, 'upstream_in_use');
 });
 
+
+test('a class whose candidate has no catalog row says so and the other classes still draw', async () => {
+  answer(200, {...DOCUMENT, choice_problems: {tts: [{code: 'catalog_incomplete',
+    message: "the catalog has no row for 'omv10b-869', which tts offers as a candidate",
+    details: {capability: 'tts', model: 'omv10b-869'}}]}});
+  const doc = await client().settings();
+  assert.equal(doc.choiceProblems.tts?.[0]?.code, 'catalog_incomplete');
+  assert.deepEqual(doc.choiceProblems.tts?.[0]?.details, {capability: 'tts', model: 'omv10b-869'});
+  assert.equal(doc.localModelChoices.clean?.[0]?.id, 'qwen3.5-9b');
+});
 
 test('local model choices and nullable automatic preferences cross the settings wire', async () => {
   answer(200, {...DOCUMENT, local_models:{translate:'qwen3.8-27b-4bit',clean:null},

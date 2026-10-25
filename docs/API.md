@@ -358,7 +358,7 @@ The one door apps configure Crucible through. Crucible is set-and-forget; everyt
 
 ### `GET /v1/settings`
 
-Every setting in config.toml this server reads, and what the running server is doing with them: where each class's work runs, the upstreams, the [server], [auth], [jobs], [queue], [hf], [tts.<engine>] and (on mlx-darwin) [video_desktop] keys, every job type's flag and verdict, the address it listens on now (`bound`) and the keys that wait for a restart (`restart_pending`). No secret is returned: `key_hint`, `token_hint` and `hf.token_hint` show the last four characters.
+Every setting in config.toml this server reads, and what the running server is doing with them: where each class's work runs, the upstreams, the [server], [auth], [jobs], [queue], [hf], [tts.<engine>] and (on mlx-darwin) [video_desktop] keys, every job type's flag and verdict, the address it listens on now (`bound`) and the keys that wait for a restart (`restart_pending`). No secret is returned: `key_hint`, `token_hint` and `hf.token_hint` show the last four characters. `local_model_choices[<class>]` lists what a picker may offer; `choice_problems[<class>]` names any candidate left out of that list because the catalog has no row for it (a server defect, said rather than failing the whole document), and is `{}` when the two agree.
 
 *Door:* token + `X-Crucible-Api: 1`
 

@@ -255,8 +255,14 @@ def _voice_subjects(config: Config, backend: Backend) -> list[Subject]:
         if not voice.supports(backend.kind):
             continue
         spec = voice.spec(backend.kind)
-        if spec.source == weights.LOCAL:
-            continue
+        # A local voice (a home manifest whose arm names a `path`, as a trainer's screening
+        # voice does) is a voice the tts class offers like any other, so it has a row: the
+        # catalog and the candidates read the same manifests and must agree. On 2026-10-25 a
+        # skip here left training's omv10b-869 offered with no row, and /v1/settings failed
+        # catalog_incomplete for every picker. Its row is installed when its directory holds
+        # the files; pulling and removing it are refused by name in weights (Crucible neither
+        # fetches nor deletes a directory something else owns).
+        local = weights.local_source(spec)
         found.append(
             Subject(
                 kind="voice",
@@ -264,7 +270,7 @@ def _voice_subjects(config: Config, backend: Backend) -> list[Subject]:
                 name=voice.display,
                 job_type="tts",
                 expected_bytes=None,
-                source=f"hf:{spec.hf_repo}",
+                source=f"hf:{spec.hf_repo}" if local is None else f"local:{local}",
                 pull_command=voice.pull_command,
                 installed=_installed_weights(config, voice, spec),
                 pull=_pull_voice(config, voice, backend.kind),

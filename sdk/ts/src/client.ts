@@ -3431,9 +3431,28 @@ function readSettings(body: Json): SettingsDocument {
       }),
     ]),
   );
+  const problemRows = objectField(body, 'choice_problems', where);
+  const choiceProblems = Object.fromEntries(
+    Object.keys(problemRows).map((name) => [
+      name,
+      asArray(
+        field(problemRows, name, `${where}.choice_problems`),
+        `${where}.choice_problems.${name}`,
+      ).map((raw, index) => {
+        const at = `${where}.choice_problems.${name}[${index}]`;
+        const problem = asObject(raw, at);
+        return {
+          code: str(problem, 'code', at),
+          message: str(problem, 'message', at),
+          details: objectField(problem, 'details', at),
+        };
+      }),
+    ]),
+  );
   return {
     localModels,
     localModelChoices,
+    choiceProblems,
     routes,
     upstreams,
     desktopAllowanceBytes: num(body, 'desktop_allowance_bytes', where),

@@ -3047,12 +3047,26 @@ export interface LocalModelChoice {
   readonly installed: boolean;
 }
 
+/** A candidate a capability class offers that the catalog has no row for: a server defect,
+ * said by name and left out of that class's `localModelChoices` only, so every other
+ * picker still draws. */
+export interface ChoiceProblem {
+  /** `catalog_incomplete`. */
+  readonly code: string;
+  readonly message: string;
+  /** `{capability, model}`. */
+  readonly details: Readonly<Record<string, unknown>>;
+}
+
 /** `GET /v1/settings` — the whole of what an app's settings window draws. */
 export interface SettingsDocument {
   /** Which local model serves each capability class. */
   readonly localModels: Readonly<Record<string, string | null>>;
   /** Empty when the engine has not measured its card yet; never absent. */
   readonly localModelChoices: Readonly<Record<string, readonly LocalModelChoice[]>>;
+  /** Per class, the candidates left out of its choices because the catalog has no row for
+   * them; empty when the two agree, which they should. */
+  readonly choiceProblems: Readonly<Record<string, readonly ChoiceProblem[]>>;
   /** One entry per routable capability class. */
   readonly routes: Readonly<Record<string, RouteSetting>>;
   /** One card per upstream. */

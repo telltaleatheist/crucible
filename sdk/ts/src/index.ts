@@ -314,6 +314,7 @@ export type {
   ServerInfo,
   ServerNetwork,
   ServerSetup,
+  ChoiceProblem,
   LocalModelChoice,
   SettingsDocument,
   SettingsPatch,
