@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 2.0.25 — 2026-10-25
+
 - The Higgs prompting guide (`GET /v1/prompting/higgs-v3.md`) is current: the float32 codec decode and the hiss it ended (2.0.24) with its detector; Owen's ruling on which voices an app may use for its own work (`sigma` or an Owen Morgan voice as rendered; `deathstalker` only as a source converted with RVC); and how to render short lines (barks, dialogue), which sit below every fine-tune's measured band: one chunk per line, retake by `take`.
 
 ## 2.0.24 — 2026-10-25
