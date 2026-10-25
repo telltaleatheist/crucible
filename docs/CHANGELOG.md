@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 2.0.27 — 2026-10-25
+
 - A local voice (a home manifest whose arm names a `path`, as a trainer's screening voice does) has a catalog row (`source` `local:<path>`, installed when its directory holds the files; pull and remove are refused by name as before), so the catalog and the tts candidates agree again. On 2026-10-25 training's omv10b-869 on the Mac was skipped by the catalog but offered by tts, and `GET /v1/settings` failed `500 catalog_incomplete`, blanking every client's pickers (Briefcase's LLM picker showed no models). And one class's disagreement no longer takes the document down: a candidate with no catalog row is left out of its own class's `local_model_choices`, said on the server log and under the new `choice_problems[<class>]` (`code`, `message`, `details`), and every other class draws. The SDK reads `SettingsDocument.choiceProblems` (`ChoiceProblem`).
 
 ## 2.0.26 — 2026-10-25
