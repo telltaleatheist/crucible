@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- The hiss on every Higgs voice rendered on the PC is gone: narrator (BookForge dc05e7e7) starts sglang-omni with `--vocoder.factory.dtype float32`. sglang-omni's vocoder stage defaults to bfloat16 and narrator never set it, so the codec turned codes into audio in bf16, against the codec's own float32 config and its warning that its decode is unstable in bf16. Measured 2026-10-25 on identical Mistborn codes through sglang's own codec: bf16 lays a flat floor 15-18 dB above fp32 across 4-11 kHz (difference -64 dBFS under -29 dBFS speech); fp32 matches the Mac (MLX) and plain-PyTorch renders, and Owen confirmed it by ear. The tts env's narrator pin moves on both backends (the Mac's decode was never affected; it moves in lockstep).
+
 ## 2.0.23 — 2026-10-24
 
 - A transcription's width (pieces at a time, Qwen3-ASR on vLLM) is planned from the smaller of the job's budget and the card's free memory as read at load, so a desktop holding more than its allowance narrows the width instead of failing the load `insufficient_memory`. On Victoria's 8 GiB laptop (2026-10-24) the desktop held 1.6-1.9 GiB against a 1.0 GiB allowance, and the six pieces planned from the allowance needed 6.7 GiB where about 6.1 GiB was free. The allowance still caps it: a freer card never widens the plan.
