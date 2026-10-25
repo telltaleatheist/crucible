@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 2.0.29 — 2026-10-25
+
 - A deploy and an update bring every job-type env installed on the machine to its recipe: a new installer step, `env-sync` (`crucible env sync`), before `env-patch-llm`. An upgrade installs a new wheel, whose recipes may pin a different package, but rebuilt no env, so when narrator's pin moved to dc05e7e7 (2.0.24) the Mac's tts env stayed on the old narrator and every Higgs voice there read `loadable: false` until `crucible install tts` was run by hand (2026-10-25). It rebuilds through `crucible install`'s own path (only what moved is installed), leaves envs that are not installed alone, and fails the update by name (`env_sync_failed`) when an env cannot be brought to its recipe.
 
 ## 2.0.28 — 2026-10-25
