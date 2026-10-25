@@ -16,6 +16,7 @@ and the card is settled the same way every time.
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -122,6 +123,42 @@ async def admit_session(
     return IN
 
 
+def settle_a_left_sessions_load(
+    item: WaitingSession, *, store: Any, residency: Any, settlement: Any
+) -> threading.Thread | None:
+    """A waiting session that leaves the line after its OWN load finished takes that
+    model off the card, as a closing session does (SessionCloser.end).
+
+    The line cancels a load still running (`WaitingLine._abandon_load`), but a load that
+    ended DONE before the session opened left a model nothing held: the session that
+    would hold it was gone, and settle_for_job leaves a finished load-model resident on
+    purpose. 2026-10-25 on owens-pc: BookForge quit while its pronunciation guide's
+    session waited on qwen3.8-27b-4bit; the load finished at 16:49:53, the session was
+    gone, and the 27B sat on the card, held by nothing, until it was unloaded by hand.
+
+    Only the session's own model is touched, and only through the settlement, which
+    unloads nothing anything else holds: an operator's load of another model, or a
+    session still wanting this one, keeps it. The settle runs on a thread because the
+    line removes synchronously."""
+    session: QueueSession = item.job  # type: ignore[assignment]
+    if session.model is None or session.load_job is None:
+        return None
+    if store.get(session.load_job).status != DONE:
+        return None
+    resident = residency.resident_model
+    if resident is None or resident.model_id != session.model:
+        return None
+    worker = threading.Thread(
+        target=settlement.settle_quietly,
+        args=(f"session {session.id} left the line after its load of {session.model} "
+              "finished, before it opened",),
+        name=f"settle-{session.id}",
+        daemon=True,
+    )
+    worker.start()
+    return worker
+
+
 @dataclass(frozen=True)
 class SessionCloser:
     """The one way an open queue session ends, whatever ended it."""
@@ -156,4 +193,4 @@ class SessionCloser:
         return True
 
 
-__all__ = ["SessionCloser", "admit_session"]
+__all__ = ["SessionCloser", "admit_session", "settle_a_left_sessions_load"]

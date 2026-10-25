@@ -262,10 +262,17 @@ class WaitingLine:
         self._last_id = 1
         self._waiters: list[asyncio.Event] = []
         self._wake: Callable[[], None] = lambda: None
+        self._session_left: Callable[[WaitingSession], None] = lambda item: None
         store.attach_line(self)
 
     def when_changed(self, wake: Callable[[], None]) -> None:
         self._wake = wake
+
+    def when_session_leaves(self, hook: Callable[["WaitingSession"], None]) -> None:
+        """Called with every waiting session the line removes, after its unfinished load
+        has been cancelled (crucible/sessionqueue.py settles a load that already
+        finished)."""
+        self._session_left = hook
 
     def __len__(self) -> int:
         return len(self._items)
@@ -581,6 +588,7 @@ class WaitingLine:
         elif isinstance(item, WaitingSession):
             self._sessions.removed(item.job, reason, message)  # type: ignore[arg-type]
             self._abandon_load(item)
+            self._session_left(item)
         else:
             self._store.end_waiting(item, removal=removal)
         self._announce("removed", item, reason=reason, message=message)

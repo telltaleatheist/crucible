@@ -35,7 +35,7 @@ from ..loopwatch import LoopWatch
 from ..queuepump import QueuePump
 from ..queuesessions import QueueSession, QueueSessions
 from ..residency import Residency
-from ..sessionqueue import SessionCloser
+from ..sessionqueue import SessionCloser, settle_a_left_sessions_load
 from ..settle import Settlement
 from ..tasks import TaskStore
 from ..tasks.states import TERMINAL_STATES as TASK_TERMINAL_STATES
@@ -260,6 +260,11 @@ def _services(
         kept_together=line.kept_on_card,
     )
     store.attach_settlement(settlement)
+    line.when_session_leaves(
+        lambda item: settle_a_left_sessions_load(
+            item, store=store, residency=residency, settlement=settlement
+        )
+    )
     task_store = TaskStore(
         config,
         backend,

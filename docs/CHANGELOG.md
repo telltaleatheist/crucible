@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- A queue session that leaves the line after its own load finished, before it opened, now takes that model off the card. The line cancelled a load still running, but one already DONE was left resident with nothing holding it: on owens-pc (2026-10-25) BookForge quit while its pronunciation guide's session waited on qwen3.8-27b-4bit, the load finished, the session was gone, and the 27B sat on the card until it was unloaded by hand (bookforge pc 1's report). The line hands every removed waiting session to `sessionqueue.settle_a_left_sessions_load`, which settles the card (on a thread, as SessionCloser.end does) only when the session's own load ended DONE and the resident is still the session's model; the settlement unloads nothing else holds, so an operator's load and a session still wanting the model keep it.
+
 ## 2.0.27 — 2026-10-25
 
 - A local voice (a home manifest whose arm names a `path`, as a trainer's screening voice does) has a catalog row (`source` `local:<path>`, installed when its directory holds the files; pull and remove are refused by name as before), so the catalog and the tts candidates agree again. On 2026-10-25 training's omv10b-869 on the Mac was skipped by the catalog but offered by tts, and `GET /v1/settings` failed `500 catalog_incomplete`, blanking every client's pickers (Briefcase's LLM picker showed no models). And one class's disagreement no longer takes the document down: a candidate with no catalog row is left out of its own class's `local_model_choices`, said on the server log and under the new `choice_problems[<class>]` (`code`, `message`, `details`), and every other class draws. The SDK reads `SettingsDocument.choiceProblems` (`ChoiceProblem`).
