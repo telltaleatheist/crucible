@@ -514,13 +514,36 @@ nobody chose on somebody's bench. The vocabulary is the server's (the capability
 `GET /v1/capability` answers with); a name it does not know comes back as its own
 `unknown_act`, listing them, before the completion runs.
 
-`chat()` returns `ChatResponse {id, model, content, finishReason, usage: {promptTokens,
-completionTokens, totalTokens}}` — OpenAI's `chat.completion` read down to the parts a
-caller uses, from the first (and only) choice.
+`chat()` returns `ChatResponse {id, model, content, toolCalls, finishReason, usage:
+{promptTokens, completionTokens, totalTokens}}` — OpenAI's `chat.completion` read down to
+the parts a caller uses, from the first (and only) choice. `content` is null only when the
+model called tools and wrote no text; `toolCalls` is empty when it called none.
 
 `finishReason` is the engine's own word, surfaced and never normalised — a plain string, so
 a value this client did not anticipate still reaches you. `length` means the answer is
 truncated; check it before you use `content`.
+
+### Tool calling
+
+`tools` and `toolChoice` are OpenAI's `tools` and `tool_choice`. A reply that calls them has
+`toolCalls` (`{id, type: 'function', function: {name, arguments}}`, `arguments` the JSON text
+the model wrote, never parsed for you) and usually `finishReason === 'tool_calls'`. Send the
+assistant turn back with its `toolCalls`, then one `{role: 'tool', toolCallId, content}` per
+call; the SDK writes them as `tool_calls` and `tool_call_id`:
+
+```ts
+const messages: ChatMessage[] = [{ role: 'user', content: 'Weather in Paris?' }];
+const first = await crucible.chat({ model, messages, tools: [weatherTool] });
+messages.push({ role: 'assistant', content: first.content, toolCalls: first.toolCalls });
+for (const call of first.toolCalls) {
+  messages.push({ role: 'tool', toolCallId: call.id, content: run(call) });
+}
+const answer = await crucible.chat({ model, messages, tools: [weatherTool] });
+```
+
+`chatStream()` yields only content; give it `onToolCalls` and it is called once, after the
+last delta, with the calls its `delta.tool_calls` fragments assemble into (by `index`, the
+`arguments` pieces joined), or an empty array when there were none.
 
 ### Thinking on or off, per call
 

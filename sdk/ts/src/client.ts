@@ -47,6 +47,7 @@ import {
   optBool,
   optNum,
   optObject,
+  optArray,
   optStr,
   optStrArray,
   str,
@@ -108,6 +109,7 @@ import {
   type ChatMessage,
   type ChatOptions,
   type ChatResponse,
+  type ChatToolCall,
   type ChatUsage,
   type ReasoningEffort,
   type ChunkData,
@@ -229,7 +231,7 @@ const SERVER_STOPPING = 'server.stopping';
 /** The first wait before reconnecting a dropped event stream; it doubles up to the ceiling. */
 const RECONNECT_FIRST_MS = 250;
 const RECONNECT_CEILING_MS = 5_000;
-const CHAT_ROLES = ['system', 'user', 'assistant'] as const;
+const CHAT_ROLES = ['system', 'user', 'assistant', 'tool'] as const;
 const DONE_SENTINEL = '[DONE]';
 const EVENT_NAMES = [
   'queued',
@@ -1378,6 +1380,12 @@ export class CrucibleClient {
         'is for chatStream; a chat() answer carries its usage in ChatResponse.usage',
       );
     }
+    if (options !== undefined && options !== null && options.onToolCalls !== undefined) {
+      throw new CrucibleConfigError(
+        'onToolCalls',
+        'is for chatStream; a chat() answer carries its calls in ChatResponse.toolCalls',
+      );
+    }
     const init = this.#chatRequest(options, false);
     const body = await this.#json('/v1/openai/chat/completions', init, 'chat');
     return readChatResponse(body);
@@ -1407,7 +1415,11 @@ export class CrucibleClient {
     return this.#json('/v1/decide', init, what);
   }
 
-  /** The same completion as {@link chat}, streamed as content deltas. */
+  /**
+   * The same completion as {@link chat}, streamed as content deltas. The tool calls a streamed
+   * completion makes arrive as `delta.tool_calls` fragments; the stream assembles them by `index`
+   * and hands the finished calls to {@link ChatOptions.onToolCalls} once, after the last delta.
+   */
   async *chatStream(options: ChatOptions): AsyncGenerator<string, void, undefined> {
     const init = this.#chatRequest(options, true);
     const headers = new Headers(init.headers);
@@ -1420,6 +1432,8 @@ export class CrucibleClient {
     }
 
     const onUsage = options.onUsage;
+    const onToolCalls = options.onToolCalls;
+    const toolCalls = new ToolCallAssembly();
     let usage: ChatUsage | null = null;
     let finished = false;
     try {
@@ -1430,6 +1444,7 @@ export class CrucibleClient {
         }
         const chunk = readChatChunk(frame.data);
         if (chunk.usage !== null) usage = chunk.usage;
+        for (const fragment of chunk.toolCalls) toolCalls.add(fragment);
         if (chunk.content !== null) yield chunk.content;
       }
     } catch (cause) {
@@ -1452,6 +1467,7 @@ export class CrucibleClient {
           'answer is truncated',
       );
     }
+    if (onToolCalls !== undefined) onToolCalls(toolCalls.finish());
     if (onUsage !== undefined) {
       if (usage === null) {
         throw new CrucibleProtocolError(
@@ -1530,6 +1546,19 @@ export class CrucibleClient {
       }
       payload['stream_options'] = { include_usage: true };
     }
+    if (given.tools !== undefined) payload['tools'] = readChatTools(given.tools);
+    if (given.toolChoice !== undefined) {
+      if (given.tools === undefined) {
+        throw new CrucibleConfigError('toolChoice', 'needs tools: there is nothing to choose from');
+      }
+      payload['tool_choice'] = readToolChoice(given.toolChoice);
+    }
+    if (given.onToolCalls !== undefined && typeof given.onToolCalls !== 'function') {
+      throw new CrucibleConfigError(
+        'onToolCalls',
+        `must be a function, got ${typeof given.onToolCalls}`,
+      );
+    }
     if (given.prefill !== undefined) payload['prefill'] = requireText(given.prefill, 'prefill');
     if (given.form !== undefined) payload['form'] = requireText(given.form, 'form');
     const queue = this.#callQueue(given.queue);
@@ -1575,6 +1604,7 @@ export class CrucibleClient {
     const payload: Record<string, unknown> = {};
     if (given.model !== undefined) payload['model'] = requireText(given.model, 'model');
     if (given.form !== undefined) payload['form'] = requireText(given.form, 'form');
+    if (given.maxParamsB !== undefined) payload['max_params_b'] = requireCeiling(given.maxParamsB);
     payload['state'] = given.state;
     if (given.images !== undefined) payload['images'] = requireStrings(given.images, 'images');
     payload['questions'] = decideQuestionsWire(questions);
@@ -1608,6 +1638,7 @@ export class CrucibleClient {
     const payload: Record<string, unknown> = {};
     if (given.model !== undefined) payload['model'] = requireText(given.model, 'model');
     if (given.form !== undefined) payload['form'] = requireText(given.form, 'form');
+    if (given.maxParamsB !== undefined) payload['max_params_b'] = requireCeiling(given.maxParamsB);
     payload['state'] = given.state;
     if (given.images !== undefined) payload['images'] = requireStrings(given.images, 'images');
     if (given.instructions !== undefined) payload['instructions'] = requireText(given.instructions, 'instructions');
@@ -4547,7 +4578,7 @@ function readAcceleratorHolder(entry: Json, where: string): AcceleratorHolder {
   };
 }
 
-function readChatMessages(messages: unknown): Array<{ role: string; content: string }> {
+function readChatMessages(messages: unknown): Array<Record<string, unknown>> {
   if (messages === undefined || messages === null) {
     throw new CrucibleConfigError('messages', 'is required and was not given');
   }
@@ -4557,26 +4588,196 @@ function readChatMessages(messages: unknown): Array<{ role: string; content: str
   if (messages.length === 0) {
     throw new CrucibleConfigError('messages', 'is required and was empty');
   }
-  return messages.map((entry, index) => {
+  return messages.map((entry, index) => readChatMessage(entry, `messages[${index}]`));
+}
+
+/**
+ * One message as the wire carries it: an assistant turn's `toolCalls` as `tool_calls`, a tool
+ * turn's `toolCallId` as `tool_call_id`.
+ */
+function readChatMessage(entry: unknown, where: string): Record<string, unknown> {
+  if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+    throw new CrucibleConfigError(where, 'must be {role, content}');
+  }
+  const message = entry as Record<string, unknown>;
+  const role = message['role'];
+  if (typeof role !== 'string' || !(CHAT_ROLES as readonly string[]).includes(role)) {
+    throw new CrucibleConfigError(
+      `${where}.role`,
+      `must be one of ${CHAT_ROLES.join(', ')}, got ${JSON.stringify(role)}`,
+    );
+  }
+  const content = message['content'];
+  if (role === 'assistant') {
+    const toolCalls = message['toolCalls'];
+    let calls: Array<Record<string, unknown>> | null = null;
+    if (toolCalls !== undefined) {
+      if (!Array.isArray(toolCalls)) {
+        throw new CrucibleConfigError(
+          `${where}.toolCalls`,
+          "must be an array of {id, type: 'function', function: {name, arguments}}, got " +
+            typeof toolCalls,
+        );
+      }
+      calls = toolCalls.map((call, index) =>
+        readGivenToolCall(call, `${where}.toolCalls[${index}]`),
+      );
+    }
+    if (content === null) {
+      if (calls === null || calls.length === 0) {
+        throw new CrucibleConfigError(
+          `${where}.content`,
+          'may be null only on an assistant turn that made tool calls (toolCalls non-empty)',
+        );
+      }
+    } else if (typeof content !== 'string') {
+      throw new CrucibleConfigError(
+        `${where}.content`,
+        `must be a string (or null beside toolCalls), got ${typeof content}`,
+      );
+    }
+    return calls === null ? { role, content } : { role, content, tool_calls: calls };
+  }
+  if (typeof content !== 'string') {
+    throw new CrucibleConfigError(`${where}.content`, `must be a string, got ${typeof content}`);
+  }
+  if (role === 'tool') {
+    const toolCallId = requireText(message['toolCallId'], `${where}.toolCallId`);
+    return { role, tool_call_id: toolCallId, content };
+  }
+  return { role, content };
+}
+
+/** A caller's `ChatToolCall` (an assistant turn sent back), checked and put on the wire. */
+function readGivenToolCall(value: unknown, where: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new CrucibleConfigError(
+      where,
+      "must be {id, type: 'function', function: {name, arguments}}",
+    );
+  }
+  const call = value as Record<string, unknown>;
+  if (call['type'] !== 'function') {
+    throw new CrucibleConfigError(
+      `${where}.type`,
+      `must be 'function', got ${JSON.stringify(call['type'])}`,
+    );
+  }
+  const fn = call['function'];
+  if (typeof fn !== 'object' || fn === null || Array.isArray(fn)) {
+    throw new CrucibleConfigError(`${where}.function`, 'must be {name, arguments}');
+  }
+  const named = fn as Record<string, unknown>;
+  const args = named['arguments'];
+  if (typeof args !== 'string') {
+    throw new CrucibleConfigError(
+      `${where}.function.arguments`,
+      `must be the arguments as a JSON string, got ${typeof args}`,
+    );
+  }
+  return {
+    id: requireText(call['id'], `${where}.id`),
+    type: 'function',
+    function: { name: requireText(named['name'], `${where}.function.name`), arguments: args },
+  };
+}
+
+/** {@link ChatOptions.tools}, checked: each `{type: 'function', function: {name, ...}}`. */
+function readChatTools(value: unknown): unknown[] {
+  if (!Array.isArray(value)) {
+    throw new CrucibleConfigError(
+      'tools',
+      `must be an array of {type: 'function', function}, got ${typeof value}`,
+    );
+  }
+  if (value.length === 0) {
+    throw new CrucibleConfigError('tools', 'was empty; leave it out to offer no tools');
+  }
+  return value.map((entry: unknown, index) => {
+    const where = `tools[${index}]`;
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
-      throw new CrucibleConfigError(`messages[${index}]`, 'must be {role, content}');
+      throw new CrucibleConfigError(where, "must be {type: 'function', function: {name, ...}}");
     }
-    const message = entry as Partial<ChatMessage>;
-    const role = message.role;
-    if (typeof role !== 'string' || !(CHAT_ROLES as readonly string[]).includes(role)) {
+    const tool = entry as Record<string, unknown>;
+    if (tool['type'] !== 'function') {
       throw new CrucibleConfigError(
-        `messages[${index}].role`,
-        `must be one of ${CHAT_ROLES.join(', ')}, got ${JSON.stringify(role)}`,
+        `${where}.type`,
+        `must be 'function', got ${JSON.stringify(tool['type'])}`,
       );
     }
-    const content = message.content;
-    if (typeof content !== 'string') {
+    const fn = tool['function'];
+    if (typeof fn !== 'object' || fn === null || Array.isArray(fn)) {
       throw new CrucibleConfigError(
-        `messages[${index}].content`,
-        `must be a string, got ${typeof content}`,
+        `${where}.function`,
+        'must be {name, description?, parameters?}',
       );
     }
-    return { role, content };
+    const declared = fn as Record<string, unknown>;
+    requireText(declared['name'], `${where}.function.name`);
+    const description = declared['description'];
+    if (description !== undefined && typeof description !== 'string') {
+      throw new CrucibleConfigError(
+        `${where}.function.description`,
+        `must be a string, got ${typeof description}`,
+      );
+    }
+    const parameters = declared['parameters'];
+    if (
+      parameters !== undefined &&
+      (typeof parameters !== 'object' || parameters === null || Array.isArray(parameters))
+    ) {
+      throw new CrucibleConfigError(`${where}.function.parameters`, 'must be a JSON Schema object');
+    }
+    return entry;
+  });
+}
+
+const TOOL_CHOICES = ['auto', 'none', 'required'] as const;
+
+/** {@link ChatOptions.toolChoice}, checked. */
+function readToolChoice(value: unknown): unknown {
+  const shape = "{type: 'function', function: {name}}";
+  if (typeof value === 'string') {
+    if (!(TOOL_CHOICES as readonly string[]).includes(value)) {
+      throw new CrucibleConfigError(
+        'toolChoice',
+        `must be one of ${TOOL_CHOICES.join(', ')} or ${shape}, got ${JSON.stringify(value)}`,
+      );
+    }
+    return value;
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new CrucibleConfigError('toolChoice', `must be a string or ${shape}, got ${typeof value}`);
+  }
+  const choice = value as Record<string, unknown>;
+  const fn = choice['function'];
+  if (choice['type'] !== 'function' || typeof fn !== 'object' || fn === null || Array.isArray(fn)) {
+    throw new CrucibleConfigError('toolChoice', `must be ${shape}`);
+  }
+  const name = requireText((fn as Record<string, unknown>)['name'], 'toolChoice.function.name');
+  return { type: 'function', function: { name } };
+}
+
+/** A reply's `message.tool_calls`: absent or null is none. */
+function readReplyToolCalls(message: Json, where: string): ChatToolCall[] {
+  const raw = optArray(message, 'tool_calls', where);
+  if (raw === null) return [];
+  return raw.map((entry, index) => {
+    const at = `${where}.tool_calls[${index}]`;
+    const call = asObject(entry, at);
+    const type = str(call, 'type', at);
+    if (type !== 'function') {
+      throw new CrucibleProtocolError(`${at}.type is ${JSON.stringify(type)}, not "function"`);
+    }
+    const fn = objectField(call, 'function', at);
+    return {
+      id: str(call, 'id', at),
+      type: 'function',
+      function: {
+        name: str(fn, 'name', `${at}.function`),
+        arguments: str(fn, 'arguments', `${at}.function`),
+      },
+    };
   });
 }
 
@@ -4600,10 +4801,17 @@ function readChatResponse(body: Json): ChatResponse {
   // Ollama answer with no `done_reason`, and OpenAI's own schema allows it.
   const finishReason = nullableStr(choice, 'finish_reason', 'chat.choices[0]');
   refuseReasoningWithoutContent(message, finishReason);
+  const toolCalls = readReplyToolCalls(message, 'chat.choices[0].message');
+  // A turn that only called tools may have no text; one with neither is no answer at all.
+  const content =
+    toolCalls.length > 0
+      ? nullableStr(message, 'content', 'chat.choices[0].message')
+      : str(message, 'content', 'chat.choices[0].message');
   return {
     id: optStr(body, 'id', where),
     model: optStr(body, 'model', where),
-    content: str(message, 'content', 'chat.choices[0].message'),
+    content,
+    toolCalls,
     finishReason,
     usage: usage === null ? null : readChatUsage(usage),
   };
@@ -5339,11 +5547,24 @@ function streamErrorFrame(error: unknown): CrucibleServerError {
   return new CrucibleServerError(200, code, `the chat stream failed mid-answer: ${message}`, error);
 }
 
+/** One `delta.tool_calls[]` fragment: a piece of the call at `index`. */
+interface ToolCallFragment {
+  readonly index: number;
+  readonly id: string | null;
+  readonly name: string | null;
+  readonly arguments: string | null;
+}
+
 /**
- * One streamed chunk: its content delta, and the usage a stream asked for it carries (OpenAI's
- * last chunk before `[DONE]`, with no choices; null on every other).
+ * One streamed chunk: its content delta, its tool-call fragments (empty on a chunk with none), and
+ * the usage a stream asked for it carries (OpenAI's last chunk before `[DONE]`, with no choices;
+ * null on every other).
  */
-function readChatChunk(raw: string): { content: string | null; usage: ChatUsage | null } {
+function readChatChunk(raw: string): {
+  content: string | null;
+  toolCalls: ToolCallFragment[];
+  usage: ChatUsage | null;
+} {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -5354,15 +5575,24 @@ function readChatChunk(raw: string): { content: string | null; usage: ChatUsage 
   if (!('choices' in chunk) && 'error' in chunk) throw streamErrorFrame(chunk['error']);
   const usageField = optObject(chunk, 'usage', 'chat chunk');
   const usage = usageField === null ? null : readChatUsage(usageField);
-  return { content: readChatDelta(chunk), usage };
+  const delta = readChatDelta(chunk);
+  return {
+    content: delta === null ? null : readDeltaContent(delta),
+    toolCalls: delta === null ? [] : readDeltaToolCalls(delta),
+    usage,
+  };
 }
 
-function readChatDelta(chunk: Json): string | null {
+/** The chunk's `choices[0].delta`; null on a chunk with no choice (the usage trailer). */
+function readChatDelta(chunk: Json): Json | null {
   const choices = asArray(field(chunk, 'choices', 'chat chunk'), 'chat chunk.choices');
   const first = choices[0];
   if (first === undefined) return null;
   const choice = asObject(first, 'chat chunk.choices[0]');
-  const delta = objectField(choice, 'delta', 'chat chunk.choices[0]');
+  return objectField(choice, 'delta', 'chat chunk.choices[0]');
+}
+
+function readDeltaContent(delta: Json): string | null {
   if (!('content' in delta)) return null;
   const content = delta['content'];
   if (content === null) return null;
@@ -5372,6 +5602,80 @@ function readChatDelta(chunk: Json): string | null {
     );
   }
   return content;
+}
+
+function readDeltaToolCalls(delta: Json): ToolCallFragment[] {
+  const where = 'chat chunk.choices[0].delta';
+  const raw = optArray(delta, 'tool_calls', where);
+  if (raw === null) return [];
+  return raw.map((entry, position) => {
+    const at = `${where}.tool_calls[${position}]`;
+    const fragment = asObject(entry, at);
+    const index = num(fragment, 'index', at);
+    if (!Number.isInteger(index) || index < 0) {
+      throw new CrucibleProtocolError(`${at}.index is ${index}, not a non-negative integer`);
+    }
+    const type = optStr(fragment, 'type', at);
+    if (type !== null && type !== 'function') {
+      throw new CrucibleProtocolError(`${at}.type is ${JSON.stringify(type)}, not "function"`);
+    }
+    const fn = optObject(fragment, 'function', at);
+    return {
+      index,
+      id: optStr(fragment, 'id', at),
+      name: fn === null ? null : optStr(fn, 'name', `${at}.function`),
+      arguments: fn === null ? null : optStr(fn, 'arguments', `${at}.function`),
+    };
+  });
+}
+
+/**
+ * A stream's tool calls, put together from their fragments: OpenAI sends each call's `id` and
+ * `name` on its first fragment and its `arguments` in pieces across the rest, keyed by `index`.
+ */
+class ToolCallAssembly {
+  readonly #calls = new Map<number, { id: string | null; name: string | null; args: string }>();
+
+  add(fragment: ToolCallFragment): void {
+    let call = this.#calls.get(fragment.index);
+    if (call === undefined) {
+      call = { id: null, name: null, args: '' };
+      this.#calls.set(fragment.index, call);
+    }
+    const at = `chat stream tool call ${fragment.index}`;
+    if (fragment.id !== null && fragment.id !== '') {
+      if (call.id !== null && call.id !== fragment.id) {
+        throw new CrucibleProtocolError(
+          `${at} changed its id from ${JSON.stringify(call.id)} to ${JSON.stringify(fragment.id)}`,
+        );
+      }
+      call.id = fragment.id;
+    }
+    if (fragment.name !== null && fragment.name !== '') {
+      if (call.name !== null && call.name !== fragment.name) {
+        throw new CrucibleProtocolError(
+          `${at} changed its name from ${JSON.stringify(call.name)} to ` +
+            JSON.stringify(fragment.name),
+        );
+      }
+      call.name = fragment.name;
+    }
+    if (fragment.arguments !== null) call.args += fragment.arguments;
+  }
+
+  /** The finished calls in `index` order; a call that never said its id or name is a protocol error. */
+  finish(): ChatToolCall[] {
+    return [...this.#calls.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([index, call]) => {
+        if (call.id === null || call.name === null) {
+          throw new CrucibleProtocolError(
+            `chat stream tool call ${index} ended without ${call.id === null ? 'an id' : 'a name'}`,
+          );
+        }
+        return { id: call.id, type: 'function', function: { name: call.name, arguments: call.args } };
+      });
+  }
 }
 
 interface NodeFileApis {
