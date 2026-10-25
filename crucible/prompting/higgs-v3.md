@@ -101,6 +101,8 @@ What Crucible enforces. OURS [R2] `voicereference`:
 
 **Fine-tuned voices.** These are merged checkpoints, so the weights are the voice and no reference is sent. OURS [R2][R3]. Officially there is a fine-tune discussion (HF #5) but no Boson fine-tuning guide was found. A clip adds nothing to identity on our plain-trained fine-tunes (ECAPA 0.86 with or without a clip). OURS [R6] `higgs-zero-shot-path.md`.
 
+**Which voice an app may use for its own work** (Owen, 2026-10-25). Every fine-tuned voice except `sigma` and Owen's own was trained on copyrighted narration, so outside Owen's audiobooks only `sigma` or an Owen Morgan voice is used as rendered. `deathstalker` may be rendered as a SOURCE that is then converted to another voice with RVC (`rvc` job); it converts cleanly. OURS (Owen's ruling).
+
 ## Settings
 
 Official numbers disagree:
@@ -144,6 +146,7 @@ Text length:
 - A fine-tune's stop length follows its training clip length. A fine-tune trained on 8-22 s clips stopped after ~6-10 s on any prompt over ~150 characters. Every fine-tune needs its own measured cap. [R5]
 - deathstalker band 500-800 characters, chosen on median longest pause per render (0.50 s at 100, 1.38 at 500, 1.54 at 800, 1.70 at 1400). Below ~300 characters is a defect source; the 200 rung was worst (15.6 % / 12.5 % failures). [R6] `deathstalker-band-500-800-longest-pause.md`
 - Caps are characters, not tokens. [R2]
+- **Short lines (a game's barks, a line of dialogue, a UI prompt) sit below every fine-tune's measured band**, where the ladders find the most failures (stalls, a stray sound, a run-on tail). Send each line as its own chunk, listen to each, and resend a bad one with the next `take` (a different seed lane, and temperature 0.7 on the second take): a retake is the remedy, not a longer line. Each voice's band is its `/v1/voices` row's `safe_min_chars`/`safe_max_chars`. OURS [R2][R6].
 - Book prose tokenised at 3.25 to 4.56 characters per token on our corpus. [R4] `sgl_served.py`
 
 Text form:
@@ -174,6 +177,7 @@ References:
 Serving:
 
 - vllm-omni at 16 in flight damaged 13 of 50 chunks (4 early stops). SGLang-Omni at 16 damaged 5 of 50 with 0 early stops, at 2.5x the throughput. [R4] `sgl_served.py`
+- **The codec decodes in float32 (Crucible 2.0.24 onward).** SGLang-Omni's vocoder stage defaults to bfloat16, and until BookForge `dc05e7e7` narrator never set it, so every PC (cuda-linux) render carried a steady broadband hiss that the Mac (MLX) and plain-PyTorch renders did not. Measured 2026-10-25 on identical codes through SGLang's own codec: bf16 raises the floor 15-18 dB across 4-11 kHz (the difference is noise at -64 dBFS under -29 dBFS speech). The codec's own config says float32 and its docstring says its decode is unstable in bf16. Detector: the 5th-percentile level of 4-8 kHz energy relative to the voice's 300-3000 Hz level; a hissing PC render sat near -65 dB, the Mac and the fixed PC near -75 dB. OURS (Crucible CHANGELOG 2.0.24).
 
 Guard:
 

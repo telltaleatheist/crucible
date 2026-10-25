@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- The Higgs prompting guide (`GET /v1/prompting/higgs-v3.md`) is current: the float32 codec decode and the hiss it ended (2.0.24) with its detector; Owen's ruling on which voices an app may use for its own work (`sigma` or an Owen Morgan voice as rendered; `deathstalker` only as a source converted with RVC); and how to render short lines (barks, dialogue), which sit below every fine-tune's measured band: one chunk per line, retake by `take`.
+
 ## 2.0.24 — 2026-10-25
 
 - The hiss on every Higgs voice rendered on the PC is gone: narrator (BookForge dc05e7e7) starts sglang-omni with `--vocoder.factory.dtype float32`. sglang-omni's vocoder stage defaults to bfloat16 and narrator never set it, so the codec turned codes into audio in bf16, against the codec's own float32 config and its warning that its decode is unstable in bf16. Measured 2026-10-25 on identical Mistborn codes through sglang's own codec: bf16 lays a flat floor 15-18 dB above fp32 across 4-11 kHz (difference -64 dBFS under -29 dBFS speech); fp32 matches the Mac (MLX) and plain-PyTorch renders, and Owen confirmed it by ear. The tts env's narrator pin moves on both backends (the Mac's decode was never affected; it moves in lockstep).
