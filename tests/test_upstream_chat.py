@@ -870,7 +870,8 @@ def test_a_tag_ollama_does_not_have_is_its_own_404_asked_once(
 
 @pytest.mark.parametrize(
     "extra",
-    [{"num_ctx": 8192}, {"options": {"num_ctx": 8192}}, {"tools": []}, {"n": 2}],
+    [{"num_ctx": 8192}, {"options": {"num_ctx": 8192}}, {"parallel_tool_calls": False},
+     {"n": 2}],
 )
 def test_a_field_the_ollama_translation_would_drop_is_refused_by_name(
     routed, auth, upstream, extra
@@ -1073,9 +1074,8 @@ def test_every_model_the_key_door_listed_has_a_row() -> None:
         {"presence_penalty": 0.5},
         {"logit_bias": {"50256": -100}},
         {"logprobs": True},
-        {"tools": [{"type": "function", "function": {"name": "f"}}]},
-        {"tool_choice": "auto"},
         {"parallel_tool_calls": False},
+        {"functions": [{"name": "f"}]},
         {"repetition_penalty": 1.1},
         {"num_ctx": 8192},
     ],
@@ -1169,7 +1169,7 @@ def test_leading_developer_and_system_messages_are_the_system_field(
 @pytest.mark.parametrize(
     "message, field",
     [
-        ({"role": "tool", "content": "42", "tool_call_id": "c"}, "messages[0].role"),
+        ({"role": "function", "content": "42", "name": "f"}, "messages[0].role"),
         ({"role": "user", "content": "hi", "name": "owen"}, "messages[0].name"),
         (
             {"role": "user", "content": [{"type": "input_audio", "input_audio": {}}]},
@@ -1536,3 +1536,401 @@ def test_the_rate_limit_message_says_what_this_server_does(routed, auth, upstrea
     assert "never resends a billed request once it may have reached" in (
         body.json()["error"]["message"]
     )
+
+
+# ---- Tool calling through the `anthropic` and `ollama` upstreams: OpenAI's form
+# translated both ways. Crucible stores no tools and keeps nothing between rounds.
+
+WEATHER_SCHEMA = {
+    "type": "object",
+    "properties": {"city": {"type": "string"}},
+    "required": ["city"],
+}
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "The weather in a city.",
+            "parameters": WEATHER_SCHEMA,
+        },
+    },
+    {"type": "function", "function": {"name": "get_time"}},
+]
+
+USES = [
+    {"id": "toolu_1", "name": "get_weather", "input": {"city": "Paris"}},
+    {"id": "toolu_2", "name": "get_time", "input": {}},
+]
+
+# The two-round conversation an app sends back: its question, the assistant's two
+# parallel calls (with what it said first), and both results.
+ROUND_TWO = [
+    {"role": "system", "content": "Use the tools."},
+    {"role": "user", "content": "Weather and time in Paris?"},
+    {
+        "role": "assistant",
+        "content": "Checking both.",
+        "tool_calls": [
+            {"id": "toolu_1", "type": "function",
+             "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'}},
+            {"id": "toolu_2", "type": "function",
+             "function": {"name": "get_time", "arguments": "{}"}},
+        ],
+    },
+    {"role": "tool", "tool_call_id": "toolu_1", "content": "Sunny, 21C"},
+    {"role": "tool", "tool_call_id": "toolu_2",
+     "content": [{"type": "text", "text": "14:05"}]},
+]
+
+
+def _anthropic_tools(routed, auth, model: str = "claude-sonnet-5", **extra: Any):
+    return chat(
+        routed, auth,
+        {"model": f"anthropic/{model}",
+         "messages": [{"role": "user", "content": "Weather in Paris?"}],
+         "tools": TOOLS, **extra},
+    )
+
+
+def _ollama_tools(routed, auth, **extra: Any):
+    return chat(
+        routed, auth,
+        {"model": "ollama/qwen3.5:9b",
+         "messages": [{"role": "user", "content": "Weather in Paris?"}],
+         "tools": TOOLS, **extra},
+    )
+
+
+def _assembled(frames: list[str]) -> tuple[dict[int, dict[str, Any]], str | None, str]:
+    """OpenAI stream deltas put back together the way a client does: tool calls by
+    index (arguments concatenated), the finish reason, the text."""
+    calls: dict[int, dict[str, Any]] = {}
+    finish = None
+    text = ""
+    for payload in _payloads(frames):
+        if not payload["choices"]:
+            continue
+        choice = payload["choices"][0]
+        finish = choice["finish_reason"] or finish
+        delta = choice["delta"]
+        text += delta.get("content") or ""
+        for part in delta.get("tool_calls", []):
+            call = calls.setdefault(part["index"], {"arguments": ""})
+            for key in ("id", "type"):
+                if key in part:
+                    call[key] = part[key]
+            function = part.get("function", {})
+            if "name" in function:
+                call["name"] = function["name"]
+            call["arguments"] += function.get("arguments", "")
+    return calls, finish, text
+
+
+# ---- anthropic: the request
+
+
+def test_tools_become_messages_api_tools(routed, auth, upstream) -> None:
+    strict = [{**TOOLS[0], "function": {**TOOLS[0]["function"], "strict": True}}]
+    body = _anthropic_tools(routed, auth, tools=strict + TOOLS[1:], tool_choice="auto")
+    assert body.status_code == 200, body.text
+    sent = upstream.requests[-1]
+    assert sent["tools"] == [
+        {"name": "get_weather", "description": "The weather in a city.",
+         "input_schema": WEATHER_SCHEMA, "strict": True},
+        {"name": "get_time", "input_schema": {"type": "object", "properties": {}}},
+    ]
+    assert sent["tool_choice"] == {"type": "auto"}
+
+
+@pytest.mark.parametrize(
+    "choice, sent",
+    [
+        ("auto", {"type": "auto"}),
+        ("none", {"type": "none"}),
+        ("required", {"type": "any"}),
+        ({"type": "function", "function": {"name": "get_time"}},
+         {"type": "tool", "name": "get_time"}),
+    ],
+)
+def test_tool_choice_is_the_messages_apis_own(routed, auth, upstream, choice, sent) -> None:
+    body = _anthropic_tools(routed, auth, tool_choice=choice)
+    assert body.status_code == 200, body.text
+    assert upstream.requests[-1]["tool_choice"] == sent
+
+
+def test_no_tool_choice_sends_none(routed, auth, upstream) -> None:
+    assert _anthropic_tools(routed, auth).status_code == 200
+    assert "tool_choice" not in upstream.requests[-1]
+
+
+@pytest.mark.parametrize(
+    "model", ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5"]
+)
+@pytest.mark.parametrize(
+    "choice", ["required", {"type": "function", "function": {"name": "get_weather"}}]
+)
+def test_a_forced_tool_choice_on_a_model_without_one_is_refused_by_name(
+    routed, auth, upstream, model, choice
+) -> None:
+    error = _refused(_anthropic_tools(routed, auth, model, tool_choice=choice),
+                     "upstream_param_unsupported")
+    assert error["details"]["model"] == model
+    assert error["details"]["rule"] == model
+    assert error["details"]["param"].startswith("tool_choice")
+    assert upstream.requests == []
+    # The same model takes `auto`, which the fake (as Anthropic) accepts.
+    assert _anthropic_tools(routed, auth, model, tool_choice="auto").status_code == 200
+
+
+def test_the_second_round_carries_the_calls_and_one_turn_of_results(
+    routed, auth, upstream
+) -> None:
+    body = chat(routed, auth, {"model": "anthropic/claude-sonnet-5",
+                               "messages": ROUND_TWO, "tools": TOOLS})
+    # The fake refuses, as the Messages API does, a tool_use not answered in the very
+    # next turn: results split over two turns would be a 502 here.
+    assert body.status_code == 200, body.text
+    sent = upstream.requests[-1]
+    assert sent["system"] == "Use the tools."
+    assert sent["messages"] == [
+        {"role": "user", "content": "Weather and time in Paris?"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Checking both."},
+                {"type": "tool_use", "id": "toolu_1", "name": "get_weather",
+                 "input": {"city": "Paris"}},
+                {"type": "tool_use", "id": "toolu_2", "name": "get_time", "input": {}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1",
+                 "content": "Sunny, 21C"},
+                {"type": "tool_result", "tool_use_id": "toolu_2",
+                 "content": [{"type": "text", "text": "14:05"}]},
+            ],
+        },
+    ]
+
+
+def test_a_call_with_no_text_is_tool_use_blocks_alone(routed, auth, upstream) -> None:
+    messages = [dict(m) for m in ROUND_TWO[1:4]]
+    messages[1]["content"] = None
+    messages[1]["tool_calls"] = messages[1]["tool_calls"][:1]
+    messages.append({"role": "user", "content": "And tomorrow?"})
+    body = chat(routed, auth, {"model": "anthropic/claude-sonnet-5",
+                               "messages": messages, "tools": TOOLS})
+    assert body.status_code == 200, body.text
+    sent = upstream.requests[-1]["messages"]
+    assert sent[1]["content"] == [{"type": "tool_use", "id": "toolu_1",
+                                   "name": "get_weather", "input": {"city": "Paris"}}]
+    # The user's next words stay their own turn after the results.
+    assert sent[2]["content"][0]["type"] == "tool_result"
+    assert sent[3] == {"role": "user", "content": "And tomorrow?"}
+
+
+# ---- anthropic: the answer
+
+
+@pytest.mark.parametrize("preamble", [None, "Let me look."])
+def test_tool_use_blocks_come_back_as_tool_calls(routed, auth, upstream, preamble) -> None:
+    upstream.anthropic_tool_uses = USES
+    upstream.tool_preamble = preamble
+    body = _anthropic_tools(routed, auth)
+    assert body.status_code == 200, body.text
+    choice = body.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    message = choice["message"]
+    assert message["content"] == preamble
+    assert message["tool_calls"] == [
+        {"id": "toolu_1", "type": "function",
+         "function": {"name": "get_weather", "arguments": json.dumps({"city": "Paris"})}},
+        {"id": "toolu_2", "type": "function",
+         "function": {"name": "get_time", "arguments": "{}"}},
+    ]
+
+
+def test_streamed_tool_use_arrives_as_tool_call_deltas(routed, auth, upstream) -> None:
+    upstream.anthropic_tool_uses = USES
+    upstream.tool_preamble = "Let me look."
+    frames, _ = _stream(routed, auth, {
+        "model": "anthropic/claude-sonnet-5",
+        "messages": [{"role": "user", "content": "Weather in Paris?"}],
+        "tools": TOOLS, "stream": True,
+    })
+    assert frames[-1] == "data: [DONE]"
+    calls, finish, text = _assembled(frames)
+    assert finish == "tool_calls"
+    assert text == "Let me look."
+    assert sorted(calls) == [0, 1]
+    assert [(c["id"], c["type"], c["name"]) for c in calls.values()] == [
+        ("toolu_1", "function", "get_weather"), ("toolu_2", "function", "get_time")
+    ]
+    assert json.loads(calls[0]["arguments"]) == {"city": "Paris"}
+    # A call with no arguments streams none; it still arrives as a JSON object.
+    assert calls[1]["arguments"] == "{}"
+    # The arguments arrived in pieces, as Anthropic sent them, not buffered whole.
+    pieces = [
+        part for p in _payloads(frames) if p["choices"]
+        for part in p["choices"][0]["delta"].get("tool_calls", [])
+        if part["index"] == 0 and part.get("function", {}).get("arguments")
+    ]
+    assert len(pieces) == 2
+
+
+# ---- anthropic: what stays refused
+
+
+@pytest.mark.parametrize(
+    "messages, code, field",
+    [
+        (ROUND_TWO[:3] + [{**ROUND_TWO[3], "name": "get_weather"}] + ROUND_TWO[4:],
+         "upstream_field_unsupported", "messages[3].name"),
+        (ROUND_TWO[:3] + [{**ROUND_TWO[3], "tool_call_id": "toolu_9"}] + ROUND_TWO[4:],
+         "invalid_request", "messages[3].tool_call_id"),
+        ([ROUND_TWO[1], {"role": "tool", "tool_call_id": "toolu_1", "content": "x"}],
+         "invalid_request", "messages[1].tool_call_id"),
+        (ROUND_TWO[:2] + [{**ROUND_TWO[2], "tool_calls": [
+            {"id": "toolu_1", "type": "function",
+             "function": {"name": "get_weather", "arguments": "{city: Paris"}}]}],
+         "invalid_request", "messages[2].tool_calls[0].function.arguments"),
+        (ROUND_TWO[:2] + [{**ROUND_TWO[2], "tool_calls": [
+            {"id": "toolu_1", "type": "function",
+             "function": {"name": "get_weather", "arguments": "[1]"}}]}],
+         "invalid_request", "messages[2].tool_calls[0].function.arguments"),
+        ([{"role": "user", "content": "hi", "tool_calls": ROUND_TWO[2]["tool_calls"]}],
+         "invalid_request", "messages[0].tool_calls"),
+    ],
+)
+def test_a_tool_message_this_server_cannot_carry_is_refused(
+    routed, auth, upstream, messages, code, field
+) -> None:
+    body = chat(routed, auth, {"model": "anthropic/claude-sonnet-5",
+                               "messages": messages, "tools": TOOLS})
+    error = _refused(body, code)
+    if code == "upstream_field_unsupported":
+        assert error["details"]["fields"] == [field]
+    else:
+        assert error["details"]["field"] == field
+    assert upstream.requests == []
+
+
+@pytest.mark.parametrize(
+    "extra, code, field",
+    [
+        ({"tools": [{"type": "custom", "custom": {"name": "f"}}]},
+         "upstream_field_unsupported", "tools[0].type"),
+        ({"tools": [{"type": "function", "function": {"name": "f", "examples": []}}]},
+         "upstream_field_unsupported", "tools[0].function.examples"),
+        ({"tools": [{"type": "function", "function": {"name": "no spaces"}}]},
+         "invalid_request", "tools[0].function.name"),
+        ({"tools": TOOLS, "tool_choice": "sometimes"}, "invalid_request", "tool_choice"),
+        ({"tools": TOOLS, "tool_choice": {"type": "function",
+                                          "function": {"name": "nope"}}},
+         "invalid_request", "tool_choice.function.name"),
+        ({"tools": [], "tool_choice": "required"}, "invalid_request", "tool_choice"),
+    ],
+)
+def test_a_tool_or_tool_choice_this_server_cannot_carry_is_refused(
+    routed, auth, upstream, extra, code, field
+) -> None:
+    body = chat(routed, auth, {"model": "anthropic/claude-sonnet-5",
+                               "messages": [{"role": "user", "content": "hi"}], **extra})
+    error = _refused(body, code)
+    if code == "upstream_field_unsupported":
+        assert error["details"]["fields"] == [field]
+    else:
+        assert error["details"]["field"] == field
+    assert upstream.requests == []
+
+
+# ---- ollama
+
+
+@pytest.mark.parametrize("choice", [None, "auto"])
+def test_ollama_gets_its_native_tools_and_tool_turns(routed, auth, upstream, choice) -> None:
+    extra = {} if choice is None else {"tool_choice": choice}
+    body = chat(routed, auth, {"model": "ollama/qwen3.5:9b", "messages": ROUND_TWO,
+                               "tools": TOOLS, **extra})
+    assert body.status_code == 200, body.text
+    sent = _chats(upstream)[-1]
+    assert "tool_choice" not in sent
+    assert sent["tools"] == [
+        {"type": "function", "function": {"name": "get_weather",
+                                          "description": "The weather in a city.",
+                                          "parameters": WEATHER_SCHEMA}},
+        {"type": "function", "function": {"name": "get_time",
+                                          "parameters": {"type": "object",
+                                                         "properties": {}}}},
+    ]
+    assert sent["messages"] == [
+        {"role": "system", "content": "Use the tools."},
+        {"role": "user", "content": "Weather and time in Paris?"},
+        {"role": "assistant", "content": "Checking both.", "tool_calls": [
+            {"function": {"name": "get_weather", "arguments": {"city": "Paris"}}},
+            {"function": {"name": "get_time", "arguments": {}}},
+        ]},
+        {"role": "tool", "content": "Sunny, 21C", "tool_name": "get_weather"},
+        {"role": "tool", "content": "14:05", "tool_name": "get_time"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "choice", ["none", "required", {"type": "function", "function": {"name": "get_time"}}]
+)
+def test_an_ollama_tool_choice_other_than_auto_is_refused_by_name(
+    routed, auth, upstream, choice
+) -> None:
+    error = _refused(_ollama_tools(routed, auth, tool_choice=choice), "upstream_param_unsupported")
+    assert error["details"]["upstream"] == "ollama"
+    assert error["details"]["param"].startswith("tool_choice")
+    assert _chats(upstream) == []
+
+
+def test_a_strict_tool_is_refused_by_ollama(routed, auth, upstream) -> None:
+    strict = [{**TOOLS[0], "function": {**TOOLS[0]["function"], "strict": True}}]
+    error = _refused(_ollama_tools(routed, auth, tools=strict), "upstream_field_unsupported")
+    assert error["details"]["fields"] == ["tools[0].function.strict"]
+    assert _chats(upstream) == []
+
+
+OLLAMA_CALLS = [
+    {"function": {"name": "get_weather", "arguments": {"city": "Paris"}}},
+    {"id": "call_abc", "function": {"index": 1, "name": "get_time", "arguments": {}}},
+]
+
+
+def test_ollamas_tool_calls_come_back_as_openai_tool_calls(routed, auth, upstream) -> None:
+    upstream.ollama_tool_calls = OLLAMA_CALLS
+    body = _ollama_tools(routed, auth)
+    assert body.status_code == 200, body.text
+    choice = body.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    assert choice["message"]["content"] is None
+    assert choice["message"]["tool_calls"] == [
+        {"id": "call_0", "type": "function",
+         "function": {"name": "get_weather", "arguments": json.dumps({"city": "Paris"})}},
+        {"id": "call_abc", "type": "function",
+         "function": {"name": "get_time", "arguments": "{}"}},
+    ]
+
+
+def test_ollamas_streamed_tool_calls_arrive_as_deltas(routed, auth, upstream) -> None:
+    upstream.ollama_tool_calls = OLLAMA_CALLS
+    frames, _ = _stream(routed, auth, {
+        "model": "ollama/qwen3.5:9b",
+        "messages": [{"role": "user", "content": "Weather in Paris?"}],
+        "tools": TOOLS, "stream": True,
+    })
+    assert frames[-1] == "data: [DONE]"
+    calls, finish, _ = _assembled(frames)
+    assert finish == "tool_calls"
+    assert calls == {
+        0: {"id": "call_0", "type": "function", "name": "get_weather",
+            "arguments": json.dumps({"city": "Paris"})},
+        1: {"id": "call_abc", "type": "function", "name": "get_time", "arguments": "{}"},
+    }

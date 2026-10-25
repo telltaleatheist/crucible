@@ -290,6 +290,10 @@ What crosses, and as what (`crucible/upstreams.py`, `_anthropic_document`):
 | `response_format` `json_schema` | `output_config.format` `{type: json_schema, schema}` | structured output, not a forced tool; `name` and `strict` are read, the answer is the text block |
 | `response_format` `text` | nothing | the default |
 | `user` | `metadata.user_id` | |
+| `tools` (`type: function`) | `tools` `{name, description, input_schema, strict}` | `parameters` is `input_schema`; a function with none is sent `{type: object, properties: {}}`; `strict` crosses as itself |
+| `tool_choice` `auto` / `none` / `required` / `{type: function, function: {name}}` | `tool_choice` `{type: auto}` / `{type: none}` / `{type: any}` / `{type: tool, name}` | `required` and a named function only on models that keep forced tool use (table below); with no tools, `auto` and `none` send nothing |
+| an assistant message's `tool_calls` | `tool_use` blocks `{id, name, input}` after its text block | `arguments` (a JSON string) is parsed and must be an object; empty or `null` content sends no text block |
+| `tool` messages `{tool_call_id, content}` | ONE `user` turn of `tool_result` blocks `{tool_use_id, content}` | consecutive results merge into one turn (the Messages API answers every `tool_use` in the next turn); string content as is, text parts as text blocks; the id must name a call an earlier assistant message made |
 | `n: 1` | nothing | one answer is all the Messages API writes |
 | `stream`, `stream_options.include_usage` | `stream` | usage is a chunk of its own (below) |
 | `chat_template_kwargs.enable_thinking` | nothing | dropped and said: `"thinking": "dropped"` in `X-Crucible-Sampling` |
@@ -297,10 +301,12 @@ What crosses, and as what (`crucible/upstreams.py`, `_anthropic_document`):
 
 Refused, `400 upstream_field_unsupported` with `details.fields` (the paths) and
 `details.carried` (every member read): any member not in the table (`seed`,
-`frequency_penalty`, `presence_penalty`, `logit_bias`, `logprobs`, `tools`,
-`tool_choice`, `parallel_tool_calls`, `repetition_penalty`, …); `n` above 1; a `system`
-or `developer` message after the first user or assistant turn; `tool` and `function`
-messages and a message's `name` or `tool_calls`; a content part other than `text` and
+`frequency_penalty`, `presence_penalty`, `logit_bias`, `logprobs`,
+`parallel_tool_calls`, `functions`, `repetition_penalty`, …); `n` above 1; a `system`
+or `developer` message after the first user or assistant turn; `function` messages and a
+message's `name` (a tool message's too); a tool other than `type: function`, and a
+member of a tool, function or tool call outside the table; a content part other than
+`text` and
 `image_url`; an image `detail` other than `auto`; a `json_schema.description` (it would
 be lost: put it in the prompt); a `chat_template_kwargs` key other than
 `enable_thinking`; a `stream_options` key other than `include_usage`.
@@ -316,7 +322,16 @@ effort, `details.takes`:
   (the Messages API's lowest is `low`, and effort does not turn thinking off);
 - `response_format` `json_object`: the Messages API's structured output takes a schema
   and has no schema-less JSON mode. Send `json_schema`, or ask for JSON in the prompt;
-- `response_format` `json_schema` on a model with no structured output (no current row).
+- `response_format` `json_schema` on a model with no structured output (no current row);
+- `tool_choice` `required` or a named function on a model that removed forced tool use
+  (Fable 5.1, Mythos 5.1, Opus 5.5, Sonnet 5.5: Anthropic answers `any` and `tool` with
+  a 400). Send `auto` and say in the prompt which tool to call.
+
+Malformed tool calling is `400 invalid_request` naming the field: a `tool_choice` that
+is none of the four forms or names no declared tool, `required` with no tools, two tools
+with one name, a tool name outside `[A-Za-z0-9_-]{1,64}`, `arguments` that are not a
+JSON object, a `tool_call_id` no earlier assistant call made, `tool_calls` on a message
+that is not the assistant's.
 
 The model table (`ANTHROPIC_MODEL_RULES`), keyed by model-id prefix, the longest
 matching row winning (`claude-opus-4-5-20251101` is the `claude-opus-4-5` row). It was
@@ -328,14 +343,17 @@ and the [Opus 5.5](https://platform.claude.com/docs/en/models/opus-5-5/migration
 [Fable 5.1](https://platform.claude.com/docs/en/models/fable-5-1/migration-guide.md)
 migration guides. A new model is one row.
 
-| Row | Sampling | Structured output | Effort levels |
-|---|---|---|---|
-| `claude-fable-5-1`, `claude-mythos-5-1`, `claude-fable-5`, `claude-mythos-5` | no | yes | low, medium, high, xhigh, max |
-| `claude-opus-5-5`, `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7` | no | yes | low, medium, high, xhigh, max |
-| `claude-sonnet-5-5`, `claude-sonnet-5`, `claude-haiku-5-5` | no | yes | low, medium, high, xhigh, max |
-| `claude-opus-4-6`, `claude-sonnet-4-6` | yes | yes | low, medium, high, max |
-| `claude-opus-4-5` | yes | yes | low, medium, high |
-| `claude-sonnet-4-5`, `claude-haiku-4-5` | yes | yes | none |
+| Row | Sampling | Structured output | Effort levels | Forced tool use |
+|---|---|---|---|---|
+| `claude-fable-5-1`, `claude-mythos-5-1` | no | yes | low, medium, high, xhigh, max | no |
+| `claude-fable-5`, `claude-mythos-5` | no | yes | low, medium, high, xhigh, max | yes |
+| `claude-opus-5-5` | no | yes | low, medium, high, xhigh, max | no |
+| `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7` | no | yes | low, medium, high, xhigh, max | yes |
+| `claude-sonnet-5-5` | no | yes | low, medium, high, xhigh, max | no |
+| `claude-sonnet-5`, `claude-haiku-5-5` | no | yes | low, medium, high, xhigh, max | yes |
+| `claude-opus-4-6`, `claude-sonnet-4-6` | yes | yes | low, medium, high, max | yes |
+| `claude-opus-4-5` | yes | yes | low, medium, high | yes |
+| `claude-sonnet-4-5`, `claude-haiku-4-5` | yes | yes | none | yes |
 
 **A model no row names is forwarded as asked**, and Anthropic answers for it: what it
 refuses comes back as `502 upstream_rejected` in Anthropic's own words. Sending
@@ -349,13 +367,38 @@ leaves room, because 4096 can end in `finish_reason: "length"` before any text.
 
 The answer: the text blocks joined are `content`; `stop_reason` `end_turn` and
 `stop_sequence` are `stop`, `max_tokens` and `model_context_window_exceeded` are
-`length`, `refusal` is `content_filter`, and any other reason is relayed as Anthropic
-said it. `usage.prompt_tokens` is every prompt token (Anthropic's `input_tokens` plus
+`length`, `refusal` is `content_filter`, `tool_use` is `tool_calls`, and any other
+reason is relayed as Anthropic said it. Each `tool_use` block is one of
+`message.tool_calls` (`{id, type: function, function: {name, arguments}}`, `arguments`
+its `input` as a JSON string), in order; an answer that only called tools has
+`content: null`. `usage.prompt_tokens` is every prompt token (Anthropic's `input_tokens` plus
 its cache writes and reads), `usage.prompt_tokens_details.cached_tokens` the cache
 reads.
 
-Streaming: text deltas become content chunks; `ping`, thinking deltas and event types
-this server does not know are skipped. With `stream_options.include_usage: true` the
+Streaming: text deltas become content chunks; a `tool_use` block's
+`content_block_start` is a `delta.tool_calls` entry `{index, id, type: function,
+function: {name, arguments: ""}}` and each `input_json_delta` one more `{index,
+function: {arguments: <piece>}}` (a call with no input gets `"{}"` at its
+`content_block_stop`), `index` counting the calls from 0; `ping`, thinking deltas and
+event types this server does not know are skipped.
+
+Tool calling holds no state: Crucible stores no tools and remembers nothing between
+rounds. The app sends its tools and the whole conversation every round (its question,
+the assistant's `tool_calls`, its own `tool` results), runs the tools itself and decides
+when the loop ends. Thinking blocks are not relayed, so a later round replays the
+assistant's text and calls without them.
+
+The `ollama` upstream carries the same tool calling in Ollama's native form: `tools` as
+OpenAI's function shape (`parameters` defaulted as above; `strict: true` is refused
+`upstream_field_unsupported`, Ollama has no strict schemas), an assistant's
+`tool_calls` as `{function: {name, arguments: <object>}}`, a `tool` message as
+`{role: tool, content, tool_name}` (the name of the call it answers). Ollama has no
+`tool_choice`: `auto` (or none) is accepted, `none`, `required` and a named function are
+refused `400 upstream_param_unsupported` with `details.upstream: "ollama"`. Its calls
+come back as `message.tool_calls` with `arguments` a JSON string and Ollama's id, or
+`call_<n>` (the call's place in that answer) when it gave none; streamed, each call
+arrives whole as one delta; `finish_reason` is `tool_calls` when the answer called a
+tool (Ollama says `stop`). With `stream_options.include_usage: true` the
 stream ends, after the chunk carrying `finish_reason` and before `[DONE]`, with one
 chunk whose `choices` is empty and whose `usage` is counted as above from
 `message_start` and `message_delta` (cumulative). Without it no usage is sent, as

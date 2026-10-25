@@ -13,6 +13,17 @@ import httpx
 
 from .errors import ApiError
 from .upstreamrecord import UpstreamRecord
+from .upstreamtools import (
+    NO_PARAMETERS,
+    FunctionTool,
+    ToolCall,
+    ToolChoice,
+    openai_tool_call,
+    read_tool_calls,
+    read_tool_choice,
+    read_tool_result,
+    read_tools,
+)
 
 ANTHROPIC_BASE = "https://api.anthropic.com"
 OPENAI_BASE = "https://api.openai.com"
@@ -269,20 +280,23 @@ class AnthropicModelRule:
     sampling: bool
     structured_output: bool
     efforts: tuple[str, ...]
+    # tool_choice `any` / `tool` (OpenAI's `required` / a named function): the models
+    # that removed forced tool use answer either with a 400.
+    forced_tool: bool = True
 
 
 ANTHROPIC_MODEL_RULES: dict[str, AnthropicModelRule] = {
-    "claude-fable-5-1": AnthropicModelRule(False, True, _EVERY_EFFORT),
-    "claude-mythos-5-1": AnthropicModelRule(False, True, _EVERY_EFFORT),
+    "claude-fable-5-1": AnthropicModelRule(False, True, _EVERY_EFFORT, forced_tool=False),
+    "claude-mythos-5-1": AnthropicModelRule(False, True, _EVERY_EFFORT, forced_tool=False),
     "claude-fable-5": AnthropicModelRule(False, True, _EVERY_EFFORT),
     "claude-mythos-5": AnthropicModelRule(False, True, _EVERY_EFFORT),
-    "claude-opus-5-5": AnthropicModelRule(False, True, _EVERY_EFFORT),
+    "claude-opus-5-5": AnthropicModelRule(False, True, _EVERY_EFFORT, forced_tool=False),
     "claude-opus-5": AnthropicModelRule(False, True, _EVERY_EFFORT),
     "claude-opus-4-8": AnthropicModelRule(False, True, _EVERY_EFFORT),
     "claude-opus-4-7": AnthropicModelRule(False, True, _EVERY_EFFORT),
     "claude-opus-4-6": AnthropicModelRule(True, True, _NO_XHIGH),
     "claude-opus-4-5": AnthropicModelRule(True, True, ("low", "medium", "high")),
-    "claude-sonnet-5-5": AnthropicModelRule(False, True, _EVERY_EFFORT),
+    "claude-sonnet-5-5": AnthropicModelRule(False, True, _EVERY_EFFORT, forced_tool=False),
     "claude-sonnet-5": AnthropicModelRule(False, True, _EVERY_EFFORT),
     "claude-sonnet-4-6": AnthropicModelRule(True, True, _NO_XHIGH),
     "claude-sonnet-4-5": AnthropicModelRule(True, True, ()),
@@ -313,6 +327,8 @@ _ANTHROPIC_READS: frozenset[str] = frozenset(
         "user",
         "n",
         ANTHROPIC_EFFORT_FIELD,
+        "tools",
+        "tool_choice",
         *ANTHROPIC_SAMPLING,
     }
 )
@@ -347,13 +363,14 @@ def _anthropic_unsupported(fields: list[str], why: str) -> ApiError:
 
 
 def _param_unsupported(
-    param: str, model_id: str, rule: str | None, why: str, **details: Any
+    param: str, model_id: str, rule: str | None, why: str, *,
+    upstream: str = "anthropic", **details: Any
 ) -> ApiError:
     return ApiError(
         400,
         "upstream_param_unsupported",
-        f"anthropic/{model_id} does not take {param}: {why}",
-        {"upstream": "anthropic", "param": param, "model": model_id, "rule": rule,
+        f"{upstream}/{model_id} does not take {param}: {why}",
+        {"upstream": upstream, "param": param, "model": model_id, "rule": rule,
          **details},
     )
 
@@ -416,7 +433,9 @@ def _anthropic_image(at: str, part: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _anthropic_message(index: int, message: Any) -> dict[str, Any]:
+def _anthropic_message(
+    index: int, message: Any, calls: dict[str, ToolCall]
+) -> dict[str, Any]:
     where = f"messages[{index}]"
     if not isinstance(message, dict):
         raise ApiError(400, "invalid_request", f"{where} must be an object",
@@ -432,19 +451,57 @@ def _anthropic_message(index: int, message: Any) -> dict[str, Any]:
     if role not in ("user", "assistant"):
         raise _anthropic_unsupported(
             [f"{where}.role"],
-            f"a {role!r} message has no translation here: tool calls and their "
-            "results are not carried",
+            f"a {role!r} message has no translation here: user, assistant and tool "
+            "messages cross",
         )
-    extra = sorted(set(message) - {"role", "content"})
+    extra = sorted(set(message) - {"role", "content", "tool_calls"})
     if extra:
         raise _anthropic_unsupported(
             [f"{where}.{key}" for key in extra],
-            "a message crosses as its role and its content; tool calls and names "
-            "have no translation here",
+            "a message crosses as its role, its content and an assistant's "
+            "tool_calls; names have no translation here",
         )
+    tool_calls = read_tool_calls(where, message, _anthropic_unsupported)
+    for call in tool_calls:
+        calls[call.id] = call
     content = message.get("content")
+    if tool_calls:
+        # An assistant turn that called tools: its text (when it said any) and then a
+        # tool_use block per call, in the order it made them.
+        if content is None or content == "":
+            blocks: list[dict[str, Any]] = []
+        elif isinstance(content, str):
+            blocks = [{"type": "text", "text": content}]
+        else:
+            blocks = _anthropic_blocks(where, content)
+        blocks.extend(
+            {"type": "tool_use", "id": call.id, "name": call.name,
+             "input": call.arguments}
+            for call in tool_calls
+        )
+        return {"role": role, "content": blocks}
     if isinstance(content, str):
         return {"role": role, "content": content}
+    return {"role": role, "content": _anthropic_blocks(where, content)}
+
+
+def _anthropic_tool_result(
+    index: int, message: dict[str, Any], calls: dict[str, ToolCall]
+) -> dict[str, Any]:
+    call, content = read_tool_result(
+        f"messages[{index}]", message, calls, _anthropic_unsupported
+    )
+    return {
+        "type": "tool_result",
+        "tool_use_id": call.id,
+        "content": (
+            content if isinstance(content, str)
+            else [{"type": "text", "text": text} for text in content]
+        ),
+    }
+
+
+def _anthropic_blocks(where: str, content: Any) -> list[dict[str, Any]]:
     if not isinstance(content, list):
         raise ApiError(400, "invalid_request",
                        f"{where}.content must be a string or a list of parts",
@@ -466,7 +523,7 @@ def _anthropic_message(index: int, message: Any) -> dict[str, Any]:
         raise _anthropic_unsupported(
             [at], f"a content part of type {kind!r} has no Messages API form here"
         )
-    return {"role": role, "content": blocks}
+    return blocks
 
 
 def _anthropic_conversation(messages: Any) -> tuple[list[dict[str, Any]], str | None]:
@@ -487,7 +544,23 @@ def _anthropic_conversation(messages: Any) -> tuple[list[dict[str, Any]], str | 
             )
         system_parts.append(_system_text(f"messages[{index}]", message.get("content")))
         index += 1
-    rest = [_anthropic_message(i, m) for i, m in enumerate(messages) if i >= index]
+    rest: list[dict[str, Any]] = []
+    calls: dict[str, ToolCall] = {}
+    # A run of `tool` messages is ONE user turn of tool_result blocks: the Messages
+    # API answers every tool_use of an assistant turn in the user turn after it.
+    results: list[dict[str, Any]] | None = None
+    for i in range(index, len(messages)):
+        message = messages[i]
+        if isinstance(message, dict) and message.get("role") == "tool":
+            result = _anthropic_tool_result(i, message, calls)
+            if results is None:
+                results = [result]
+                rest.append({"role": "user", "content": results})
+            else:
+                results.append(result)
+            continue
+        results = None
+        rest.append(_anthropic_message(i, message, calls))
     if not rest:
         raise ApiError(
             400, "invalid_request",
@@ -589,6 +662,44 @@ def _anthropic_effort(
     return effort
 
 
+def _anthropic_tool(tool: FunctionTool) -> dict[str, Any]:
+    translated: dict[str, Any] = {
+        "name": tool.name,
+        "input_schema": NO_PARAMETERS if tool.parameters is None else tool.parameters,
+    }
+    if tool.description is not None:
+        translated["description"] = tool.description
+    if tool.strict is not None:
+        translated["strict"] = tool.strict
+    return translated
+
+
+def _anthropic_tool_choice(
+    choice: ToolChoice | None,
+    tools: list[FunctionTool],
+    model_id: str,
+    rule: tuple[str, AnthropicModelRule] | None,
+) -> dict[str, Any] | None:
+    if choice is None or not tools:
+        # With no tools there is nothing to choose among: `auto` and `none` both mean
+        # what a request without tools already does.
+        return None
+    if choice.kind in ("required", "named") and rule is not None and not rule[1].forced_tool:
+        raise _param_unsupported(
+            choice.wire, model_id, rule[0],
+            "this model removed forced tool use (tool_choice `any` and `tool`); send "
+            "`auto` and say in the prompt which tool to call, or use response_format "
+            "json_schema when the call only existed to get JSON back",
+        )
+    if choice.kind == "auto":
+        return {"type": "auto"}
+    if choice.kind == "none":
+        return {"type": "none"}
+    if choice.kind == "required":
+        return {"type": "any"}
+    return {"type": "tool", "name": choice.name}
+
+
 def _anthropic_document(model_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     from .sampling import TEMPLATE_KWARGS, THINKING_KEY
 
@@ -674,6 +785,13 @@ def _anthropic_document(model_id: str, body: dict[str, Any]) -> tuple[dict[str, 
     if output_config:
         document["output_config"] = output_config
 
+    tools = read_tools(body, _anthropic_unsupported)
+    if tools:
+        document["tools"] = [_anthropic_tool(tool) for tool in tools]
+    choice = _anthropic_tool_choice(read_tool_choice(body, tools), tools, model_id, rule)
+    if choice is not None:
+        document["tool_choice"] = choice
+
     stream = body.get("stream")
     if stream is not None and not isinstance(stream, bool):
         raise ApiError(400, "invalid_request", "stream must be a boolean",
@@ -704,6 +822,7 @@ _STOP_REASON: dict[str, str] = {
     "max_tokens": "length",
     "model_context_window_exceeded": "length",
     "refusal": "content_filter",
+    "tool_use": "tool_calls",
 }
 
 
@@ -746,11 +865,22 @@ def anthropic_usage(usage: Any) -> dict[str, Any]:
 
 def anthropic_to_openai(payload: dict[str, Any], model: str) -> dict[str, Any]:
     text_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
     for block in payload.get("content", []) or []:
-        if isinstance(block, dict) and block.get("type") == "text" and isinstance(
-            block.get("text"), str
-        ):
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text" and isinstance(block.get("text"), str):
             text_parts.append(block["text"])
+        elif block.get("type") == "tool_use":
+            tool_calls.append(openai_tool_call(
+                block.get("id"), block.get("name"), json.dumps(block.get("input", {}))
+            ))
+    message: dict[str, Any] = {"role": "assistant", "content": "".join(text_parts)}
+    if tool_calls:
+        # OpenAI's assistant turn that only called tools has no content at all.
+        if not text_parts:
+            message["content"] = None
+        message["tool_calls"] = tool_calls
     return {
         "id": payload.get("id") or _completion_id(),
         "object": "chat.completion",
@@ -759,7 +889,7 @@ def anthropic_to_openai(payload: dict[str, Any], model: str) -> dict[str, Any]:
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": "".join(text_parts)},
+                "message": message,
                 "finish_reason": _finish_reason(payload.get("stop_reason")),
             }
         ],
@@ -777,9 +907,16 @@ class AnthropicStreamTranslator:
         self._usage: dict[str, Any] = {}
         self._done = False
         self._failed = False
+        # Anthropic's content-block index of each tool_use block -> OpenAI's tool-call
+        # index, and whether any of its arguments have been sent yet.
+        self._tools: dict[Any, int] = {}
+        self._argued: set[Any] = set()
 
     def _frame(self, payload: dict[str, Any]) -> bytes:
         return b"data: " + json.dumps(payload).encode("utf-8") + b"\n\n"
+
+    def _tool_delta(self, call: dict[str, Any]) -> bytes:
+        return self._chunk({"tool_calls": [call]}, None)
 
     def _chunk(self, delta: dict[str, Any], finish_reason: str | None) -> bytes:
         return self._frame(
@@ -806,12 +943,38 @@ class AnthropicStreamTranslator:
                 if isinstance(message.get("usage"), dict):
                     self._usage.update(message["usage"])
             yield self._chunk({"role": "assistant"}, None)
+        elif kind == "content_block_start":
+            block = event.get("content_block")
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                position = len(self._tools)
+                self._tools[event.get("index")] = position
+                yield self._tool_delta(
+                    {"index": position, **openai_tool_call(
+                        block.get("id"), block.get("name"), "")}
+                )
         elif kind == "content_block_delta":
             delta = event.get("delta")
             if isinstance(delta, dict) and delta.get("type") == "text_delta":
                 text = delta.get("text")
                 if isinstance(text, str):
                     yield self._chunk({"content": text}, None)
+            elif isinstance(delta, dict) and delta.get("type") == "input_json_delta":
+                position = self._tools.get(event.get("index"))
+                partial = delta.get("partial_json")
+                if position is not None and isinstance(partial, str) and partial != "":
+                    self._argued.add(event.get("index"))
+                    yield self._tool_delta(
+                        {"index": position, "function": {"arguments": partial}}
+                    )
+        elif kind == "content_block_stop":
+            index = event.get("index")
+            if index in self._tools and index not in self._argued:
+                # A call with no arguments streams none; OpenAI's arguments are a
+                # JSON object even then.
+                self._argued.add(index)
+                yield self._tool_delta(
+                    {"index": self._tools[index], "function": {"arguments": "{}"}}
+                )
         elif kind == "message_delta":
             # Its usage is cumulative, and may restate the input counts.
             if isinstance(event.get("usage"), dict):
@@ -1074,6 +1237,8 @@ _OLLAMA_READS: frozenset[str] = frozenset(
         "chat_template_kwargs",
         CONTEXT_FIELD,
         "user",
+        "tools",
+        "tool_choice",
         *_OLLAMA_OPTIONS,
     }
 )
@@ -1085,26 +1250,55 @@ def _unsupported(fields: list[str], why: str) -> ApiError:
     return _field_unsupported("ollama", fields, why, _OLLAMA_READS)
 
 
-def _ollama_message(index: int, message: Any) -> dict[str, Any]:
+def _ollama_message(
+    index: int, message: Any, calls: dict[str, ToolCall]
+) -> dict[str, Any]:
     where = f"messages[{index}]"
     if not isinstance(message, dict):
         raise ApiError(400, "invalid_request", f"{where} must be an object",
                        {"field": where})
-    extra = sorted(set(message) - {"role", "content"})
+    role = message.get("role")
+    if role == "tool":
+        # Ollama names the tool a result answers (`tool_name`), not the call; the
+        # call this result answers says which tool that was.
+        call, content = read_tool_result(where, message, calls, _unsupported)
+        return {
+            "role": "tool",
+            "content": content if isinstance(content, str) else "\n".join(content),
+            "tool_name": call.name,
+        }
+    extra = sorted(set(message) - {"role", "content", "tool_calls"})
     if extra:
         raise _unsupported(
             [f"{where}.{key}" for key in extra],
-            "a message crosses as its role and its content; tool calls and names "
-            "have no translation here",
+            "a message crosses as its role, its content and an assistant's "
+            "tool_calls; names have no translation here",
         )
-    role = message.get("role")
     if role not in ("system", "user", "assistant"):
         raise ApiError(
             400, "invalid_request",
-            f"{where}.role must be system, user or assistant, got {role!r}",
+            f"{where}.role must be system, user, assistant or tool, got {role!r}",
             {"field": f"{where}.role"},
         )
-    content = message.get("content")
+    tool_calls = read_tool_calls(where, message, _unsupported)
+    if tool_calls:
+        for call in tool_calls:
+            calls[call.id] = call
+        content = message.get("content")
+        translated = (
+            {"role": role, "content": ""} if content is None
+            else _ollama_content(where, role, content)
+        )
+        # Ollama's own form: arguments are an object, and a call carries no id.
+        translated["tool_calls"] = [
+            {"function": {"name": call.name, "arguments": call.arguments}}
+            for call in tool_calls
+        ]
+        return translated
+    return _ollama_content(where, role, message.get("content"))
+
+
+def _ollama_content(where: str, role: str, content: Any) -> dict[str, Any]:
     if isinstance(content, str):
         return {"role": role, "content": content}
     if not isinstance(content, list):
@@ -1184,12 +1378,46 @@ def _ollama_document(model_id: str, body: dict[str, Any]) -> dict[str, Any]:
         raise ApiError(400, "invalid_request",
                        "stop must be a string or a list of strings", {"field": "stop"})
 
+    calls: dict[str, ToolCall] = {}
     document: dict[str, Any] = {
         "model": model_id,
-        "messages": [_ollama_message(i, m) for i, m in enumerate(messages)],
+        "messages": [_ollama_message(i, m, calls) for i, m in enumerate(messages)],
         "stream": body.get("stream") is True,
         "options": options,
     }
+
+    tools = read_tools(body, _unsupported)
+    for number, tool in enumerate(tools):
+        if tool.strict:
+            raise _unsupported(
+                [f"tools[{number}].function.strict"],
+                "Ollama has no strict tool schemas, so a call's arguments could not be "
+                "held to the schema as `strict: true` promises",
+            )
+    choice = read_tool_choice(body, tools)
+    if choice is not None and choice.kind != "auto" and tools:
+        raise _param_unsupported(
+            choice.wire, model_id, None,
+            "Ollama's chat has no tool_choice: the model always decides whether to "
+            "call a tool, which is `auto`. Send `auto` (or nothing), and to keep it "
+            "from calling tools send no tools",
+            upstream="ollama",
+        )
+    if tools:
+        document["tools"] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    **({} if tool.description is None
+                       else {"description": tool.description}),
+                    "parameters": (
+                        NO_PARAMETERS if tool.parameters is None else tool.parameters
+                    ),
+                },
+            }
+            for tool in tools
+        ]
 
     kwargs = body.get(TEMPLATE_KWARGS)
     if kwargs is not None:
@@ -1297,7 +1525,19 @@ def ollama_to_openai(payload: Any, model: str) -> dict[str, Any]:
     thinking = message.get("thinking")
     if isinstance(thinking, str) and thinking != "":
         answer["reasoning"] = thinking
+    tool_calls = [
+        _ollama_tool_call(number, call)
+        for number, call in enumerate(_ollama_calls(message))
+    ]
     reason = payload.get("done_reason")
+    finish = _DONE_REASON.get(reason, reason) if isinstance(reason, str) else None
+    if tool_calls:
+        answer["tool_calls"] = tool_calls
+        if answer["content"] == "":
+            answer["content"] = None
+        # Ollama says `stop` for an answer that ended in tool calls.
+        if finish == "stop":
+            finish = "tool_calls"
     return {
         "id": _completion_id(),
         "object": "chat.completion",
@@ -1307,12 +1547,50 @@ def ollama_to_openai(payload: Any, model: str) -> dict[str, Any]:
             {
                 "index": 0,
                 "message": answer,
-                "finish_reason": _DONE_REASON.get(reason, reason)
-                if isinstance(reason, str) else None,
+                "finish_reason": finish,
             }
         ],
         "usage": _ollama_usage(payload),
     }
+
+
+def _ollama_calls(message: dict[str, Any]) -> list[Any]:
+    calls = message.get("tool_calls")
+    if calls is None:
+        return []
+    if not isinstance(calls, list):
+        raise _ollama_malformed("message.tool_calls is not a list")
+    return calls
+
+
+def _ollama_malformed(what: str) -> ApiError:
+    return ApiError(
+        502,
+        "upstream_rejected",
+        f"ollama answered with a tool call this server cannot read: {what}",
+        {"upstream": "ollama", "upstream_status": 200},
+    )
+
+
+def _ollama_tool_call(number: int, call: Any) -> dict[str, Any]:
+    """One of Ollama's tool calls in OpenAI's form: its arguments object as a JSON
+    string, and its id, or `call_<n>` (its place in this answer) when Ollama gave
+    none."""
+    function = call.get("function") if isinstance(call, dict) else None
+    name = function.get("name") if isinstance(function, dict) else None
+    if not isinstance(name, str):
+        raise _ollama_malformed(f"call {number} names no function")
+    arguments = function.get("arguments", {})
+    if isinstance(arguments, dict):
+        encoded = json.dumps(arguments)
+    elif isinstance(arguments, str):
+        encoded = arguments
+    else:
+        raise _ollama_malformed(f"call {number}'s arguments are {type(arguments).__name__}")
+    call_id = call.get("id")
+    if not isinstance(call_id, str) or call_id == "":
+        call_id = f"call_{number}"
+    return openai_tool_call(call_id, name, encoded)
 
 
 class OllamaStreamTranslator:
@@ -1325,6 +1603,7 @@ class OllamaStreamTranslator:
         self._started = False
         self._done = False
         self._failed = False
+        self._calls = 0
 
     def _frame(self, payload: dict[str, Any]) -> bytes:
         return b"data: " + json.dumps(payload).encode("utf-8") + b"\n\n"
@@ -1364,13 +1643,29 @@ class OllamaStreamTranslator:
             content = message.get("content")
             if isinstance(content, str) and content != "":
                 yield self._chunk({"content": content}, None)
+            try:
+                calls = _ollama_calls(message)
+                translated = [
+                    _ollama_tool_call(self._calls + n, call) for n, call in enumerate(calls)
+                ]
+            except ApiError as exc:
+                self._failed = True
+                yield self._frame({"error": {"message": exc.message, "upstream": "ollama"}})
+                return
+            # Ollama streams each call whole, in one line; OpenAI's delta carries it
+            # at its index, with all of its arguments at once.
+            for call in translated:
+                yield self._chunk(
+                    {"tool_calls": [{"index": self._calls, **call}]}, None
+                )
+                self._calls += 1
         if line.get("done") is True:
             self._done = True
             reason = line.get("done_reason")
-            yield self._chunk(
-                {},
-                _DONE_REASON.get(reason, reason) if isinstance(reason, str) else None,
-            )
+            finish = _DONE_REASON.get(reason, reason) if isinstance(reason, str) else None
+            if self._calls and finish == "stop":
+                finish = "tool_calls"
+            yield self._chunk({}, finish)
             if self.include_usage:
                 yield self._frame(
                     {
