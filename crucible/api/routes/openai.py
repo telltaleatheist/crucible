@@ -97,6 +97,17 @@ class ChatCompletionBody(BaseModel):
     `nothing_fits_ceiling`; beside a `model`: `model_with_ceiling`."""
     stream: bool = False
     """OpenAI's: answer as server-sent events."""
+    tools: list[dict[str, Any]] | None = None
+    """OpenAI's: the functions the model may call, `{"type": "function", "function":
+    {name, description, parameters}}`. The app defines and runs them; Crucible keeps
+    none. A local model writes them in the format its manifest declares (`[tools]`) and
+    the reply carries its calls as `tool_calls`; a model with no format is refused
+    `tools_unsupported`, and `tools` beside a `response_format` is refused
+    `tools_with_response_format` (docs/internals/engines-and-capability.md, "Tool
+    calling")."""
+    tool_choice: str | dict[str, Any] | None = None
+    """OpenAI's: `auto` (the default with tools), `none`, `required`, or
+    `{"type": "function", "function": {"name": ...}}`."""
     response_format: dict[str, Any] | None = None
     """OpenAI's: a `json_schema` or `json_object` constraint, enforced by the engine or
     refused `structured_output_not_served` before anything is sent."""
@@ -342,7 +353,16 @@ def register(routers: Routers, ctx: AppContext) -> None:
         the verb that never raises it (docs/VERB-SIZING.md rule 8); the reply's `model`
         names the model chosen. The same choice opens a queue session
         (`max_params_b` beside `act`) and loads a model (`load-model`'s `params.verb`,
-        `params.max_params_b`).
+        `params.max_params_b`). `tools` and `tool_choice` are OpenAI's: the reply's
+        message carries the model's calls as `tool_calls` (finish_reason `tool_calls`),
+        never as `<tool_call>` text, and the app runs them and sends each result back
+        as a `{"role": "tool", "tool_call_id", "content"}` message beside the assistant
+        message that made the call. Crucible stores no tools and keeps no state between
+        rounds. A local model is started to write and read the format its manifest
+        declares (Qwen 3.5 and 3.8: the Qwen3-Coder XML form); a model with none is
+        refused `tools_unsupported`, and tools beside a `response_format` are refused
+        `tools_with_response_format` ("Tool calling"). An `anthropic/<id>` or
+        `ollama/<id>` chat is translated both ways.
         """
         arrived = time.monotonic()
         raw = await request.body()

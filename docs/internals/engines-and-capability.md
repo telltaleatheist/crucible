@@ -1038,6 +1038,86 @@ prompt's shared prefix is the same with or without it. On mlx-lm (were it
 served) a final assistant message also turns off its segment split, which is
 part of why it is refused there rather than patched in.
 
+## Tool calling (`[tools]`, `toolformats`)
+
+The chat door takes OpenAI's `tools` and `tool_choice` and answers with OpenAI's
+`tool_calls`. Crucible handles the FORMAT only: the app defines the tools, runs
+them, and drives the loop; Crucible stores no tools and keeps no state between
+rounds (Owen, 2026-10-25). Every app sends one shape, and Crucible writes it the
+way each model was trained to read it.
+
+A chat model's manifest declares the format its chat template writes:
+
+```toml
+[tools]
+format = "qwen3-xml"
+basis = """Where it was read: the template's own tool section, on disk."""
+```
+
+`crucible/toolformats.py` maps a format to each engine's parser. A manifest never
+names an engine flag; one that states one is refused `tool_flags_stated`.
+
+| engine | what reads the model's calls |
+| --- | --- |
+| vLLM 0.29 | `--enable-auto-tool-choice --tool-call-parser qwen3_coder` |
+| llama-server | `--jinja`: the GGUF's own template, which detects the form |
+| mlx-lm 0.31.3 | the tokenizer's tool parser; nothing to pass |
+
+Qwen 3.5 and Qwen 3.8 write the Qwen3-Coder XML form,
+`<tool_call><function=NAME><parameter=P>V</parameter></function></tool_call>`, not
+Hermes JSON. That was read from every template on disk, 2026-10-25. The B-Side
+lyrics fine-tune has no `[tools]`.
+
+Refused by name, before anything waits or loads:
+
+- `tools_unsupported` (400): the model declares no format. `details.models_with_tools`
+  names the ones that do.
+- `tools_with_response_format` (400): a JSON constraint covers the whole answer,
+  so the model could never write a call.
+
+**mlx-lm patch `mlx-lm-tools-only-when-sent`.** Stock 0.31.3 enters its tool
+state on the model's `<tool_call>` token whether or not the request sent tools.
+With none sent, the call it lifted was dropped, and the answer came back
+`finish_reason: "tool_calls"` with no content (Briefcase on the Mac, 2026-10-25).
+Patched, a request without tools gets the token as text, as vLLM and llama-server
+give it.
+
+Two rounds. Round one sends the tools:
+
+```json
+{"model": "qwen3.5-9b",
+ "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
+ "tools": [{"type": "function", "function": {
+   "name": "get_weather", "description": "Current weather for a city",
+   "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                  "required": ["city"]}}}]}
+```
+
+The reply's message:
+
+```json
+{"role": "assistant", "content": null,
+ "tool_calls": [{"id": "call_1", "type": "function",
+   "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}]}
+```
+
+with `finish_reason: "tool_calls"`. The app runs `get_weather`, then sends round
+two: the same tools, the messages so far, that assistant message as it came back,
+and one `role: "tool"` message per call:
+
+```json
+{"model": "qwen3.5-9b",
+ "messages": [
+   {"role": "user", "content": "What is the weather in Paris?"},
+   {"role": "assistant", "content": null, "tool_calls": [{"id": "call_1", "type": "function",
+     "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}]},
+   {"role": "tool", "tool_call_id": "call_1", "content": "{\"temp_c\": 14, \"sky\": \"rain\"}"}],
+ "tools": [ ...the same... ]}
+```
+
+It answers in text, with `finish_reason: "stop"`. `arguments` is a JSON string, as
+OpenAI's is. Parse it, and expect the model to make a mistake now and then.
+
 ## Structured output (`structured`)
 
 A chat constrains its answer with `response_format` (`json_schema`,

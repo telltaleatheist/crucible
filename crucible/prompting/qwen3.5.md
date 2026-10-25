@@ -194,6 +194,38 @@ About `presence_penalty`, the cards say to tune it "between 0 and 2 to reduce en
 
 ---
 
+## Tool calling
+
+**Official** [S5]. When a request carries `tools`, the template opens the system turn with:
+- `# Tools`, then each tool's JSON inside `<tools>…</tools>`.
+- An instruction to reply ONLY in the XML call form when it calls a function:
+  `<tool_call>
+<function=NAME>
+<parameter=P>
+V
+</parameter>
+</function>
+</tool_call>`.
+- These rules: required parameters must be given, any reasoning comes BEFORE the call and never after it, and the model answers normally when no tool fits.
+
+The app's own system message is appended after that block. A `role: "tool"` result is rendered into a user turn, inside `<tool_response>…</tool_response>`. This is the Qwen3-Coder XML form, not Qwen 2.5/3's Hermes JSON.
+
+**What Crucible does** [C1 "Tool calling"]
+- The manifest declares `[tools] format = "qwen3-xml"`.
+- Each engine reads the model's calls back as OpenAI `tool_calls`:
+  - vLLM through `qwen3_coder`;
+  - llama-server through `--jinja`;
+  - mlx-lm through its tokenizer's parser.
+- Send OpenAI's shape and read OpenAI's shape back. Never write `<tool_call>` into a prompt yourself.
+- `tools` beside a `response_format` is refused (`tools_with_response_format`).
+
+**Practical guidance.** None of this is official.
+- Write each tool's `description`, and each parameter's, as instructions to the model. The schema is all it sees of the tool.
+- Mark the required parameters `required`. The template tells the model they must be given.
+- Validate `arguments` in the app before running anything. It is the model's JSON, and the model can get it wrong.
+
+---
+
 ## Size notes
 
 ### `qwen3.5-0.8b`
