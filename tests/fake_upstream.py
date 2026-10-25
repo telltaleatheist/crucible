@@ -64,6 +64,56 @@ ANTHROPIC_NO_SAMPLING = frozenset(
 )
 
 
+def _blocks(message: dict[str, Any], kind: str) -> list[dict[str, Any]]:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    return [b for b in content if isinstance(b, dict) and b.get("type") == kind]
+
+
+def _anthropic_tool_refusal(body: dict[str, Any]) -> str | None:
+    """The Messages API's tool rules, as its documentation states them: a tool has a
+    name and an input_schema; tool_choice is auto, any, tool or none; every tool_use
+    of an assistant turn is answered by a tool_result in the very next (user) turn,
+    and a tool_result answers a tool_use of the turn just before it."""
+    for tool in body.get("tools") or []:
+        if set(tool) - {"name", "description", "input_schema", "strict"}:
+            return f"tools: unexpected members {sorted(set(tool))}"
+        if not isinstance(tool.get("name"), str) or not isinstance(
+            tool.get("input_schema"), dict
+        ):
+            return "tools: a tool needs a name and an input_schema"
+    choice = body.get("tool_choice")
+    if choice is not None:
+        if choice.get("type") not in ("auto", "any", "tool", "none"):
+            return f"tool_choice: unknown type {choice.get('type')!r}"
+        if choice.get("type") == "tool" and not isinstance(choice.get("name"), str):
+            return "tool_choice: type tool needs a name"
+    messages = body.get("messages") or []
+    for number, message in enumerate(messages):
+        uses = [b["id"] for b in _blocks(message, "tool_use")]
+        results = [b["tool_use_id"] for b in _blocks(message, "tool_result")]
+        if uses:
+            if message.get("role") != "assistant":
+                return f"messages.{number}: tool_use outside an assistant turn"
+            following = messages[number + 1] if number + 1 < len(messages) else None
+            answered = (
+                {b["tool_use_id"] for b in _blocks(following, "tool_result")}
+                if following is not None and following.get("role") == "user" else set()
+            )
+            if following is not None and set(uses) - answered:
+                return (f"messages.{number + 1}: `tool_use` ids were found without "
+                        f"`tool_result` blocks immediately after: "
+                        f"{sorted(set(uses) - answered)}")
+        if results:
+            before = messages[number - 1] if number > 0 else {}
+            made = {b["id"] for b in _blocks(before, "tool_use")}
+            if set(results) - made:
+                return (f"messages.{number}: unexpected `tool_use_id` found in "
+                        f"`tool_result` blocks: {sorted(set(results) - made)}")
+    return None
+
+
 class _Handler(BaseHTTPRequestHandler):
     owner: "FakeUpstream" = None
 
@@ -176,6 +226,27 @@ class _Handler(BaseHTTPRequestHandler):
     def _ollama_chat(self, body: dict[str, Any]) -> None:
         owner = type(self).owner
         thinks = body.get("think") is True
+        if owner.ollama_tool_calls is not None:
+            calls = owner.ollama_tool_calls
+            final = {"model": body.get("model"), "done": True, "done_reason": "stop",
+                     "prompt_eval_count": 11, "eval_count": 7}
+            if body.get("stream") is True:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson")
+                self.end_headers()
+                # Ollama streams each call whole, one per line.
+                for call in calls:
+                    self._ollama_line(
+                        {"model": body.get("model"), "done": False,
+                         "message": {"role": "assistant", "content": "",
+                                     "tool_calls": [call]}}
+                    )
+                self._ollama_line({**final, "message": {"role": "assistant",
+                                                        "content": ""}})
+                return
+            self._json(200, {**final, "message": {"role": "assistant", "content": "",
+                                                  "tool_calls": calls}})
+            return
         if body.get("stream") is True:
             self.send_response(200)
             self.send_header("Content-Type", "application/x-ndjson")
@@ -240,6 +311,9 @@ class _Handler(BaseHTTPRequestHandler):
         for message in body.get("messages") or []:
             if message.get("role") not in ("user", "assistant"):
                 return f"messages: role {message.get('role')!r} is not supported"
+        refused = _anthropic_tool_refusal(body)
+        if refused is not None:
+            return refused
         output_config = body.get("output_config")
         if isinstance(output_config, dict):
             form = output_config.get("format")
@@ -258,6 +332,9 @@ class _Handler(BaseHTTPRequestHandler):
                 {"type": "error",
                  "error": {"type": "invalid_request_error", "message": refused}},
             )
+            return
+        if owner.anthropic_tool_uses is not None:
+            self._anthropic_tool_answer(body, owner.anthropic_tool_uses)
             return
         output_config = body.get("output_config") or {}
         structured = output_config.get("format") is not None
@@ -326,6 +403,58 @@ class _Handler(BaseHTTPRequestHandler):
                 "usage": usage,
             },
         )
+
+    def _anthropic_tool_answer(
+        self, body: dict[str, Any], uses: list[dict[str, Any]]
+    ) -> None:
+        """An answer that says TOOL_PREAMBLE (when set) and then calls each of `uses`
+        ({id, name, input}), stopping for `tool_use`."""
+        owner = type(self).owner
+        preamble = owner.tool_preamble
+        usage = {"input_tokens": 11, "output_tokens": 7}
+        if body.get("stream") is not True:
+            content: list[dict[str, Any]] = [
+                {"type": "thinking", "thinking": "", "signature": "sig"}
+            ]
+            if preamble is not None:
+                content.append({"type": "text", "text": preamble})
+            content.extend({"type": "tool_use", **use} for use in uses)
+            self._json(200, {"id": "msg_tools", "type": "message", "role": "assistant",
+                             "model": body.get("model"), "content": content,
+                             "stop_reason": "tool_use", "usage": usage})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        self._event("message_start", {"message": {"id": "msg_tools", "usage": usage}})
+        index = 0
+        if preamble is not None:
+            self._event("content_block_start",
+                        {"index": index, "content_block": {"type": "text", "text": ""}})
+            self._event("content_block_delta",
+                        {"index": index, "delta": {"type": "text_delta", "text": preamble}})
+            self._event("content_block_stop", {"index": index})
+            index += 1
+        for use in uses:
+            self._event(
+                "content_block_start",
+                {"index": index, "content_block": {"type": "tool_use", "id": use["id"],
+                                                   "name": use["name"], "input": {}}},
+            )
+            encoded = json.dumps(use["input"]) if use["input"] else ""
+            # Split the arguments mid-token, as Anthropic's input_json_delta does.
+            middle = len(encoded) // 2
+            for piece in (encoded[:middle], encoded[middle:]):
+                if piece:
+                    self._event("content_block_delta",
+                                {"index": index,
+                                 "delta": {"type": "input_json_delta",
+                                           "partial_json": piece}})
+            self._event("content_block_stop", {"index": index})
+            index += 1
+        self._event("message_delta", {"delta": {"stop_reason": "tool_use"},
+                                      "usage": {"output_tokens": 7}})
+        self._event("message_stop", {})
 
     def _event(self, kind: str, payload: dict[str, Any]) -> None:
         frame = f"event: {kind}\ndata: {json.dumps({'type': kind, **payload})}\n\n"
@@ -403,6 +532,11 @@ class FakeUpstream:
         self.stream_error: dict[str, Any] | None = None
         self.stop_reason = "end_turn"
         self.drop_connection = False
+        # Tool calling: what the Anthropic fake calls ({id, name, input} each) and the
+        # text it says first; what the Ollama fake calls (Ollama's own call objects).
+        self.anthropic_tool_uses: list[dict[str, Any]] | None = None
+        self.tool_preamble: str | None = None
+        self.ollama_tool_calls: list[dict[str, Any]] | None = None
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
