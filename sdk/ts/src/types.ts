@@ -1306,6 +1306,14 @@ export interface DecideRequest {
    * another form on the card is a reload. A name the model does not have is 400 `unknown_form`.
    */
   readonly form?: string;
+  /**
+   * A size ceiling in billions of parameters, instead of a `model`, exactly as
+   * {@link ChatOptions.maxParamsB} caps a chat's (2.0.30+): it only lowers the model the server
+   * registered for `decide`, never raises it, and the response's `model` names the one chosen.
+   * Beside `model` it is 400 `model_with_ceiling`; beside `images`, 400 `invalid_request`;
+   * nothing that small installed is 409 `nothing_fits_ceiling`.
+   */
+  readonly maxParamsB?: number;
 }
 
 /** `DecideRequest.missing`: refuse a decision with a label outside the top-K, or report it. */
@@ -1699,6 +1707,14 @@ export interface DecideItemsRequest {
    * another form on the card is a reload. A name the model does not have is 400 `unknown_form`.
    */
   readonly form?: string;
+  /**
+   * A size ceiling in billions of parameters, instead of a `model`, exactly as
+   * {@link ChatOptions.maxParamsB} caps a chat's (2.0.30+): it only lowers the model the server
+   * registered for `decide`, never raises it, and the response's `model` names the one chosen.
+   * Beside `model` it is 400 `model_with_ceiling`; beside `images`, 400 `invalid_request`;
+   * nothing that small installed is 409 `nothing_fits_ceiling`.
+   */
+  readonly maxParamsB?: number;
 }
 
 /** The items form's reply: one choice answer per item, in item order. */

@@ -1604,6 +1604,7 @@ export class CrucibleClient {
     const payload: Record<string, unknown> = {};
     if (given.model !== undefined) payload['model'] = requireText(given.model, 'model');
     if (given.form !== undefined) payload['form'] = requireText(given.form, 'form');
+    if (given.maxParamsB !== undefined) payload['max_params_b'] = requireCeiling(given.maxParamsB);
     payload['state'] = given.state;
     if (given.images !== undefined) payload['images'] = requireStrings(given.images, 'images');
     payload['questions'] = decideQuestionsWire(questions);
@@ -1637,6 +1638,7 @@ export class CrucibleClient {
     const payload: Record<string, unknown> = {};
     if (given.model !== undefined) payload['model'] = requireText(given.model, 'model');
     if (given.form !== undefined) payload['form'] = requireText(given.form, 'form');
+    if (given.maxParamsB !== undefined) payload['max_params_b'] = requireCeiling(given.maxParamsB);
     payload['state'] = given.state;
     if (given.images !== undefined) payload['images'] = requireStrings(given.images, 'images');
     if (given.instructions !== undefined) payload['instructions'] = requireText(given.instructions, 'instructions');

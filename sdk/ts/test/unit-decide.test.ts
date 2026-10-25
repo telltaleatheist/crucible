@@ -166,6 +166,21 @@ test('decide() sends the act as X-Crucible-Act, and images only when given', asy
   assert.equal('act' in body, false, 'the act is a header, never a body field');
 });
 
+test('maxParamsB travels as max_params_b in place of a model, and a bad one never leaves', async () => {
+  handle = (_request, response) => json(response, 200, reply());
+  const { model: _model, ...unnamed } = EXAMPLE;
+  await client().decide({ ...unnamed, maxParamsB: 9 });
+  const body = JSON.parse(lastBody);
+  assert.equal(body.max_params_b, 9);
+  assert.equal('model' in body, false);
+  assert.equal('maxParamsB' in body, false, 'the wire spelling only');
+  const before = requests;
+  for (const bad of [0, -1, Number.NaN]) {
+    await assert.rejects(client().decide({ ...unnamed, maxParamsB: bad }), CrucibleConfigError);
+  }
+  assert.equal(requests, before);
+});
+
 test('decide() reads every field the contract names', async () => {
   handle = (_request, response) => json(response, 200, reply());
   const result = await client().decide(EXAMPLE);
