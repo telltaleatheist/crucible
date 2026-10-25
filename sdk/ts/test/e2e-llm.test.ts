@@ -207,7 +207,7 @@ test('chat returns a non-empty completion from the resident engine', async () =>
 
   assert.ok(answer.id !== null && answer.id.length > 0, 'the completion must carry an id');
   assert.equal(answer.model, MODEL);
-  assert.ok(answer.content.trim().length > 0, 'the completion must carry text');
+  assert.ok(answer.content !== null && answer.content.trim().length > 0, 'the completion must carry text');
   assert.ok(
     answer.finishReason !== null && answer.finishReason.length > 0,
     'the engine must say why it stopped',

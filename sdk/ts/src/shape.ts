@@ -173,6 +173,13 @@ export function optStrArray(object: Json, key: string, where: string): string[] 
   return strEntries(value, key, where);
 }
 
+export function optArray(object: Json, key: string, where: string): unknown[] | null {
+  const value = optRaw(object, key);
+  if (value === null) return null;
+  if (!Array.isArray(value)) throw wrongType(where, key, 'a JSON array', value);
+  return value;
+}
+
 export function optObject(object: Json, key: string, where: string): Json | null {
   const value = optRaw(object, key);
   if (value === null) return null;

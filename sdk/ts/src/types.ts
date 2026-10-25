@@ -1010,11 +1010,72 @@ export type JsonWhitespace = 'compact' | 'flexible';
  */
 export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
-/** One turn of a chat. */
-export interface ChatMessage {
-  readonly role: 'system' | 'user' | 'assistant';
+/**
+ * A function the model may call, sent in {@link ChatOptions.tools} as OpenAI's
+ * `{"type": "function", "function": {name, description, parameters}}`.
+ */
+export interface ChatTool {
+  readonly type: 'function';
+  readonly function: {
+    readonly name: string;
+    readonly description?: string;
+    /** The arguments' JSON Schema, forwarded exactly as given. */
+    readonly parameters?: Readonly<Record<string, unknown>>;
+  };
+}
+
+/**
+ * {@link ChatOptions.toolChoice}, sent as OpenAI's `tool_choice`: `'auto'` (the model decides),
+ * `'none'` (it answers in text), `'required'` (it calls at least one tool), or the one function it
+ * must call.
+ */
+export type ChatToolChoice =
+  | 'auto'
+  | 'none'
+  | 'required'
+  | { readonly type: 'function'; readonly function: { readonly name: string } };
+
+/**
+ * One call the model made: OpenAI's `tool_calls[]` entry. `arguments` is the JSON text the model
+ * wrote, exactly as it wrote it; the SDK does not parse it, because a model can write invalid JSON
+ * and what to do about that is the caller's.
+ */
+export interface ChatToolCall {
+  /** The id a `{role: 'tool'}` reply names as its `toolCallId`. */
+  readonly id: string;
+  readonly type: 'function';
+  readonly function: {
+    readonly name: string;
+    /** The arguments as a JSON string. */
+    readonly arguments: string;
+  };
+}
+
+/** A system or user turn of a chat. */
+export interface ChatTextMessage {
+  readonly role: 'system' | 'user';
   readonly content: string;
 }
+
+/**
+ * An assistant turn. `content` may be null only when `toolCalls` is non-empty (a turn in which the
+ * model only called tools). `toolCalls` is sent as `tool_calls`.
+ */
+export interface ChatAssistantMessage {
+  readonly role: 'assistant';
+  readonly content: string | null;
+  readonly toolCalls?: readonly ChatToolCall[];
+}
+
+/** A tool's result, answering the call whose id is `toolCallId` (sent as `tool_call_id`). */
+export interface ChatToolMessage {
+  readonly role: 'tool';
+  readonly toolCallId: string;
+  readonly content: string;
+}
+
+/** One turn of a chat. */
+export type ChatMessage = ChatTextMessage | ChatAssistantMessage | ChatToolMessage;
 
 /** What {@link CrucibleClient.chat} and {@link CrucibleClient.chatStream} take. */
 export interface ChatOptions {
@@ -1078,6 +1139,23 @@ export interface ChatOptions {
    */
   readonly onUsage?: (usage: ChatUsage) => void;
   /**
+   * Functions the model may call, sent as OpenAI's `tools`. A reply that calls them carries
+   * `ChatResponse.toolCalls` (and `finishReason` `'tool_calls'`); answer each with a
+   * `{role: 'tool', toolCallId, content}` message after the assistant turn that made it (that turn
+   * sent back with its `toolCalls`).
+   */
+  readonly tools?: readonly ChatTool[];
+  /** Whether and which tool the model must call, sent as `tool_choice`; needs `tools`. */
+  readonly toolChoice?: ChatToolChoice;
+  /**
+   * `chatStream` only: called once, after the last content delta (and before `onUsage`), with the
+   * tool calls the stream's `delta.tool_calls` fragments assemble into, in `index` order — each
+   * call's `id` and `name` from its fragments, its `arguments` the concatenation of theirs. Called
+   * with an empty array when the model called none. `chat` refuses it (its answer carries
+   * `toolCalls`).
+   */
+  readonly onToolCalls?: (toolCalls: readonly ChatToolCall[]) => void;
+  /**
    * The start of the answer: the model writes on from this text, and the reply's `content` is what
    * it wrote AFTER it (join the two yourself). Sent as `prefill`. Served on vLLM and llama-server;
    * needs thinking off (`thinking: false`, or the model's manifest) and no `responseFormat`, and
@@ -1130,10 +1208,16 @@ export interface ChatResponse {
   readonly id: string | null;
   /** Crucible's model id: the one you named, or the one your `verb` and `maxParamsB` chose. */
   readonly model: string | null;
-  readonly content: string;
   /**
-   * The engine's own word for why it stopped (`stop`, `length`, …); `length` means truncated.
-   * Null when the engine did not say (an Ollama answer with no `done_reason`).
+   * The answer's text. Null only when the model called tools and wrote no text (`toolCalls` is
+   * then non-empty); a reply with neither is a protocol error.
+   */
+  readonly content: string | null;
+  /** The calls the model made (`message.tool_calls`); empty when it made none. */
+  readonly toolCalls: readonly ChatToolCall[];
+  /**
+   * The engine's own word for why it stopped (`stop`, `length`, `tool_calls`, …); `length` means
+   * truncated. Null when the engine did not say (an Ollama answer with no `done_reason`).
    */
   readonly finishReason: string | null;
   readonly usage: ChatUsage | null;
