@@ -572,7 +572,8 @@ def test_pins_toml_is_not_read_as_a_voice_called_pins(host: Path) -> None:
 CATALOG: dict[str, tuple[str, int, tuple[int, int] | None]] = {
     "deathstalker": ("checkpoint", 800, (400, 700)),
     "mistborn": ("checkpoint", 800, (300, 800)),
-    "owen": ("checkpoint", 800, (600, 800)),
+    "owen-audiobook": ("checkpoint", 1000, (200, 500)),
+    "owen-youtube": ("checkpoint", 1000, (200, 500)),
     "thirdreich": ("checkpoint", 1000, (500, 700)),
     "sigma": ("checkpoint", 1000, (400, 800)),
 }

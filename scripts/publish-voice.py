@@ -22,7 +22,8 @@ from crucible.voices import VoiceError
 SEED_REVISIONS: dict[str, str] = {
     "deathstalker": "28f6c4d3733be9746bb26ddd7b09c9d2a4950198",
     "mistborn": "8a8d1bf375c7c4aa097a481d332b94e835a8c6f4",
-    "owen": "5885e74691be8c39d137dd8dd5b03813f822d1c4",
+    "owen-audiobook": "26e635cccd1981ede17295c1dd3430e07a1c6a23",
+    "owen-youtube": "a2f930ff126b7e87a4ccc9998fbfe84b3cf6edb2",
     "sigma": "8f6b3ca274cbc7b83a537ce25e05d223eb35c987",
     "thirdreich": "f83ce206e82ca639fa8a16cddd7ace713f9027c6",
 }

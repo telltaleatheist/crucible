@@ -6,8 +6,12 @@ ref = "crucible"
 hf_repo = "owenmorgan/mistborn-higgs-v3"
 ref = "crucible"
 
-[owen]
-hf_repo = "owenmorgan/owen-morgan-higgs-v3"
+[owen-audiobook]
+hf_repo = "owenmorgan/owen-audiobook-higgs-v3"
+ref = "crucible"
+
+[owen-youtube]
+hf_repo = "owenmorgan/owen-youtube-higgs-v3"
 ref = "crucible"
 
 [sigma]

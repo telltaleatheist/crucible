@@ -775,7 +775,8 @@ def test_bad_toml_is_refused_by_name(tmp_path: Path, monkeypatch) -> None:
 SHIPPED = {
     "deathstalker": ("checkpoint", 800),
     "mistborn": ("checkpoint", 800),
-    "owen": ("checkpoint", 800),
+    "owen-audiobook": ("checkpoint", 1000),
+    "owen-youtube": ("checkpoint", 1000),
     "thirdreich": ("checkpoint", 1000),
     "sigma": ("checkpoint", 1000),
     "higgs-default": ("token", 600),
@@ -900,7 +901,7 @@ def test_the_shipped_voices_are_still_there_beside_it(tmp_path, monkeypatch) -> 
     configure_box(tmp_path)
     a_voice_file(tmp_path / "voices", "tonights-finetune")
     served = load_all_voices()
-    for shipped in ("deathstalker", "mistborn", "owen", "zeroshot"):
+    for shipped in ("deathstalker", "mistborn", "owen-audiobook", "zeroshot"):
         assert shipped in served, f"the overlay hid the packaged {shipped}"
     assert list(served) == sorted(served)
 

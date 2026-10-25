@@ -1,0 +1,41 @@
+# Owen Morgan (YouTube) — om_v10b ckpt-948 (2026-10-25).
+# Base bosonai/higgs-audio-v3-tts-4b @ 239f63fb, LoRA r32/a64 merged (merge_for_serving.py); trained on
+# God's People + Was Hitler an Atheist + UJW, RoFormer-separated, no bed, 24 kHz.
+#
+# The MACHINE facts are not here: they belong to the box that serves the voice, in its
+# config.toml [tts.<engine>] table. The repo and revision are not here either — this file
+# IS the revision, and the local side pins it.
+
+schema = 1
+
+[voice]
+display         = "Owen Morgan (YouTube)"
+kind            = "checkpoint"
+narrator_engine = "higgs-v3"
+language        = "en"
+sample_rate     = 24000
+
+[voice.pace]
+basis              = "measured"
+pace_chars_per_sec = 16.49
+max_chars_per_sec  = 21.43
+min_chars_per_sec  = 12.68
+measured_from      = """om_v10b ckpt-948 (the shipped weights) length ladder 2026-10-25 (280 renders, 4 seeds, 0.8/0.95/50, stall guard 37,1,20,16, PC sglang path): median of 75 clean in-band (200-500) renders (coverage >= 0.95, insert < 0.15, audio ratio 0.8-1.25), p05 14.94 / p95 18.31. Band 200-500 from the v10b ladder on cuda-linux (0/116 in band for ckpt-869, Wilson hi 3.2 %; ckpt-948's own row 1/148 over 100-500, inside noise of 869, and 948 is the latest clean checkpoint); not yet laddered on mlx-darwin. Guards = pace x 1.3 and / 1.3."""
+safe_min_chars     = 200
+safe_max_chars     = 500
+
+[voice.arms.cuda-linux]
+max_chars       = 1000
+max_chars_basis = "placeholder"   # 1000 = the longest training row (Owen's cap rule)
+sampling        = { temperature = 0.8, top_p = 0.95, top_k = 50 }
+
+[voice.arms.mlx-darwin]
+max_chars       = 1000
+max_chars_basis = "placeholder"   # 1000 = the longest training row (Owen's cap rule)
+sampling        = { temperature = 0.8, top_p = 0.95, top_k = 50 }
+
+[[voice.takes]]
+
+[[voice.takes]]
+temperature = 0.7
+reason = """measured 2026-09-11 over the same 88 chunks: 0.8 gave 4 guard fires / 3 holes / 0 drops, 0.7 gave 8 / 7 / 0. Not a better setting — a DIFFERENT one, which is what a retake of a chunk that failed at 0.8 needs (Owen's ruling 2026-09-14: a retake must not reuse the settings that produced the problem)."""

@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- Two Owen Morgan Higgs voices replace `owen` (Owen approved 2026-10-25): `owen-audiobook` (om_v10d ckpt-931, trained on God's People and Was Hitler an Atheist) at `owenmorgan/owen-audiobook-higgs-v3`, and `owen-youtube` (om_v10b ckpt-948, the same plus UJW) at `owenmorgan/owen-youtube-higgs-v3`, both private and following their `crucible` tag. Each repo's crucible-voice.toml carries its own ladder's facts (2026-10-25, 280 renders, PC sglang path): pace 16.37 and 16.49 chars/s, band 200-500 (0/116 in band), cap 1000 (the longest training row), sampling 0.8/0.95/50; not yet laddered on mlx-darwin. `owen` (owen-morgan-higgs-v3) is retired: its pin, seed revision and test fixture are gone; a machine still holding its weights keeps them until `crucible voices remove owen`.
+
 ## 2.0.25 — 2026-10-25
 
 - The Higgs prompting guide (`GET /v1/prompting/higgs-v3.md`) is current: the float32 codec decode and the hiss it ended (2.0.24) with its detector; Owen's ruling on which voices an app may use for its own work (`sigma` or an Owen Morgan voice as rendered; `deathstalker` only as a source converted with RVC); and how to render short lines (barks, dialogue), which sit below every fine-tune's measured band: one chunk per line, retake by `take`.
