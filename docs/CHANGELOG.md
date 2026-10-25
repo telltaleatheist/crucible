@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 2.0.28 — 2026-10-25
+
 - A queue session that leaves the line after its own load finished, before it opened, now takes that model off the card. The line cancelled a load still running, but one already DONE was left resident with nothing holding it: on owens-pc (2026-10-25) BookForge quit while its pronunciation guide's session waited on qwen3.8-27b-4bit, the load finished, the session was gone, and the 27B sat on the card until it was unloaded by hand (bookforge pc 1's report). The line hands every removed waiting session to `sessionqueue.settle_a_left_sessions_load`, which settles the card (on a thread, as SessionCloser.end does) only when the session's own load ended DONE and the resident is still the session's model; the settlement unloads nothing else holds, so an operator's load and a session still wanting the model keep it.
 
 ## 2.0.27 — 2026-10-25
