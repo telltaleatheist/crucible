@@ -9,7 +9,7 @@ notes.
 
 ## 2.0.26 — 2026-10-25
 
-- Two Owen Morgan Higgs voices replace `owen` (Owen approved 2026-10-25): `owen-audiobook` (om_v10d ckpt-931, trained on God's People and Was Hitler an Atheist) at `owenmorgan/owen-audiobook-higgs-v3`, and `owen-youtube` (om_v10b ckpt-948, the same plus UJW) at `owenmorgan/owen-youtube-higgs-v3`, both private and following their `crucible` tag. Each repo's crucible-voice.toml carries its own ladder's facts (2026-10-25, 280 renders, PC sglang path): pace 16.37 and 16.49 chars/s, band 200-500 (0/116 in band), cap 1000 (the longest training row), sampling 0.8/0.95/50; not yet laddered on mlx-darwin. `owen` (owen-morgan-higgs-v3) is retired: its pin, seed revision and test fixture are gone; a machine still holding its weights keeps them until `crucible voices remove owen`.
+- Two Owen Morgan Higgs voices replace `owen` (Owen approved 2026-10-25): `owen-audiobook` (om_v10d ckpt-931, trained on God's People and Was Hitler an Atheist) at `owenmorgan/owen-audiobook-higgs-v3`, and `owen-youtube` (om_v10b ckpt-948, the same plus UJW) at `owenmorgan/owen-youtube-higgs-v3`, both private and following their `crucible` tag. Each repo's crucible-voice.toml carries its own ladder's facts (2026-10-25, 280 renders, PC sglang path): pace 16.37 and 16.49 chars/s, band 200-500 (0/116 in band), cap 1000 (the longest training row), sampling 0.8/0.95/50; not yet laddered on mlx-darwin. `owen` (owen-morgan-higgs-v3) is retired: its pin, seed revision and test fixture are gone; Crucible no longer knows `owen`, so its weights become an orphan folder, `<home>/voices/owen`; it was deleted on the PC and the Mac with the release, and any other machine deletes that folder by hand. The owen-morgan-higgs-v3 repo is deleted.
 
 ## 2.0.25 — 2026-10-25
 
