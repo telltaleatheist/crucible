@@ -753,7 +753,7 @@ def cmd_stream_events(connection: Connection, args: argparse.Namespace) -> int:
 
 def cmd_session_open(connection: Connection, args: argparse.Namespace) -> int:
     body: dict[str, Any] = {"act": args.act}
-    for key in ("model", "max_params_b", "idle_s", "max_wait_s"):
+    for key in ("model", "verb", "max_params_b", "idle_s", "max_wait_s"):
         value = getattr(args, key)
         if value is not None:
             body[key] = value
@@ -878,7 +878,7 @@ READERS = (
 )
 
 SINCE = arg("--since", type=int, default=0, metavar="EVENT_ID")
-BENCH_ACT = arg("--act", default=None, help="the capability class, for the bench")
+BENCH_ACT = arg("--act", default=None, help="your label for this work, for the bench")
 QUEUE_ARGS = (
     arg(
         "--max-wait", type=int, default=None, metavar="SECONDS",
@@ -1036,11 +1036,14 @@ STREAM_VERBS = (
 
 SESSION_VERBS = (
     Verb("open", "POST /v1/queue/sessions — ask for the server for a run", cmd_session_open, (
-        arg("--act", required=True, help="the capability class this run is"),
+        arg("--act", required=True, help="your label for this run, shown on the bench"),
         arg("--model", default=None, help="a model to have resident when it opens"),
+        arg("--verb", default=None,
+            help="which verb's model it opens with when no --model is named (generate, "
+                 "decide)"),
         arg(
             "--max-params-b", dest="max_params_b", type=float, default=None, metavar="B",
-            help="instead of --model: the server's model for --act, capped at B billion "
+            help="instead of --model: the server's model for --verb, capped at B billion "
                  "parameters",
         ),
         arg(

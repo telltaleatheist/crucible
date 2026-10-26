@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import itertools
 import math
+import re
 import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Iterator
 
-from .capabilityclasses import CLASSES
 from .clock import utcnow
 from .errors import ApiError
 from .events import CHAT, EventHub
@@ -17,19 +17,22 @@ from .updating import UpdateHold
 
 RECENT_DURATIONS = 20
 
-ACT_NAMES: frozenset[str] = frozenset(entry.name for entry in CLASSES)
+# An act is the app's own label for its work, shown on the bench as sent (`GET
+# /v1/activity`). Crucible serves models and keeps no list of apps' tasks (Owen,
+# 2026-10-25: the text classes move to the apps), so any short lowercase word is an act;
+# only its shape is checked, so a bench row is always a readable word.
+ACT_PATTERN = re.compile(r"[a-z][a-z0-9-]{0,31}")
 
 
 def require_act_name(act: str, source: str, advice: str = "") -> str:
-    if act not in ACT_NAMES:
+    if ACT_PATTERN.fullmatch(act) is None:
         raise ApiError(
             400,
-            "unknown_act",
-            f"{act!r} is not an act this server knows. {source} must name a "
-            f"capability class: {sorted(ACT_NAMES)}. It is refused rather than "
-            "recorded because a bench showing the wrong act name is worse than "
-            f"one showing none{advice}",
-            {"act": act, "known": sorted(ACT_NAMES)},
+            "invalid_act",
+            f"{act!r} is not an act: {source} is the label this work is shown under, "
+            "one lowercase word of letters, digits and hyphens, starting with a letter, "
+            f"at most 32 characters{advice}",
+            {"act": act, "pattern": ACT_PATTERN.pattern},
         )
     return act
 

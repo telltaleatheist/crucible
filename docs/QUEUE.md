@@ -314,7 +314,12 @@ POST /v1/queue/sessions
 {"act": "analysis", "model": "qwen3.5-9b", "idle_s": 300, "max_wait_s": 3600}
 ```
 
-- `act` (required): the capability class the run is for, as `X-Crucible-Act` names it.
+- `act` (required): your label for the run, shown on the bench as `X-Crucible-Act` is: one
+  lowercase word of letters, digits and hyphens, at most 32 (`invalid_act` otherwise). It
+  labels the run and chooses nothing. Before 2.0.32 it had to name a capability class.
+- `verb`: which verb's model the session opens with when it names no `model` (`generate`
+  or `decide`), capped by `max_params_b`. Absent: the `act` when it names a sized verb,
+  else `generate` when `max_params_b` is sent, else no particular model.
 - `model`: a model to have resident when the session opens. If it is not resident, the
   server loads it for the session (a `load-model` job with your client name and
   `client_ref: "opening session ses-…"`) and reports the session open only once the load

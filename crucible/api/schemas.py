@@ -165,7 +165,16 @@ class SessionOpen(BaseModel):
 
     act: str = Field(
         min_length=1,
-        description="The capability class the run is for, as the act header names it.",
+        description="Your label for the run, shown on the bench: one lowercase word "
+        "(letters, digits, hyphens; at most 32). Anything else is `invalid_act`.",
+    )
+    verb: str | None = Field(
+        default=None,
+        description="Which verb's model the session opens with when it names no "
+        "`model`, as a chat's `verb` is: this server's registered model for the verb, "
+        "capped by `max_params_b`. Beside a `model`, that model is held to the verb's "
+        "rules. Absent: the `act` when it names a sized verb (as before 2.0.32), else "
+        "`generate` when `max_params_b` is sent, else no particular model.",
     )
     model: str | None = Field(
         default=None,
@@ -176,7 +185,7 @@ class SessionOpen(BaseModel):
         default=None,
         gt=0,
         description="In place of `model`: open with the model this server registered "
-        "for `act`, capped at this many billions of parameters (docs/VERB-SIZING.md rule "
+        "for `verb`, capped at this many billions of parameters (docs/VERB-SIZING.md rule "
         "8). This server's own pick for the verb is kept when it is at or below the "
         "ceiling, and a pick above it is replaced by the biggest that fits this card at "
         "or below it; the ticket's `model` names the one chosen. Refused for an `act` "

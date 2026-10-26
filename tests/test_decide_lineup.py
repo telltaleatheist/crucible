@@ -9,7 +9,7 @@ from crucible.backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
 from crucible.capabilityclasses import BY_NAME, CHAT_GOAL, DECIDE_GOAL, classes_for_model
 from crucible.enginespec import UNSTATED_ENGINE_CONCURRENCY
 from crucible.errors import ApiError
-from crucible.inflight import ACT_NAMES, read_act
+from crucible.inflight import read_act
 from crucible.manifests import ManifestError, load_manifest, parse_manifest
 from crucible.verdict import decide
 
@@ -39,14 +39,14 @@ def test_decide_is_a_class_an_act_and_not_routable() -> None:
     assert "decide" not in classnames.ROUTABLE_CLASSES
     assert "decide" in classnames.SELECTABLE_CLASSES
     assert entry.goal is DECIDE_GOAL and entry.goal.params_b == 9
-    assert "decide" in ACT_NAMES
     assert read_act({"X-Crucible-Act": "decide"}) == "decide"
 
 
-def test_an_unknown_act_is_still_refused() -> None:
+def test_any_word_is_an_act_and_a_malformed_one_is_refused() -> None:
+    assert read_act({"X-Crucible-Act": "decides"}) == "decides"
     with pytest.raises(ApiError) as caught:
-        read_act({"X-Crucible-Act": "decides"})
-    assert caught.value.code == "unknown_act"
+        read_act({"X-Crucible-Act": "Decides"})
+    assert caught.value.code == "invalid_act"
 
 
 def test_decide_work_cites_the_door_and_is_not_sixteen_states() -> None:

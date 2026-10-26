@@ -195,16 +195,16 @@ def test_the_act_and_the_client_are_recorded_on_a_settings_write(
     assert row["changed"] == ["upstreams.ollama set"]
 
 
-def test_an_unknown_act_is_refused_before_anything_is_written(
+def test_a_malformed_act_is_refused_before_anything_is_written(
     settings_client, auth
 ) -> None:
     body = settings_client.put(
         "/v1/settings",
-        headers={**auth, "X-Crucible-Act": "transalte"},
+        headers={**auth, "X-Crucible-Act": "Translate it"},
         json={"upstreams": {"anthropic": {"key": ANTHROPIC_KEY}}},
     )
     assert body.status_code == 400
-    assert body.json()["error"]["code"] == "unknown_act"
+    assert body.json()["error"]["code"] == "invalid_act"
     after = settings_client.get("/v1/settings", headers=auth).json()
     assert after["upstreams"]["anthropic"]["configured"] is False
 

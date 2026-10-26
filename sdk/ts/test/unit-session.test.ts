@@ -208,6 +208,18 @@ test('a session opened with a ceiling sends it and carries the model the server 
   }
 });
 
+test('a session sends its verb beside its ceiling, and its act only labels', async () => {
+  ticket = { session_id: 'ses-1', status: 'open', position: null, model: 'qwen3.5-9b' };
+  feed.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: 'qwen3.5-9b', load_job: null });
+  const session = await client().session({ act: 'clean', verb: 'decide', maxParamsB: 9 });
+  try {
+    const opened = seen.filter((request) => request.path === '/v1/queue/sessions').at(-1);
+    assert.deepEqual(JSON.parse(opened?.body ?? '{}'), { act: 'clean', verb: 'decide', max_params_b: 9 });
+  } finally {
+    await session.close();
+  }
+});
+
 test('a session the server opens at once is open when session() answers', async () => {
   feed.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: null, load_job: null });
   const crucible = client();

@@ -306,8 +306,22 @@ def test_a_session_opens_on_the_ceiling_s_model_and_its_ticket_names_it(
 ) -> None:
     client, _ = served("qwen3.5-4b")
     refused = client.post("/v1/queue/sessions", headers=auth,
-                          json={"act": "tts", "max_params_b": 4})
+                          json={"act": "x", "verb": "tts", "max_params_b": 4})
     assert refused.json()["error"]["code"] == "verb_not_sized"
+    unknown = client.post("/v1/queue/sessions", headers=auth,
+                          json={"act": "x", "verb": "sorcery", "max_params_b": 4})
+    assert unknown.json()["error"]["code"] == "unknown_verb"
+    # An act is the app's label (2.0.32): one that is no verb caps generate's model.
+    labelled = client.post("/v1/queue/sessions", headers=auth,
+                           json={"act": "pronunciation-guide", "max_params_b": 4})
+    assert labelled.status_code == 202 and labelled.json()["model"] == "qwen3.5-4b"
+    client.delete(f"/v1/queue/sessions/{labelled.json()['session_id']}", headers=auth)
+    stated = client.post("/v1/queue/sessions", headers=auth,
+                         json={"act": "clean", "verb": "decide", "max_params_b": 9})
+    assert stated.status_code == 202 and stated.json()["model"] == "qwen3.5-9b", (
+        "a stated verb chooses; the act only labels"
+    )
+    client.delete(f"/v1/queue/sessions/{stated.json()['session_id']}", headers=auth)
     mixed = client.post("/v1/queue/sessions", headers=auth,
                         json={"act": "generate", "model": "qwen3.5-4b", "max_params_b": 4})
     assert mixed.json()["error"]["code"] == "model_with_ceiling"

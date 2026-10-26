@@ -997,6 +997,7 @@ export class CrucibleClient {
     const act = requireText(given.act, 'act');
     const payload: Record<string, unknown> = { act };
     if (given.model !== undefined) payload['model'] = requireText(given.model, 'model');
+    if (given.verb !== undefined) payload['verb'] = requireText(given.verb, 'verb');
     if (given.maxParamsB !== undefined) payload['max_params_b'] = requireCeiling(given.maxParamsB);
     if (given.idleS !== undefined) payload['idle_s'] = requireSeconds(given.idleS, 'idleS', '300 s');
     if (given.maxWaitS !== undefined) {

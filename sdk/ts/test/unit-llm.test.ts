@@ -961,31 +961,31 @@ test('an empty act is refused here rather than sent as a header saying nothing',
   );
 });
 
-test('an act this server does not know is the SERVER\'s refusal, not a second vocabulary', async () => {
-  // The client keeps no copy of the capability classes: the server answers
-  // 400 `unknown_act` listing them, before the completion runs, and that
-  // sentence is what reaches the caller.
+test('a malformed act is the SERVER\'s refusal, not a second rule', async () => {
+  // The client keeps no copy of the act rule: the server answers 400
+  // `invalid_act` before the completion runs, and that sentence is what
+  // reaches the caller.
   handle = (_request, response) =>
     json(response, 400, {
       error: {
-        code: 'unknown_act',
-        message: "'narrate' is not an act this server knows.",
-        details: { act: 'narrate', known: ['clean', 'translate'] },
+        code: 'invalid_act',
+        message: "'Narrate' is not an act: the act header is the label this work is shown under",
+        details: { act: 'Narrate', pattern: '[a-z][a-z0-9-]{0,31}' },
       },
     });
   await assert.rejects(
     client().chat({
       model: 'qwen3.5-9b',
       messages: [{ role: 'user', content: 'hi' }],
-      act: 'narrate',
+      act: 'Narrate',
     }),
     (error: unknown) => {
       assert.ok(error instanceof CrucibleRefused, `got ${String(error)}`);
-      assert.equal(error.code, 'unknown_act');
+      assert.equal(error.code, 'invalid_act');
       return true;
     },
   );
-  assert.equal(lastHeaders['x-crucible-act'], 'narrate');
+  assert.equal(lastHeaders['x-crucible-act'], 'Narrate');
 });
 
 // -------------------------------------------------------------- provenance

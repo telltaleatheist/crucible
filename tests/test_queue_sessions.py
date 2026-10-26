@@ -375,8 +375,8 @@ def test_a_session_asking_for_a_model_that_does_not_exist_is_refused(
     )
     assert upstream.status_code == 409
     assert upstream.json()["error"]["code"] == "upstream_never_resident"
-    bad_act = client.post("/v1/queue/sessions", json={"act": "sorcery"}, headers=auth)
-    assert bad_act.status_code == 400 and bad_act.json()["error"]["code"] == "unknown_act"
+    bad_act = client.post("/v1/queue/sessions", json={"act": "Sorcery!"}, headers=auth)
+    assert bad_act.status_code == 400 and bad_act.json()["error"]["code"] == "invalid_act"
     for idle in (5, 86_401):
         out = client.post("/v1/queue/sessions", json={"act": "analysis", "idle_s": idle},
                           headers=auth)

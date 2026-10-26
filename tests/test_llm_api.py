@@ -1707,7 +1707,7 @@ def test_a_body_that_is_not_json_is_refused(
     assert response.json()["error"]["code"] == "invalid_request"
 
 
-def test_an_unknown_act_is_refused_BEFORE_the_work_rather_than_mislabelled(
+def test_a_malformed_act_is_refused_BEFORE_the_work_rather_than_shown(
     llm_client: TestClient,
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
@@ -1716,44 +1716,33 @@ def test_an_unknown_act_is_refused_BEFORE_the_work_rather_than_mislabelled(
 ) -> None:
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
-    response = llm_client.post(
-        "/v1/openai/chat/completions",
-        headers={**auth, "X-Crucible-Act": "translat"},
-        json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
-    )
-    assert response.status_code == 400, response.text
-    error = response.json()["error"]
-    assert error["code"] == "unknown_act"
-    assert "'translat'" in error["message"]
-    assert "simplify" in error["message"] and "translate" in error["message"]
+    for bad in ("Translate", "two words", "x" * 33, "-lead"):
+        response = llm_client.post(
+            "/v1/openai/chat/completions",
+            headers={**auth, "X-Crucible-Act": bad},
+            json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert response.status_code == 400, (bad, response.text)
+        assert response.json()["error"]["code"] == "invalid_act", bad
 
 
-def test_generate_is_an_act_and_a_near_miss_is_still_refused(
+def test_an_act_is_the_app_s_own_label_and_is_shown_as_sent(
     llm_client: TestClient,
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
     idle_card: None,
     engines: list[FakeEngine],
 ) -> None:
+    # Owen, 2026-10-25: the apps own their tasks; Crucible keeps no list of them.
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
-    refused = llm_client.post(
-        "/v1/openai/chat/completions",
-        headers={**auth, "X-Crucible-Act": "generat"},
-        json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
-    )
-    assert refused.status_code == 400, refused.text
-    error = refused.json()["error"]
-    assert error["code"] == "unknown_act"
-    assert "'generat'" in error["message"]
-    assert "generate" in error["details"]["known"]
-
-    accepted = llm_client.post(
-        "/v1/openai/chat/completions",
-        headers={**auth, "X-Crucible-Act": "generate"},
-        json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
-    )
-    assert accepted.status_code == 200, accepted.text
+    for act in ("clean", "translate", "generate", "pronunciation-guide"):
+        accepted = llm_client.post(
+            "/v1/openai/chat/completions",
+            headers={**auth, "X-Crucible-Act": act},
+            json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert accepted.status_code == 200, (act, accepted.text)
 
 
 def test_a_chat_with_no_act_header_records_null_rather_than_a_guess(

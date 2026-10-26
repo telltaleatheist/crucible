@@ -394,16 +394,26 @@ export interface QueueSessionEnd {
 
 /** Options for {@link CrucibleClient.session}. */
 export interface SessionOptions {
-  /** The capability class the run is for, as `X-Crucible-Act` names it. Required. */
+  /**
+   * Your label for the run, shown on the bench as `X-Crucible-Act` is: one lowercase word of
+   * letters, digits and hyphens, at most 32 (2.0.32+; before, it had to name a capability class).
+   * Anything else is `invalid_act`. Required.
+   */
   readonly act: string;
   /** A model to have resident when the session opens; the server loads it for the session. */
   readonly model?: string;
   /**
-   * In place of `model`: open with the model this server registered for `act`, capped at this many
-   * billions of parameters, as {@link ChatOptions.maxParamsB} caps a chat's; the session's
-   * {@link CrucibleSession.model} names the model chosen. Refused `verb_not_sized` for an `act`
-   * with no size goal, `model_with_ceiling` beside a `model`, `nothing_fits_ceiling` when nothing
-   * fits.
+   * Which verb's model the session opens with when it names no `model`, as {@link ChatOptions}'s
+   * verb does (2.0.32+): `generate` or `decide`, capped by `maxParamsB`. Absent: the `act` when it
+   * names a sized verb, else `generate` when `maxParamsB` is given, else no particular model.
+   * Refused `unknown_verb`, or `verb_not_sized` for a verb with no size goal.
+   */
+  readonly verb?: string;
+  /**
+   * In place of `model`: open with the model this server registered for `verb`, capped at this
+   * many billions of parameters, as {@link ChatOptions.maxParamsB} caps a chat's; the session's
+   * {@link CrucibleSession.model} names the model chosen. Refused `model_with_ceiling` beside a
+   * `model`, `nothing_fits_ceiling` when nothing fits.
    */
   readonly maxParamsB?: number;
   /**

@@ -566,13 +566,13 @@ def test_more_options_than_the_engine_s_cap_is_decide_not_served(
     assert engine.requests == []
 
 
-def test_an_unknown_act_is_refused_before_the_work(
+def test_a_malformed_act_is_refused_before_the_work(
     llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     engine = loaded(probs_for=yes_mostly)
-    response = _decide(llm_client, auth, EXAMPLE, **{"X-Crucible-Act": "analysys"})
+    response = _decide(llm_client, auth, EXAMPLE, **{"X-Crucible-Act": "Analysis!"})
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == "unknown_act"
+    assert response.json()["error"]["code"] == "invalid_act"
     assert engine.requests == []
 
 

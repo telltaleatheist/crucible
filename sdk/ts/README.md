@@ -510,9 +510,10 @@ client invents nothing.
 `GET /v1/activity` can only name what it is if you say: `act: 'translate'` is sent as
 `X-Crucible-Act` and recorded on the in-flight chat row. Omit it and no header is sent,
 which the server records as `null` — "it did not say" — because a default would put a name
-nobody chose on somebody's bench. The vocabulary is the server's (the capability classes
-`GET /v1/capability` answers with); a name it does not know comes back as its own
-`unknown_act`, listing them, before the completion runs.
+nobody chose on somebody's bench. The word is yours (2.0.32+): one lowercase word of
+letters, digits and hyphens, at most 32, shown as sent. A malformed one comes back as
+`invalid_act` before the completion runs. It labels the work and chooses nothing; a chat
+chooses its model by `model`, or by `verb` and `maxParamsB`.
 
 `chat()` returns `ChatResponse {id, model, content, toolCalls, finishReason, usage:
 {promptTokens, completionTokens, totalTokens}}` — OpenAI's `chat.completion` read down to

@@ -52,6 +52,18 @@ def _refuse_if_not_theirs(session: QueueSession, request: Request) -> None:
     )
 
 
+
+def _session_verb(verb: str | None, act: str, max_params_b: float | None) -> str | None:
+    """The verb whose model a session opens with, or None: it opens with the `model` it
+    named, or none in particular. A stated `verb` is that verb. Without one, a ceiling
+    caps the act's model when the act is a sized verb (every session before 2.0.32 sent
+    its verb as its act) and `generate`'s otherwise, as a chat's ceiling does."""
+    if verb is not None:
+        return verb.strip()
+    if max_params_b is None:
+        return None
+    return act if act in verbmodel.SIZED_VERBS else "generate"
+
 def register(routers: Routers, ctx: AppContext) -> None:
     private = routers.private
 
@@ -61,16 +73,18 @@ def register(routers: Routers, ctx: AppContext) -> None:
         in the line like any queued item and answers at once with a ticket; follow
         `GET /v1/queue/sessions/{id}/events` for `opened`. While it is open, nothing
         from any other client runs. `max_params_b` in place of `model` opens with the
-        model this server registered for `act`, capped at that size; the ticket's
-        `model` names the one chosen.
+        model this server registered for `verb` (default: the `act` when it names a
+        sized verb, else `generate`), capped at that size; the ticket's `model` names
+        the one chosen. `act` is your own label for the run.
         """
         act = require_act_name(body.act.strip(), "a session's `act`")
         model = body.model
-        if body.max_params_b is not None:
-            verbmodel.refuse_unsized_verb(act, "this session's `act`")
+        verb = _session_verb(body.verb, act, body.max_params_b)
+        if verb is not None:
+            verbmodel.refuse_unsized_verb(verb, "this session's `verb`")
             resident = ctx.residency.resident_model
             model = verbmodel.resolve(
-                act, ctx.config, ctx.backend,
+                verb, ctx.config, ctx.backend,
                 model=body.model, form=None, max_params_b=body.max_params_b,
                 resident=None if resident is None else resident.model_id,
             ).model
