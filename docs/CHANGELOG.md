@@ -7,7 +7,10 @@ notes.
 
 ## Unreleased
 
+## 2.0.32 — 2026-10-25
+
 - An act is the app's own label (`X-Crucible-Act` on chat and decide, `act` on `POST /v1/queue/sessions`): any lowercase word of letters, digits and hyphens, at most 32, shown on the bench as sent. It no longer has to name a capability class, and a malformed one is refused `invalid_act` (was `unknown_act`, against the class list). This comes first because the text classes are retiring to the apps (Owen, 2026-10-25), and BookForge and Foundry keep naming their acts `clean`, `translate`, `simplify` and `analysis`. A session's model choice moves to its own `verb` field, as a chat's: the verb's registered model, capped by `max_params_b`. Without one, the act still chooses when it names a sized verb, and `generate` does when a ceiling is sent beside any other act. The SDK's `session()` and the CLI's `api session open` take `verb`.
+
 ## 2.0.31 — 2026-10-25
 
 - `GET /v1/openai/models` names every model each configured upstream serves, not only the ones a class route names, so an app can offer Claude per job from one GET (bookforge pc 1, 2026-10-25). Each row is `<upstream>/<id>` with `upstream`, `routed_for` (empty when no route names it), `listed` and `facts`: the `tool_choice` values Crucible sends on, and for an `anthropic/<id>` model its rule row (`reasoning_efforts`, `sampling`, `structured_output`), or null where Crucible has no rule and forwards the chat as sent. A new top-level `upstreams` says, per configured upstream, when its list was read and why it could not be read again. Each vendor's list is kept for 10 minutes, and a key or URL change reads it again at once. A vendor that does not answer is weather: its last list is served marked `stale`, with the error, and one that never answered lists only what a route names. The TypeScript SDK reads it as `upstreamModels()`. No test reaches a real vendor: both bases point at a closed port unless a test points them at the fake upstream.
