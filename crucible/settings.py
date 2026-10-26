@@ -446,9 +446,22 @@ def _resolve_routes(config: Config, resolved: Resolved, value: Any) -> None:
         _resolve_route(resolved, name, table[name])
 
 
+def _refuse_retired(name: str, field: str, code: str) -> None:
+    if name not in classnames.RETIRED_CLASSES:
+        return
+    raise ApiError(
+        400,
+        code,
+        f"{classnames.retired_class_words(name)}. This server has no {name} setting "
+        "any more",
+        {"field": field, "capability": name, "retired": True},
+    )
+
+
 def _require_routable(name: str, field: str) -> None:
     if name in classnames.ROUTABLE_CLASSES:
         return
+    _refuse_retired(name, field, "route_not_routable")
     raise ApiError(
         400,
         "route_not_routable",
@@ -534,6 +547,7 @@ def _resolve_local_models(config: Config, resolved: Resolved, value: Any) -> Non
 def _require_selectable(name: str, field: str) -> None:
     if name in classnames.SELECTABLE_CLASSES:
         return
+    _refuse_retired(name, field, "local_model_not_selectable")
     raise ApiError(
         400,
         "local_model_not_selectable",

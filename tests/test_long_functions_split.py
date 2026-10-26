@@ -168,11 +168,11 @@ def test_each_settings_section_has_one_resolver_in_patch_order():
 def test_the_route_resolver_refuses_a_value_that_names_no_upstream():
     resolved = SimpleNamespace(routes={}, changed=[])
     with pytest.raises(ApiError) as caught:
-        settings._resolve_route(resolved, "clean", "nowhere/model")
+        settings._resolve_route(resolved, "generate", "nowhere/model")
     assert caught.value.code == "route_bad_model"
-    settings._resolve_route(resolved, "clean", "openai/gpt")
-    assert resolved.routes == {"clean": "openai/gpt"}
-    assert resolved.changed == ["routes.clean = openai/gpt"]
+    settings._resolve_route(resolved, "generate", "openai/gpt")
+    assert resolved.routes == {"generate": "openai/gpt"}
+    assert resolved.changed == ["routes.generate = openai/gpt"]
 
 
 def test_env_drift_names_every_wrong_pin_and_reference():

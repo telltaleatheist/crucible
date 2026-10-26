@@ -240,10 +240,10 @@ def test_the_five_python_job_types_answer_one_sentence(
 def test_the_llm_classes_and_pages_answer_from_the_gguf_table() -> None:
     verdicts = {
         name: _decide(name, WINDOWS_CARD, WINDOWS_RESERVE, "nvidia")
-        for name in ("clean", "translate", "simplify", "analysis", "pages")
+        for name in ("decide", "generate", "pages")
     }
-    assert verdicts["clean"].selected == "qwen3.5-9b"
-    assert verdicts["translate"].selected == "qwen3.8-27b-4bit"
+    assert verdicts["decide"].selected == "qwen3.5-9b"
+    assert verdicts["generate"].selected == "qwen3.8-27b-4bit"
     assert verdicts["pages"].selected == "dots-ocr"
     for name, verdict in verdicts.items():
         assert verdict.enabled is True, name
@@ -252,7 +252,7 @@ def test_the_llm_classes_and_pages_answer_from_the_gguf_table() -> None:
 
 
 def test_a_windows_box_with_no_card_still_serves_and_says_it_is_slow() -> None:
-    verdict = _decide("clean", LAPTOP_RAM, WINDOWS_RESERVE, "cpu")
+    verdict = _decide("decide", LAPTOP_RAM, WINDOWS_RESERVE, "cpu")
     assert verdict.enabled is True
     assert verdict.selected == "qwen3.5-9b"
     assert capabilitywords.CPU_BUILD_REASON in verdict.reason
@@ -276,22 +276,22 @@ def test_the_whole_record_reads_as_three_kinds_of_answer() -> None:
     )
     by_name = {d.capability: d for d in decisions}
     assert by_name["echo"].enabled is True
-    assert by_name["clean"].enabled is True
+    assert by_name["generate"].enabled is True
     assert by_name["pages"].enabled is True
     assert by_name["tts"].enabled is False
     assert by_name["tts"].reason == capabilitywords.NEEDS_WSL_REASON
 
 
-def test_a_small_card_translates_on_the_largest_that_fits_and_names_its_goal(
+def test_a_small_card_chats_on_the_largest_that_fits_and_names_its_goal(
 ) -> None:
-    verdict = _decide("translate", 12 * GIB, WINDOWS_RESERVE, "nvidia")
+    verdict = _decide("generate", 12 * GIB, WINDOWS_RESERVE, "nvidia")
     assert verdict.enabled is True
     assert verdict.selected == "qwen3.5-4b", "the Q4 27B and the Q8 9B need more than 9 GiB"
     assert "(goal 27B; the largest that fits this card)" in verdict.summary
 
 
-def test_a_card_too_small_for_the_0_8b_turns_translate_off_with_the_number() -> None:
-    verdict = _decide("translate", 4 * GIB, WINDOWS_RESERVE, "nvidia")
+def test_a_card_too_small_for_the_0_8b_turns_generate_off_with_the_number() -> None:
+    verdict = _decide("generate", 4 * GIB, WINDOWS_RESERVE, "nvidia")
     assert verdict.enabled is False
     assert verdict.shortfall_bytes > 0
     assert "short by" in verdict.reason

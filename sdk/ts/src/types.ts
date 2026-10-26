@@ -1138,10 +1138,12 @@ export interface ChatOptions {
    */
   readonly model?: string;
   /**
-   * In place of `model`: the verb whose model this server registered answers, one of `generate`
-   * (the server's default: open-ended chat), `clean`, `translate`, `simplify`, `analysis`. Beside a
-   * `model`, the model is held to that verb's lineup and fit (`model_not_for_verb`,
-   * `model_does_not_fit`). Sent as `verb`; refused `unknown_verb` or `verb_not_for_chat`.
+   * In place of `model`: the verb whose model this server registered answers: `generate` (the
+   * server's default, and the one chat verb: open-ended chat). Beside a `model`, the model is held
+   * to that verb's lineup and fit (`model_not_for_verb`, `model_does_not_fit`). Sent as `verb`;
+   * refused `unknown_verb` or `verb_not_for_chat`. `clean`, `translate`, `simplify` and `analysis`
+   * were retired to the apps on 2026-10-25 and are refused `unknown_verb` saying so; an act
+   * label (`act`) may still be any of them.
    */
   readonly verb?: string;
   /**
@@ -1667,8 +1669,8 @@ export interface ModelRerankInfo {
  */
 export interface ResolveOptions {
   /**
-   * The verb whose door is previewed: `generate` (the default: a chat), `clean`, `translate`,
-   * `simplify`, `analysis` (a chat naming that verb), `decide`, `embed`, `rerank` or `image`.
+   * The verb whose door is previewed: `generate` (the default: a chat), `decide`, `embed`,
+   * `rerank` or `image`.
    */
   readonly verb?: string;
   readonly model?: string;
@@ -1929,7 +1931,7 @@ export interface LoadModelOptions {
   readonly context?: number;
   /**
    * With no model: load the model this server registered for this verb (`params.verb`), one with a
-   * size goal (generate, clean, translate, simplify, analysis, decide, embed, rerank). The job's
+   * size goal (generate, decide, embed, rerank). The job's
    * `model` names the one chosen.
    */
   readonly verb?: string;
@@ -2101,7 +2103,7 @@ export interface AcceleratorState {
 
 /** One capability class's verdict on this host; `enabled: false` is an answer, not an error. */
 export interface CapabilityRow {
-  /** The class name a client asks by: `clean`, `translate`, `tts`, `asr`, … */
+  /** The class name a client asks by: `generate`, `decide`, `tts`, `asr`, … */
   readonly capability: string;
   readonly enabled: boolean;
   /** The candidate that won, or `''` when none did. */
@@ -3030,7 +3032,7 @@ export interface UnmetNeed {
   readonly class: string;
   /** The server's OWN sentence, verbatim: the capability row's, the fit plan's, or the refusal's. */
   readonly reason: string;
-  /** The module step it came from: `resolve clean`, `install video`, `pull model …`, `enable denoise`. */
+  /** The module step it came from: `resolve generate`, `install video`, `pull model …`, `enable denoise`. */
   readonly entry: string;
 }
 

@@ -77,7 +77,7 @@ const RECORD = {
       context_ceilings: null,
     },
     {
-      capability: 'clean',
+      capability: 'decide',
       enabled: true,
       selected: 'qwen3.5-9b',
       reason: 'qwen3.5-9b fits: it needs 19.0 GiB and there is 21.0 GiB available',
@@ -87,7 +87,7 @@ const RECORD = {
       context_ceilings: null,
     },
     {
-      capability: 'translate',
+      capability: 'generate',
       enabled: true,
       selected: 'qwen3.8-27b-4bit',
       reason: 'qwen3.8-27b-4bit fits: it needs 20.1 GiB and there is 21.0 GiB available',
@@ -123,13 +123,13 @@ test('capability() reads the record, and the rows arrive under classes', async (
   assert.equal(record.desktopAllowanceBytes, 3 * GIB);
   assert.deepEqual(
     record.classes.map((row) => row.capability),
-    ['echo', 'clean', 'translate', 'tts'],
+    ['echo', 'decide', 'generate', 'tts'],
   );
-  const translate = record.classes[2]!;
-  assert.equal(translate.enabled, true);
-  assert.equal(translate.selected, 'qwen3.8-27b-4bit');
-  assert.equal(translate.shortfallBytes, 0);
-  assert.match(String(translate.reason), /fits/);
+  const generate = record.classes[2]!;
+  assert.equal(generate.enabled, true);
+  assert.equal(generate.selected, 'qwen3.8-27b-4bit');
+  assert.equal(generate.shortfallBytes, 0);
+  assert.match(String(generate.reason), /fits/);
 });
 
 test('a disabled class is an answer with a number, not an error', async () => {

@@ -17,9 +17,8 @@ from .conftest import FAKE_BACKEND
 
 GIB = 1024 ** 3
 
-TEXT_CLASSES = ("clean", "translate", "simplify", "analysis")
 # rerank reads any decide model too, with Crucible's general template (VERB-SIZING section 9).
-TEXT_VERBS = ("clean", "translate", "simplify", "analysis", "generate", "decide", "rerank")
+TEXT_VERBS = ("generate", "decide", "rerank")
 SMALL_TIERS = ("qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b")
 # CUDA also carries the 8-bit 4B, for an 8 GiB card (Victoria's 3070).
 # The catalog lists by size, so the 16-bit 2B comes before it; the pick still takes the
@@ -62,22 +61,17 @@ def test_every_text_verb_has_its_goal_and_no_floor() -> None:
     automatic pick instead."""
     goals = {name: BY_NAME[name].goal for name in TEXT_VERBS}
     assert {name: goal.params_b for name, goal in goals.items()} == {
-        "clean": 9, "translate": 27, "simplify": 27, "analysis": 27, "generate": 27,
-        "decide": 9, "rerank": 8,
+        "generate": 27, "decide": 9, "rerank": 8,
     }
-    for name in ("translate", "simplify", "analysis", "generate"):
-        assert goals[name] is CHAT_GOAL, name
-    assert not hasattr(BY_NAME["clean"], "min_params_b")
+    assert goals["generate"] is CHAT_GOAL
+    assert not hasattr(BY_NAME["generate"], "min_params_b")
 
 
 LINEUPS = {
-    ("clean", CUDA_LINUX): ["qwen3.5-9b", *CUDA_SMALL_TIERS],
-    ("clean", MLX_DARWIN): ["qwen3.5-9b", *SMALL_TIERS],
-    ("clean", LLAMA_WINDOWS): ["qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b"],
-    ("translate", CUDA_LINUX): ["qwen3.8-27b-4bit", "qwen3.5-9b", *CUDA_SMALL_TIERS],
-    ("translate", MLX_DARWIN): ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b",
+    ("generate", CUDA_LINUX): ["qwen3.8-27b-4bit", "qwen3.5-9b", *CUDA_SMALL_TIERS],
+    ("generate", MLX_DARWIN): ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b",
                                 *SMALL_TIERS],
-    ("translate", LLAMA_WINDOWS): ["qwen3.8-27b-4bit", "qwen3.5-9b", *SMALL_TIERS],
+    ("generate", LLAMA_WINDOWS): ["qwen3.8-27b-4bit", "qwen3.5-9b", *SMALL_TIERS],
 }
 
 
@@ -85,9 +79,7 @@ LINEUPS = {
 def test_the_text_classes_run_down_to_the_0_8b(backend: str) -> None:
     """Rule 1: every verb's lineup reaches the smallest text model, so a small card
     gets a smaller model, never "off"."""
-    assert ids("clean", backend) == LINEUPS[("clean", backend)]
-    for name in ("translate", "simplify", "analysis", "generate"):
-        assert ids(name, backend) == LINEUPS[("translate", backend)], name
+    assert ids("generate", backend) == LINEUPS[("generate", backend)]
 
 
 @pytest.mark.parametrize("backend", [CUDA_LINUX, MLX_DARWIN, LLAMA_WINDOWS])
@@ -114,8 +106,7 @@ def test_the_nine_b_and_the_27bs_keep_their_classes_and_gain_decide() -> None:
     for model_id in ("qwen3.5-9b", "qwen3.8-27b-4bit", "qwen3.8-27b-8bit"):
         classes = classes_for_model(model_id)
         assert "decide" in classes
-        assert {"translate", "simplify", "analysis"} <= set(classes)
-    assert "clean" in classes_for_model("qwen3.5-9b")
+        assert "generate" in classes
 
 
 def test_the_3090ti_decides_on_the_9b_it_was_measured_on() -> None:

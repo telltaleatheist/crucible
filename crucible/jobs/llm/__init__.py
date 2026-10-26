@@ -195,8 +195,8 @@ class LoadParams(BaseModel):
         default=None,
         min_length=1,
         description="In place of `model`: load the model this server registered for this "
-        "verb (one with a size goal: generate, clean, translate, simplify, analysis, "
-        "decide, embed, rerank; GET /v1/capability), capped by `max_params_b`; the job's "
+        "verb (one with a size goal: generate, decide, embed, rerank; GET "
+        "/v1/capability), capped by `max_params_b`; the job's "
         "`model` names the one chosen. Beside a `model`, that model is held to the "
         "verb's rules (`model_not_for_verb`, `model_does_not_fit`). Unknown: "
         "`unknown_verb`; a verb with no goal: `verb_not_sized`.",

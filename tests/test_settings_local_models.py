@@ -15,7 +15,7 @@ def settings_client(make_client: Callable[..., TestClient]):
     with make_client(enable_llm=True, capability=decided()) as instance:
         yield instance
 
-# translate's lineup on cuda-linux, down to the 0.8B since the floor went (docs/VERB-SIZING.md)
+# generate's lineup on cuda-linux, down to the 0.8B since the floor went (docs/VERB-SIZING.md)
 PC_TEXT_LINEUP = (
     "qwen3.8-27b-4bit", "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-4b-8bit",
     "qwen3.5-0.8b",
@@ -30,12 +30,12 @@ def document(client: TestClient, auth: dict[str, str]) -> dict[str, Any]:
 
 def test_the_document_offers_every_selectable_class_and_null_for_automatic(settings_client, auth):
     body = document(settings_client, auth)
-    assert body["local_models"]["translate"] is None
+    assert body["local_models"]["generate"] is None
     assert body["local_models"]["tts"] is None
     assert "echo" not in body["local_models"]
     assert "echo" not in body["local_model_choices"]
 
-    offered = body["local_model_choices"]["translate"]
+    offered = body["local_model_choices"]["generate"]
     assert [row["id"] for row in offered] == list(PC_TEXT_LINEUP)
     assert [row["fits"] for row in offered] == [True] * len(PC_TEXT_LINEUP)
     assert offered[0]["memory_bytes_estimate"] > offered[1]["memory_bytes_estimate"]
@@ -66,43 +66,43 @@ def test_a_choice_is_kept_written_and_decided_on(settings_client, auth, home):
 
 def test_a_model_that_is_not_installed_may_still_be_chosen(settings_client, auth, home):
     client = settings_client
-    offered = document(client, auth)["local_model_choices"]["translate"]
+    offered = document(client, auth)["local_model_choices"]["generate"]
     fitting = next(row for row in offered if row["fits"])
     assert fitting["installed"] is False, "this fixture has no weights on disk"
 
-    response = put(client, auth, {"local_models": {"translate": fitting["id"]}})
+    response = put(client, auth, {"local_models": {"generate": fitting["id"]}})
     assert response.status_code == 200
-    assert load_config(home).local_model("translate") == fitting["id"]
+    assert load_config(home).local_model("generate") == fitting["id"]
 
 
 def test_a_choice_that_does_not_fit_is_refused_with_the_arithmetic(make_client, auth, home):
     with make_client(enable_llm=True, capability=decided(total=16 * 1024 ** 3)) as client:
-        response = put(client, auth, {"local_models": {"translate": "qwen3.8-27b-4bit"}})
+        response = put(client, auth, {"local_models": {"generate": "qwen3.8-27b-4bit"}})
         assert response.status_code == 409
         error = response.json()["error"]
         assert error["code"] == "local_model_does_not_fit"
         details = error["details"]
-        assert details["field"] == "local_models.translate"
-        assert details["capability"] == "translate"
+        assert details["field"] == "local_models.generate"
+        assert details["capability"] == "generate"
         assert details["model"] == "qwen3.8-27b-4bit"
         assert details["shortfall_bytes"] == (
             details["memory_bytes_estimate"] - details["available_bytes"]
         )
         assert details["shortfall_bytes"] > 0
         assert "20.1 GiB" in error["message"] and "13.0 GiB" in error["message"]
-        assert load_config(home).local_model("translate") is None
-        assert document(client, auth)["local_models"]["translate"] is None
+        assert load_config(home).local_model("generate") is None
+        assert document(client, auth)["local_models"]["generate"] is None
 
 
 def test_the_8bit_27b_is_not_a_choice_on_cuda_linux(settings_client, auth, home):
     client = settings_client
-    response = put(client, auth, {"local_models": {"translate": "qwen3.8-27b-8bit"}})
+    response = put(client, auth, {"local_models": {"generate": "qwen3.8-27b-8bit"}})
     assert response.status_code == 400
     error = response.json()["error"]
     assert error["code"] == "local_model_unknown"
     assert error["details"]["model"] == "qwen3.8-27b-8bit"
     assert error["details"]["choices"] == list(PC_TEXT_LINEUP)
-    assert load_config(home).local_model("translate") is None
+    assert load_config(home).local_model("generate") is None
 
 
 def test_null_restores_the_automatic_decision(settings_client, auth, home):
@@ -130,19 +130,19 @@ def test_a_class_with_nothing_to_choose_between_is_refused_by_name(settings_clie
 
 
 def test_an_unknown_model_is_refused_and_names_what_there_was(settings_client, auth):
-    response = put(settings_client, auth, {"local_models": {"translate": "gpt-9"}})
+    response = put(settings_client, auth, {"local_models": {"generate": "gpt-9"}})
     assert response.status_code == 400
     error = response.json()["error"]
     assert error["code"] == "local_model_unknown"
     assert error["details"]["choices"] == list(PC_TEXT_LINEUP)
-    assert error["details"]["field"] == "local_models.translate"
+    assert error["details"]["field"] == "local_models.generate"
 
 
 def test_a_selection_is_measured_against_the_allowance_in_the_same_patch(settings_client, auth, home):
     client = settings_client
     response = put(client, auth, {
         "desktop_allowance_bytes": 20 * 1024 ** 3,
-        "local_models": {"translate": "qwen3.8-27b-4bit"},
+        "local_models": {"generate": "qwen3.8-27b-4bit"},
     })
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "local_model_does_not_fit"

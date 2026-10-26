@@ -7,7 +7,7 @@ context_default = 8192
 trained_context = 262144
 modalities = ["text", "image"]
 display = "Qwen 3.5 · 0.8B"
-description = "The smallest text model: fast, and able to read an image on a PC or Windows card. Every text verb reaches down to it, so a card too small for anything larger still decides, cleans, translates and generates, at the quality a 0.8B gives."
+description = "The smallest text model: fast, and able to read an image on a PC or Windows card. Every text verb reaches down to it, so a card too small for anything larger still chats and decides, at the quality a 0.8B gives."
 
 [defaults]
 thinking = false

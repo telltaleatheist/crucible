@@ -802,8 +802,9 @@ and structured output (`mlx-lm-structured-output` on `server.py`,
   - mlx: peak 20.38 GB at 12,198 tokens. RSS reads lower because weights are
     memory-mapped. At batch 16 the total is 32.14 GiB of 51.84.
   - llama-windows: Q8_0, because cleanup is where a wrong word is silently wrong.
-  - The 9B is the goal for `decide` and `clean` (docs/VERB-SIZING.md). It was the
-    local floor for translate and simplify until 2026-10-09; that floor is gone.
+  - The 9B is the goal for `decide` (docs/VERB-SIZING.md); it was `clean`'s too until
+    that class was retired to the apps (2026-10-25). It was the local floor for
+    translate and simplify until 2026-10-09; that floor is gone.
 - **qwen3.8-27b-4bit** (the PC's 27B):
   - cuda-linux uses `avyukth/...-AWQ-INT4`, one 18.57 GB file. cyankiwi's build
     (21.02 GB) does not fit with KV.

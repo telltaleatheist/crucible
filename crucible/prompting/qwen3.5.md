@@ -1,6 +1,6 @@
 # Qwen 3.5 (0.8B, 2B, 4B, 4B 8-bit, 9B, 9B with vision): how to prompt it
 
-Crucible ids `qwen3.5-0.8b`, `qwen3.5-2b`, `qwen3.5-4b`, `qwen3.5-4b-8bit`, `qwen3.5-9b` and `qwen3.5-9b-vl`. They come from `Qwen/Qwen3.5-0.8B` @ `2fc06364`, `Qwen/Qwen3.5-2B` @ `15852e8c`, `Qwen/Qwen3.5-4B` @ `851bf6e8` and `Qwen/Qwen3.5-9B` @ `c2022362`. The 4B 8-bit is `owenmorgan/qwen3.5-4b-w8a16` @ `84a25838`, and the 9B with vision shares the 9B's weights. The mlx-darwin and llama-windows mirrors are listed in [S8] and [S9]. They serve the `llm` chat door and the text verbs `generate`, `clean`, `translate`, `simplify`, `analysis` and `decide`. `-9b-vl` and the cuda-linux and llama-windows blocks of the 0.8B, 2B and 4B also read images.
+Crucible ids `qwen3.5-0.8b`, `qwen3.5-2b`, `qwen3.5-4b`, `qwen3.5-4b-8bit`, `qwen3.5-9b` and `qwen3.5-9b-vl`. They come from `Qwen/Qwen3.5-0.8B` @ `2fc06364`, `Qwen/Qwen3.5-2B` @ `15852e8c`, `Qwen/Qwen3.5-4B` @ `851bf6e8` and `Qwen/Qwen3.5-9B` @ `c2022362`. The 4B 8-bit is `owenmorgan/qwen3.5-4b-w8a16` @ `84a25838`, and the 9B with vision shares the 9B's weights. The mlx-darwin and llama-windows mirrors are listed in [S8] and [S9]. They serve the `llm` chat door and the text verbs `generate` and `decide` (`clean`, `translate`, `simplify` and `analysis` were retired to the apps on 2026-10-25). `-9b-vl` and the cuda-linux and llama-windows blocks of the 0.8B, 2B and 4B also read images.
 
 Read on 2026-10-15. The Crucible code and docs are at `5a579e7a` (2026-10-13). `qwen3.5-4b-bside` is out of scope.
 
@@ -251,7 +251,7 @@ The app's own system message is appended after that block. A `role: "tool"` resu
 
 ### `qwen3.5-9b` / `qwen3.5-9b-vl`
 - Thinks by default upstream [S1].
-- The goal model for `clean` and `decide` [C5 VERB-SIZING §7]. It is Owen's ruled cleanup model (bf16) [M5].
+- The goal model for `decide` [C5 VERB-SIZING §7]. It is Owen's ruled cleanup model (bf16) [M5].
 - Measured strengths: triage AUC 0.89–0.98 [M2]. It separates relevant from junk tags as a reranker (0.87 vs 0.50) where the dedicated reranker could not [C5 RETRIEVAL].
 - Measured weaknesses: see M1 and M3 below.
 - `-9b-vl` shares the weights. Every note here applies, plus "Vision input".

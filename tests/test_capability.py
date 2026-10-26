@@ -54,8 +54,8 @@ def _decide(
     )
 
 
-def test_the_3090ti_translates_which_is_what_owen_already_does() -> None:
-    verdict = _decide("translate", "cuda-linux", THREE_NINETY, CUDA_RESERVE)
+def test_the_3090ti_chats_on_the_4bit_27b_which_is_what_owen_already_does() -> None:
+    verdict = _decide("generate", "cuda-linux", THREE_NINETY, CUDA_RESERVE)
     assert verdict.enabled is True
     assert verdict.selected == "qwen3.8-27b-4bit"
     assert verdict.shortfall_bytes == 0
@@ -63,7 +63,7 @@ def test_the_3090ti_translates_which_is_what_owen_already_does() -> None:
 
 
 def test_the_mac_selects_the_8bit_27b_over_the_4bit() -> None:
-    verdict = _decide("translate", "mlx-darwin", STUDIO, MAC_RESERVE)
+    verdict = _decide("generate", "mlx-darwin", STUDIO, MAC_RESERVE)
     assert verdict.enabled is True
     assert verdict.selected == "qwen3.8-27b-8bit", (
         "the Mac must take the 8-bit: it is the best candidate that fits, and "
@@ -75,12 +75,12 @@ def test_the_mac_selects_the_8bit_27b_over_the_4bit() -> None:
 
 
 def test_best_precision_first_not_smallest_that_fits() -> None:
-    verdict = _decide("translate", "mlx-darwin", 200 * GIB, MAC_RESERVE)
+    verdict = _decide("generate", "mlx-darwin", 200 * GIB, MAC_RESERVE)
     assert verdict.selected == "qwen3.8-27b-8bit", (
         "with room for both, the rule must take the better one, not the smaller"
     )
     assert verdict.fit_count == 6
-    pc = _decide("translate", "cuda-linux", 200 * GIB, CUDA_RESERVE)
+    pc = _decide("generate", "cuda-linux", 200 * GIB, CUDA_RESERVE)
     assert pc.selected == "qwen3.8-27b-4bit"
     assert pc.fit_count == 6, "the 27B, the 9B and the four small tiers (the 4B twice)"
     assert "qwen3.8-27b-8bit" not in [c.id for c in pc.candidates]
@@ -111,11 +111,11 @@ def test_higgs_is_binary_and_a_six_gig_card_loses_tts_entirely() -> None:
     )) is False
 
 
-def test_translate_is_off_only_where_even_the_0_8b_does_not_fit_and_says_so() -> None:
-    verdict = _decide("translate", "cuda-linux", SIX_GIG, CUDA_RESERVE)
+def test_generate_is_off_only_where_even_the_0_8b_does_not_fit_and_says_so() -> None:
+    verdict = _decide("generate", "cuda-linux", SIX_GIG, CUDA_RESERVE)
     assert verdict.enabled is False
     assert "the smallest of 6 qwen3.8 and qwen3.5 variants is qwen3.5-0.8b" in verdict.reason
-    assert verdict.summary.startswith("cannot translate")
+    assert verdict.summary.startswith("cannot generate text")
 
 
 def test_a_six_gig_card_keeps_llm_only_if_something_behind_it_fits() -> None:
@@ -128,15 +128,15 @@ def test_a_six_gig_card_keeps_llm_only_if_something_behind_it_fits() -> None:
         audio_low_vram=False,
     )
     by_name = {d.capability: d for d in decisions}
-    assert by_name["clean"].enabled is False
-    assert by_name["translate"].enabled is False
+    assert by_name["generate"].enabled is False
+    assert by_name["decide"].enabled is False
     assert by_name["pages"].enabled is False
     assert job_type_enabled("llm", decisions) is False
     assert job_type_enabled("asr", decisions) is True
     assert job_type_enabled("rvc", decisions) is True
 
 
-def test_llm_survives_and_translate_gets_smaller_rather_than_off() -> None:
+def test_llm_survives_and_generate_gets_smaller_rather_than_off() -> None:
     decisions = decide_all(
         "cuda-linux",
         total_bytes=24 * GIB,
@@ -147,8 +147,8 @@ def test_llm_survives_and_translate_gets_smaller_rather_than_off() -> None:
     )
     by_name = {d.capability: d for d in decisions}
     assert by_name["pages"].enabled is True
-    assert by_name["translate"].selected == "qwen3.5-4b", (
-        "16 GiB holds no 27B and no bf16 9B; translate runs on the largest that fits"
+    assert by_name["generate"].selected == "qwen3.5-4b", (
+        "16 GiB holds no 27B and no bf16 9B; generate runs on the largest that fits"
     )
     assert job_type_enabled("llm", decisions) is True
 
@@ -234,7 +234,7 @@ def test_every_job_type_has_a_capability_class() -> None:
 
 def test_an_unknown_backend_is_refused_rather_than_priced() -> None:
     with pytest.raises(ValueError, match="not a Crucible backend"):
-        _decide("clean", "cuda-windows", THREE_NINETY, CUDA_RESERVE)
+        _decide("generate", "cuda-windows", THREE_NINETY, CUDA_RESERVE)
 
 
 def _write(home: Path, **overrides: Any) -> None:
@@ -279,7 +279,7 @@ def test_the_capability_record_round_trips_through_config_toml(home: Path) -> No
     _write(home, capability=written)
     read_back = load_config(home).capability
     assert read_back == written
-    assert read_back.row("translate").selected == "qwen3.8-27b-4bit"
+    assert read_back.row("generate").selected == "qwen3.8-27b-4bit"
 
 
 def test_a_config_with_no_capability_table_reads_as_NOT_DECIDED(home: Path) -> None:
@@ -395,7 +395,7 @@ def test_the_llm_refusal_reads_every_class_behind_the_flag(home: Path) -> None:
     config = _config_with(home, rows)
     by_capability = disabled_error("llm", config)
     by_job_type = disabled_error("load-model", config)
-    for name in ("clean", "translate", "pages"):
+    for name in ("generate", "decide", "pages"):
         assert name in by_capability.message
     assert by_capability.message.split(" is disabled", 1)[1] == (
         by_job_type.message.split(" is disabled", 1)[1]
@@ -570,12 +570,10 @@ def test_the_capability_route_answers_every_class_and_its_reason(
     assert record["total_bytes"] > 0
     names = {row["capability"] for row in record["classes"]}
     assert names == {
-        "align", "analysis", "asr", "clean", "cutout", "decide", "denoise", "echo",
+        "align", "asr", "cutout", "decide", "denoise", "echo",
         "embed", "generate", "image", "music", "pages", "rerank", "rvc", "score", "select",
-        "sfx", "simplify", "song", "translate", "tts", "video",
+        "sfx", "song", "tts", "video",
     }
-    picked = {row["capability"]: row["selected"] for row in record["classes"]}
-    assert picked["translate"] == picked["simplify"] == picked["analysis"], picked
     for row in record["classes"]:
         assert row["reason"], row["capability"]
         assert isinstance(row["enabled"], bool)
@@ -610,8 +608,7 @@ def test_the_route_says_which_job_type_each_class_feeds_and_what_builds_it(
     assert len(classed) == len(set(classed))
 
     assert rows["llm"]["classes"] == [
-        "clean", "translate", "simplify", "analysis", "generate", "decide", "embed", "rerank",
-        "pages",
+        "generate", "decide", "embed", "rerank", "pages",
     ]
     assert rows["llm"]["installer"] == "llm"
     assert rows["denoise"]["installer"] == "rvc"
@@ -697,7 +694,7 @@ def test_a_routed_class_summarises_where_the_work_goes() -> None:
     from crucible.capabilityclasses import CLASSES
     from crucible.verdict import decide, routed_row
 
-    entry = next(c for c in CLASSES if c.name == "translate")
+    entry = next(c for c in CLASSES if c.name == "generate")
     verdict = decide(
         entry, "cuda-linux", total_bytes=6 * 1024**3,
         desktop_allowance_bytes=3 * 1024**3, gpu_vendor="nvidia", chosen=None,
@@ -721,7 +718,7 @@ def test_generate_is_one_routable_client_sized_class_with_the_27b_goal() -> None
     assert "40960" in entry.work.source
     assert "ContentStudio" not in entry.purpose + entry.plainly
     names = [c.name for c in CLASSES]
-    assert names.index("analysis") + 1 == names.index("generate")
+    assert names.index("echo") + 1 == names.index("generate")
     assert names.index("generate") + 1 == names.index("decide")
     assert [c.name for c in CLASSES if c.client_sized] == ["generate"]
     assert "generate" in classnames.ROUTABLE_CLASSES
@@ -786,13 +783,13 @@ def test_every_row_echoes_its_work_and_generate_its_ceilings(make_client, auth) 
     assert rows["generate"]["work"]["tokens"] == 8192
     assert rows["generate"]["work"]["concurrency"] == 1
     assert rows["generate"]["work"]["from"] == "default"
-    assert rows["translate"]["work"]["from"] == "default"
+    assert rows["decide"]["work"]["from"] == "default"
     assert rows["tts"]["work"] is None
     ceilings = {c["model"]: c for c in rows["generate"]["context_ceilings"]}
     assert ceilings["qwen3.5-9b"]["tokens"] == 65536
     assert ceilings["qwen3.5-9b"]["served_context"] == 65536
     assert ceilings["qwen3.8-27b-4bit"]["tokens"] == 32768
-    assert rows["translate"]["context_ceilings"] is None
+    assert rows["decide"]["context_ceilings"] is None
     assert rows["tts"]["context_ceilings"] is None
 
 
@@ -898,7 +895,7 @@ def test_a_host_that_cannot_hold_the_weights_is_not_a_length_refusal() -> None:
 @pytest.mark.parametrize(
     ("query", "code"),
     [
-        ("class=translate&context_tokens=4096", "capability_not_client_sized"),
+        ("class=decide&context_tokens=4096", "capability_not_client_sized"),
         ("class=tts&concurrency=2", "capability_not_client_sized"),
         ("context_tokens=4096", "capability_class_required"),
         ("class=generat&context_tokens=4096", "unknown_capability"),

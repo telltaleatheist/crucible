@@ -9,6 +9,7 @@ from typing import Any
 from . import VERSION, catalog
 from .backend import LLAMA_WINDOWS
 from .capabilityclasses import BY_NAME, models_by_class
+from .classnames import RETIRED_CLASSES, retired_class_words
 from .errors import ApiError, CrucibleError
 from .manifests import BACKEND_ENGINES
 from .tasks.validate import require_installable, require_narrator_engine
@@ -25,6 +26,11 @@ class ModuleError(CrucibleError):
 
 
 def check_class(capability_class: str) -> set[str]:
+    if capability_class in RETIRED_CLASSES:
+        raise ModuleError(
+            f"{retired_class_words(capability_class)}. Declare `generate` or `decide` "
+            "instead"
+        )
     if capability_class not in BY_NAME:
         raise ModuleError(
             f"{capability_class!r} is not a capability class; this build knows "

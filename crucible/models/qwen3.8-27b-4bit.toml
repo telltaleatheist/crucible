@@ -7,7 +7,7 @@ context_default = 98304
 trained_context = 262144
 modalities = ["text"]
 display = "Qwen 3.8 · 27B (4-bit)"
-description = "The 27B, quantized to fit a 24 GB card: the goal for translation, simplification, analysis and generation."
+description = "The 27B, quantized to fit a 24 GB card: the chat goal (verb `generate`)."
 
 [local]
 kind = "ollama"

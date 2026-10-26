@@ -20,7 +20,7 @@ POSIX_INSTALL_LINE = (
 GIB = 1024 ** 3
 
 JOB_TYPE_WORDS = {
-    "llm": ("Language models", "Clean, translate, simplify and decide with a local LLM"),
+    "llm": ("Language models", "Chat, decide, embed, rerank and read pages with a local LLM"),
     "tts": ("Narration", "Read text aloud in a trained voice"),
     "asr": ("Transcription", "Turn speech into text"),
     "align": ("Alignment", "Place known words at their time in the audio"),

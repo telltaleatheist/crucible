@@ -1033,18 +1033,18 @@ queue session around it ended (its `idleS` ran out with no row being said): that
 
 `GET /v1/capability` — what this server can hold, per capability class, and why not. The
 read to make *before* deciding what to ask for: phase 9 made the act-to-model mapping a
-per-host fact, so a 24 GB box serves `translate` with a 4-bit 27B and a 12 GB box does not
-serve it at all, and a client handed a model id by configuration is carrying one this server
-may have refused.
+per-host fact, so a 24 GB box serves `generate` with a 4-bit 27B and an 8 GB box with the
+0.8B, and a client handed a model id by configuration is carrying one this server may have
+refused.
 
 ```ts
 const record = await crucible.capability();
-const translate = record.classes.find((row) => row.capability === 'translate')!;
-if (translate.enabled) submitWith(translate.selected);   // the id this host picked
-else explain(translate.reason, translate.shortfallBytes); // "cannot", with the number
+const pages = record.classes.find((row) => row.capability === 'pages')!;
+if (pages.enabled) submitWith(pages.selected);   // the id this host picked
+else explain(pages.reason, pages.shortfallBytes); // "cannot", with the number
 ```
 
-- **`enabled: false` is an answer, not an error.** A server that cannot translate says so
+- **`enabled: false` is an answer, not an error.** A server that cannot read pages says so
   with the shortfall that decided it. `selected` is `''` and `shortfallBytes` is `0` where
   they do not apply — the server's config is TOML, which has no null — so branch on
   `enabled`, never on the emptiness of `selected`.

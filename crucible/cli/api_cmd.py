@@ -1158,7 +1158,7 @@ API_VERBS = (
         ),
         arg(
             "--act", default=None,
-            help="the capability class this write is for, recorded on the bench",
+            help="your label for this write, recorded on the bench",
         ),
     )),
     Verb("upstream-test", "ask a configured upstream what it serves", cmd_upstream_test, (
@@ -1185,7 +1185,7 @@ API_VERBS = (
             arg("--deny", dest="allow", action="store_false"),
         )),
     )),
-    Verb("chat", "a chat completion — the cleanup and translation door", cmd_chat, (
+    Verb("chat", "a chat completion — the chat door (verb generate)", cmd_chat, (
         arg(
             "--body", default=None,
             help="the whole OpenAI-shaped request, as JSON or @file. Forwarded "

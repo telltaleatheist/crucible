@@ -17,7 +17,14 @@ import tomli_w
 
 from .backend import CPU_VENDOR
 from .capabilityrecord import DESKTOP_BASES, CapabilityRecord, CapabilityRow
-from .classnames import PACKAGE_NAMES, ROUTABLE_CLASSES, SELECTABLE_CLASSES
+from .classnames import (
+    PACKAGE_NAMES,
+    RETIRED_CLASSES,
+    RETIRED_CLASSES_DATE,
+    RETIRED_CLASSES_REASON,
+    ROUTABLE_CLASSES,
+    SELECTABLE_CLASSES,
+)
 from .errors import ConfigError
 from .narratorengines import ESTIMATE_BASES, NARRATOR_ENGINE_SAMPLING, EngineFootprint
 from .tomltable import check_table
@@ -196,6 +203,11 @@ class Config:
     # PACKAGE_NAMES). Written by `crucible install <package>`, read by every verb whose
     # models are in one.
     packages: frozenset[str] = frozenset()
+    # What this load dropped because it names a retired capability class
+    # (classnames.RETIRED_CLASSES): "[routes] translate", "[capability] row clean", ...
+    # Empty on a file that names none. A write from this Config leaves them out of the
+    # file; rewrite_retired is the one write made only for that.
+    retired_dropped: tuple[str, ...] = ()
     stamp: tuple[int, int] | None = None
 
     def follow_file(self) -> bool:
@@ -1095,6 +1107,9 @@ def load_config(
         stamp = None
     root, path, table = _read_document(home)
 
+    table, dropped = drop_retired_classes(table)
+    if dropped:
+        _say_retired_dropped(path, dropped)
     upstreams = _upstream_records(table)
     record = _capability_record(table)
     low_vram = _audio_low_vram(table)
@@ -1148,8 +1163,79 @@ def load_config(
         audio_low_vram_auto=low_vram.auto,
         llm_concurrency=llm_concurrency,
         packages=_packages(table),
+        retired_dropped=dropped,
         stamp=stamp,
     )
+
+
+def drop_retired_classes(table: dict[str, Any]) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """The migration for the capability classes retired on 2026-10-25
+    (classnames.RETIRED_CLASSES): a config.toml written before then may name them in
+    [local_models], [routes] and the [capability] record's rows. The document comes back
+    without them, with what was dropped named ("[routes] translate", ...), so the parsers
+    after it see only classes that exist and still refuse every name that never was one.
+    The caller's document is not changed."""
+    dropped: list[str] = []
+    out = dict(table)
+    for section in ("local_models", "routes"):
+        entries = table.get(section)
+        if not isinstance(entries, dict):
+            continue
+        retired = sorted(name for name in entries if name in RETIRED_CLASSES)
+        if retired:
+            out[section] = {k: v for k, v in entries.items() if k not in RETIRED_CLASSES}
+            dropped.extend(f"[{section}] {name}" for name in retired)
+    record = table.get("capability")
+    rows = record.get("classes") if isinstance(record, dict) else None
+    if isinstance(rows, list):
+        kept = [
+            row for row in rows
+            if not (isinstance(row, dict) and row.get("capability") in RETIRED_CLASSES)
+        ]
+        if len(kept) != len(rows):
+            dropped.extend(
+                f"[capability] row {row['capability']}"
+                for row in rows
+                if isinstance(row, dict) and row.get("capability") in RETIRED_CLASSES
+            )
+            out["capability"] = {**record, "classes": kept}
+    return out, tuple(dropped)
+
+
+_RETIRED_SAID: set[tuple[Path, tuple[str, ...]]] = set()
+
+
+def retired_dropped_sentence(path: Path, dropped: tuple[str, ...]) -> str:
+    return (
+        f"{path} names capability classes retired on {RETIRED_CLASSES_DATE} "
+        f"({', '.join(RETIRED_CLASSES)}), so {', '.join(dropped)} "
+        f"{'was' if len(dropped) == 1 else 'were'} dropped on load and "
+        f"{'leaves' if len(dropped) == 1 else 'leave'} the file on its next write: "
+        f"{RETIRED_CLASSES_REASON}"
+    )
+
+
+def _say_retired_dropped(path: Path, dropped: tuple[str, ...]) -> None:
+    """Said on the log once per file and drop list in this process: a running server
+    re-reads its config on every change, and the sentence is news only the first time."""
+    key = (path, dropped)
+    if key in _RETIRED_SAID:
+        return
+    _RETIRED_SAID.add(key)
+    print(f"crucible: {retired_dropped_sentence(path, dropped)}", file=sys.stderr)
+
+
+def rewrite_retired(config: Config) -> Path | None:
+    """The migration for the retired capability classes (classnames.RETIRED_CLASSES):
+    a server starting on a config.toml that still names them writes it back once without
+    them, so the file says what the server serves. None: the file names none."""
+    dropped = config.retired_dropped
+    if not dropped:
+        return None
+    path = rewrite_config(config)
+    config.adopt(load_config(config.home, tolerate_stale_record=True))
+    print(f"crucible: rewrote {path} without {', '.join(dropped)}", file=sys.stderr)
+    return path
 
 
 WRITER_OWNED_TABLES = frozenset(

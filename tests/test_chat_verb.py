@@ -139,7 +139,17 @@ def test_the_verb_checks_name_what_is_wrong() -> None:
         with pytest.raises(ApiError) as caught:
             verbmodel.refuse_unchattable_verb(verb)
         assert caught.value.code == code
-    verbmodel.refuse_unchattable_verb("translate")
+    verbmodel.refuse_unchattable_verb("generate")
+    for retired in ("clean", "translate", "simplify", "analysis"):
+        for refuse in (
+            verbmodel.refuse_unchattable_verb,
+            lambda verb: verbmodel.refuse_unsized_verb(verb, "this request's verb"),
+        ):
+            with pytest.raises(ApiError) as caught:
+                refuse(retired)
+            assert caught.value.code == "unknown_verb"
+            assert "retired to the apps" in caught.value.message, caught.value.message
+            assert caught.value.details["retired"] is True
 
 
 def test_a_raw_body_s_verb_and_ceiling_are_taken_off_it() -> None:
@@ -342,8 +352,8 @@ def test_the_info_lists_the_chat_verbs_and_the_feature(served: Any, auth: dict[s
     assert generate["route"] == "POST /v1/openai/chat/completions"
     assert generate["registered"] == "qwen3.8-27b-4bit" and generate["available"]
     assert generate["limits"] == {} and "qwen3.5-4b" in generate["models"]
-    assert set(info["verbs"]) >= {"embed", "rerank", "generate", "clean", "translate",
-                                  "simplify", "analysis"}
+    assert set(info["verbs"]) >= {"embed", "rerank", "generate"}
+    assert not {"clean", "translate", "simplify", "analysis"} & set(info["verbs"])
 
 
 def test_a_load_names_a_verb_and_a_ceiling_in_place_of_a_model(
@@ -389,7 +399,7 @@ def test_the_preview_and_the_chat_door_agree_on_every_lever(
     for lever in (
         {"max_params_b": 4},
         {"model": "qwen3.5-4b"},
-        {"verb": "translate", "max_params_b": 4},
+        {"verb": "generate", "max_params_b": 4},
         {"verb": "generate", "model": "qwen3.5-4b"},
         {},
         {"verb": "translate"},

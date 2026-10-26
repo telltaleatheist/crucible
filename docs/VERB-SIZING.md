@@ -8,6 +8,14 @@ size ceiling, BUILT on `feat/chat-verb-ceiling`, not merged (§11); the `lyrics`
 rest NOT BUILT. This extends `MODEL-CHOICE.md` and `FITS-AND-THE-CARD.md`;
 where it disagrees with them, it says so (§6).
 
+> **2026-10-25: `clean`, `translate`, `simplify` and `analysis` are retired** (Owen). The apps
+> (BookForge, Foundry) choose their own text models now: that work is plain chat (`generate`,
+> 27B goal) or `decide` (9B), and sending a job to an API model is the app's choice per job
+> (it names `anthropic/<id>` as the model). They are gone from `crucible/classnames.py`
+> (`RETIRED_CLASSES` names them), from the capability record, `[local_models]`, `[routes]`
+> and the chat door's `verb`; a server upgrading drops them from its config.toml on load and
+> says so once. Where the text below names them, it is the record of how they were sized.
+
 ## 0. The ruling, in his words
 
 > *"i think the goal behind crucible is to resize/pick the models the system is capable of
@@ -42,9 +50,9 @@ where it disagrees with them, it says so (§6).
 2. **Each verb has a goal**, the size it is meant to run at, and never auto-picks above it:
    | verb | goal | notes |
    |---|---|---|
-   | `generate` (chat) | 27B | also `translate`, `simplify`, `analysis` |
+   | `generate` (chat) | 27B | `translate`, `simplify`, `analysis` shared it until their retirement (2026-10-25) |
    | `decide` | 9B | today it auto-picks the 27B on the PC and the Mac; that ends |
-   | `clean` | 9B | |
+   | ~~`clean`~~ | ~~9B~~ | retired to the apps 2026-10-25 |
    | `lyrics` (new) | qwen3.5-4b-bside | fixed size; only its precision steps down |
    | the media verbs | as today | `pages`, `asr`, `song`, `music`, ... keep their lineups |
 3. **The automatic pick:** among the lineup's variants at or below the goal that FIT, take the
@@ -364,11 +372,12 @@ SDKs released before this demand the key (as `license` is always null).
 
 > *"but it can recommend using an api key if the models are under a certain size."*
 
-- When a routable text verb's automatic pick (`clean`, `translate`, `simplify`, `analysis`,
-  `generate`) has fewer than 4B parameters, its reason, summary, doctor line and install-plan
+- When a routable text verb's automatic pick (`generate`, the one left since 2026-10-25;
+  `clean`, `translate`, `simplify` and `analysis` were routable until then) has fewer than 4B
+  parameters, its reason, summary, doctor line and install-plan
   line add one sentence: *"Models under 4B give weaker results, so for better ones add an API
   key for Anthropic or OpenAI in Settings, under "Accounts this engine may spend", and send
-  translate to it in the same page (or set [upstreams] and [routes] in config.toml)."*
+  generate to it in the same page (or set [upstreams] and [routes] in config.toml)."*
 - The threshold has one owner: `API_KEY_ADVICE_BELOW_PARAMS_B = 4` in
   `crucible/capabilityclasses.py`, read by `CapabilityClass.advises_api_key`. 4B is the
   chosen default: the 0.8B and the 2B are what small cards get today.
@@ -472,8 +481,9 @@ use, so their ceilings changed with it (a ceiling at or above their 8B keeps it)
 **The wire.**
 
 - Chat (`POST /v1/openai/chat/completions`, `/openai/v1/chat/completions`): `model` left out
-  or null, with `verb` (default `generate`; `clean`, `translate`, `simplify`, `analysis`:
-  `classnames.CHAT_VERBS`) and/or `max_params_b`. Both are taken off the body; the engine is
+  or null, with `verb` (`generate`, the default and since 2026-10-25 the only one:
+  `classnames.CHAT_VERBS`; a retired verb is `unknown_verb` saying it was retired to the apps)
+  and/or `max_params_b`. Both are taken off the body; the engine is
   sent exactly the body a chat naming the chosen model would send, and the reply's `model`
   is the chosen id. Residency is the chat door's own: it waits in the line and its model is
   loaded, or `"queue": false` is `409 model_not_resident` naming it. `verb` beside a `model`

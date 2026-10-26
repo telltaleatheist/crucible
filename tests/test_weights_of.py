@@ -374,21 +374,19 @@ def test_decide_lists_the_aliases_and_the_text_classes_do_not() -> None:
         ],
     }
     text = {
-        "clean": {k: ["qwen3.5-9b", *SMALL] for k in (CUDA_LINUX, MLX_DARWIN, LLAMA_WINDOWS)},
-        "translate": {
-            CUDA_LINUX: ["qwen3.8-27b-4bit", "qwen3.5-9b", *SMALL],
+        "generate": {
+            CUDA_LINUX: ["qwen3.8-27b-4bit", "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b",
+                         "qwen3.5-4b-8bit", "qwen3.5-0.8b"],
             MLX_DARWIN: ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b", *SMALL],
             LLAMA_WINDOWS: ["qwen3.8-27b-4bit", "qwen3.5-9b", *SMALL],
         },
     }
     for backend, ids in expected_decide.items():
         assert [c.id for c in BY_NAME["decide"].candidates(backend)] == ids, backend
-        assert [c.id for c in BY_NAME["clean"].candidates(backend)] == text["clean"][backend]
-        for name in ("translate", "simplify", "analysis"):
-            assert (
-                [c.id for c in BY_NAME[name].candidates(backend)]
-                == text["translate"][backend]
-            ), (name, backend)
+        assert (
+            [c.id for c in BY_NAME["generate"].candidates(backend)]
+            == text["generate"][backend]
+        ), backend
     for alias_id in ALIASES:
         assert classes_for_model(alias_id) == ("decide",)
 
@@ -398,9 +396,7 @@ def test_the_small_tiers_are_untouched() -> None:
         manifest = load_manifest(model_id)
         assert manifest.weights_of is None
         assert aliases_of(manifest) == ()
-        assert classes_for_model(model_id) == (
-            "clean", "translate", "simplify", "analysis", "generate", "decide", "rerank",
-        )
+        assert classes_for_model(model_id) == ("generate", "decide", "rerank")
 
 
 def test_every_alias_the_catalog_ships_is_one_of_the_two() -> None:

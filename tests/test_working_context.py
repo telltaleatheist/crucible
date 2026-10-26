@@ -38,10 +38,6 @@ def a_candidate(**overrides: Any) -> Candidate:
 def test_every_context_shaped_class_declares_its_work_with_a_source() -> None:
     declared = [entry for entry in CLASSES if entry.work is not None]
     assert {entry.name for entry in declared} == {
-        "clean",
-        "translate",
-        "simplify",
-        "analysis",
         "generate",
         "decide",
         "embed",
@@ -58,16 +54,6 @@ def test_the_classes_that_are_not_token_shaped_declare_nothing() -> None:
     for entry in CLASSES:
         if entry.job_type in {"tts", "asr", "align", "rvc", "denoise", "echo"}:
             assert entry.work is None, entry.name
-
-
-def test_translate_and_simplify_and_analysis_share_one_ruling() -> None:
-    work = {
-        entry.name: entry.work
-        for entry in CLASSES
-        if entry.name in {"translate", "simplify", "analysis"}
-    }
-    assert len({(w.tokens, w.concurrency) for w in work.values()}) == 1
-    assert work["translate"].tokens == 4096
 
 
 def test_a_candidate_costs_what_the_class_asks_for() -> None:
@@ -88,7 +74,7 @@ def test_a_candidate_with_no_terms_answers_the_way_it_always_did() -> None:
 
 
 def test_the_refusal_names_all_four_terms() -> None:
-    entry = next(e for e in CLASSES if e.name == "translate")
+    entry = next(e for e in CLASSES if e.name == "decide")
     decision = decide(
         entry,
         "cuda-linux",
@@ -99,7 +85,7 @@ def test_the_refusal_names_all_four_terms() -> None:
         audio_low_vram=False,
     )
     assert decision.enabled
-    for phrase in ("weights", "overhead", "KV for", "4096 tokens x 4 in flight"):
+    for phrase in ("weights", "overhead", "KV for", "8192 tokens x 2 in flight"):
         assert phrase in decision.reason, decision.reason
 
 
@@ -129,10 +115,10 @@ def test_the_card_still_decides_every_llm_class_on_owens_pc() -> None:
             audio_low_vram=False,
         )
     }
-    assert decisions["clean"].selected == "qwen3.5-9b"
-    assert decisions["translate"].selected == "qwen3.8-27b-4bit"
+    assert decisions["decide"].selected == "qwen3.5-9b"
+    assert decisions["generate"].selected == "qwen3.8-27b-4bit"
     assert decisions["pages"].selected == "dots-ocr"
-    for name in ("clean", "translate", "simplify", "analysis", "pages"):
+    for name in ("decide", "generate", "pages"):
         assert decisions[name].enabled, name
 
 

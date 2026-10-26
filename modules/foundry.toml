@@ -5,16 +5,10 @@ name = "foundry"
 type = "llm"
 
 [[needs]]
-class = "clean"
+class = "generate"
 
 [[needs]]
-class = "translate"
-
-[[needs]]
-class = "simplify"
-
-[[needs]]
-class = "analysis"
+class = "decide"
 
 [[needs]]
 class = "pages"

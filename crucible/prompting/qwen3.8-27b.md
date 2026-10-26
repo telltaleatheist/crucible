@@ -9,7 +9,7 @@ Crucible ids `qwen3.8-27b-4bit`, `qwen3.8-27b-4bit-vl` and `qwen3.8-27b-8bit`. T
 | mlx-darwin (mlx-lm) | `mlx-community/Qwen3.8-27B-8bit` @ `815b83c0` | 8bit, Mac only |
 | llama-windows (llama-server) | `unsloth/Qwen3.8-27B-GGUF` @ `4ca72078` (`UD-Q4_K_M` + `mmproj-F16`) | 4bit, 4bit-vl |
 
-They serve the `llm` chat door and are the goal model (27B) for `generate`, `translate`, `simplify` and `analysis`.
+They serve the `llm` chat door and are the goal model (27B) for `generate`, the chat verb.
 
 Read on 2026-10-15. The Crucible code and docs are at `5a579e7a` (2026-10-13).
 
@@ -231,7 +231,7 @@ All three forms are the same 27B. Their differences are quantization, engine and
 ### `qwen3.8-27b-8bit`, mlx-darwin only: MLX 8-bit (`mlx-community`) [T6]
 
 - Affine, group size 64, 8 bits.
-- Described as "the best translation a 64 GB Mac can hold" [C4]. Its weights are about 29.5 GB, so it is Mac only; the FP8 cuda arm was removed on Owen's ruling [C5 MODEL-CHOICE §8].
+- Described as "the best chat model a 64 GB Mac can hold" [C4]. Its weights are about 29.5 GB, so it is Mac only; the FP8 cuda arm was removed on Owen's ruling [C5 MODEL-CHOICE §8].
 - MEASUREMENTS lists its whole manifest as "written 2026-09-17, never loaded" [C5]. Later stutter work ran it [M2], so that line is stale.
 - Context default is 12,288 [C4].
 
@@ -291,7 +291,7 @@ Only facts from Crucible's docs and changelog and from Owen's memory notes.
   - On the Mac, the 27B 4-bit peaked at 31.55 GiB at 98,220 tokens, against a computed 22.5 GB. The computed figure was 34% light because mlx-lm's prefill logits cover a 248k vocabulary.
   - So a very long prompt costs real memory beyond the KV.
 - **The 27B's thinking-on title/scrub calls** were given a 16k budget [M3].
-- **Verb sizing** [C5 VERB-SIZING]: the 27B is the goal for generate, translate, simplify and analysis. `decide` moved off the 27B to the 9B on 2026-10-09.
+- **Verb sizing** [C5 VERB-SIZING]: the 27B is the goal for generate (translate, simplify and analysis, which shared it, were retired to the apps on 2026-10-25). `decide` moved off the 27B to the 9B on 2026-10-09.
 
 ---
 
@@ -302,7 +302,7 @@ Only facts from Crucible's docs and changelog and from Owen's memory notes.
 1. **Thinking default.**
    - Crucible's Qwen3.8 manifests set no `thinking`, so the 27B **thinks by default at `xhigh`** for every verb whose app does not state otherwise.
    - The Qwen3.5 manifests all state `thinking = false`.
-   - Upstream behaviour is honoured, but the two families behave oppositely through the same door, and translate/simplify on the 27B pay a thinking trace unless the app opts out. [C4, T1, T2]
+   - Upstream behaviour is honoured, but the two families behave oppositely through the same door, and chats on the 27B pay a thinking trace unless the app opts out. [C4, T1, T2]
 2. **Default sampling.**
    - Official non-thinking: 0.7 / 0.8 / 20 / presence 1.5.
    - What an app that sends nothing gets:

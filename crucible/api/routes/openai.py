@@ -82,12 +82,13 @@ class ChatCompletionBody(BaseModel):
     messages: list[dict[str, Any]]
     """OpenAI's messages, forwarded as sent."""
     verb: str | None = None
-    """Crucible's: which verb's model serves a chat that names no model, one of
-    `generate` (the default: open-ended chat), `clean`, `translate`, `simplify`,
-    `analysis`. Beside a `model`, that model is held to the verb's rules (it must be in
-    the verb's lineup here, `model_not_for_verb`, and fit the card unless it is the verb's
-    Settings choice, `model_does_not_fit`). Another verb is refused `verb_not_for_chat`,
-    an unknown name `unknown_verb`."""
+    """Crucible's: which verb's model serves a chat that names no model: `generate` (the
+    default, and the one chat verb: open-ended chat). Beside a `model`, that model is held
+    to the verb's rules (it must be in the verb's lineup here, `model_not_for_verb`, and
+    fit the card unless it is the verb's Settings choice, `model_does_not_fit`). Another
+    verb is refused `verb_not_for_chat`, an unknown name `unknown_verb`; `clean`,
+    `translate`, `simplify` and `analysis` were retired to the apps on 2026-10-25 and are
+    refused `unknown_verb` saying so."""
     max_params_b: float | None = Field(default=None, gt=0)
     """Crucible's: a ceiling, in billions of parameters, on the verb's model: this
     server's own pick (its Settings choice, else the biggest that fits up to the verb's

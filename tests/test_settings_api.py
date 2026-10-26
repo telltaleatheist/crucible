@@ -93,12 +93,10 @@ def test_the_document_names_every_class_and_every_upstream_configured_or_not(
 ) -> None:
     body = settings_client.get("/v1/settings", headers=auth).json()
     assert set(body["routes"]) == set(classnames.ROUTABLE_CLASSES)
-    assert set(body["routes"]) == {
-        "clean", "translate", "simplify", "analysis", "generate"
-    }
+    assert set(body["routes"]) == {"generate"}
     for row in body["routes"].values():
         assert row["route"] == "local"
-    assert body["routes"]["clean"]["model"] == "qwen3.5-9b"
+    assert body["routes"]["generate"]["model"] == "qwen3.8-27b-4bit"
     assert set(body["upstreams"]) == set(upstreamrecord.UPSTREAM_NAMES)
     assert body["upstreams"] == {
         "anthropic": {"configured": False, "key_hint": None},
@@ -109,7 +107,7 @@ def test_the_document_names_every_class_and_every_upstream_configured_or_not(
     assert body["desktop_allowance_bytes"] == 3 * 1024 ** 3
 
 
-def test_pages_is_not_routable_because_it_is_not_one_of_the_four(
+def test_pages_is_not_routable_because_it_is_not_generate(
     settings_client, auth
 ) -> None:
     body = settings_client.get("/v1/settings", headers=auth).json()
@@ -123,17 +121,16 @@ def test_an_upstream_and_a_route_land_in_one_request(settings_client, auth) -> N
         auth,
         {
             "upstreams": {"anthropic": {"key": ANTHROPIC_KEY}},
-            "routes": {"translate": "anthropic/claude-sonnet-5"},
+            "routes": {"generate": "anthropic/claude-sonnet-5"},
         },
     )
     assert body.status_code == 200, body.text
     document = body.json()
     assert document["upstreams"]["anthropic"]["configured"] is True
-    assert document["routes"]["translate"] == {
+    assert document["routes"]["generate"] == {
         "route": "upstream",
         "model": "anthropic/claude-sonnet-5",
     }
-    assert document["routes"]["clean"]["route"] == "local"
 
 
 def test_the_key_hint_is_an_ellipsis_and_four_characters(
@@ -155,7 +152,7 @@ def test_the_whole_key_is_in_no_response_no_log_and_no_activity_row(
             auth,
             {
                 "upstreams": {"anthropic": {"key": ANTHROPIC_KEY}},
-                "routes": {"translate": "anthropic/claude-sonnet-5"},
+                "routes": {"generate": "anthropic/claude-sonnet-5"},
             },
         )
     assert written.status_code == 200
@@ -174,7 +171,7 @@ def test_the_whole_key_is_in_no_response_no_log_and_no_activity_row(
     writes = reads[3].json()["settings"]["writes"]
     assert writes[0]["changed"] == [
         "upstreams.anthropic set",
-        "routes.translate = anthropic/claude-sonnet-5",
+        "routes.generate = anthropic/claude-sonnet-5",
     ]
 
 
@@ -224,21 +221,21 @@ def test_route_bad_model_covers_a_missing_slash_and_an_unknown_upstream(
     settings_client, auth
 ) -> None:
     for value in ("claude-sonnet-5", "claud/claude-sonnet-5", "anthropic/"):
-        body = put(settings_client, auth, {"routes": {"translate": value}})
+        body = put(settings_client, auth, {"routes": {"generate": value}})
         assert body.status_code == 400, value
         error = body.json()["error"]
         assert error["code"] == "route_bad_model", value
-        assert error["details"]["field"] == "routes.translate"
+        assert error["details"]["field"] == "routes.generate"
 
 
 def test_route_upstream_unconfigured_refuses_a_route_the_server_cannot_serve(
     settings_client, auth
 ) -> None:
-    body = put(settings_client, auth, {"routes": {"simplify": "openai/gpt-5"}})
+    body = put(settings_client, auth, {"routes": {"generate": "openai/gpt-5"}})
     assert body.status_code == 409
     error = body.json()["error"]
     assert error["code"] == "route_upstream_unconfigured"
-    assert error["details"]["field"] == "routes.simplify"
+    assert error["details"]["field"] == "routes.generate"
     assert error["details"]["upstream"] == "openai"
 
 
@@ -250,10 +247,7 @@ def test_upstream_in_use_names_the_classes_and_is_avoidable_in_one_request(
         auth,
         {
             "upstreams": {"anthropic": {"key": ANTHROPIC_KEY}},
-            "routes": {
-                "translate": "anthropic/claude-sonnet-5",
-                "simplify": "anthropic/claude-sonnet-5",
-            },
+            "routes": {"generate": "anthropic/claude-sonnet-5"},
         },
     )
     refused = put(settings_client, auth, {"upstreams": {"anthropic": None}})
@@ -261,19 +255,19 @@ def test_upstream_in_use_names_the_classes_and_is_avoidable_in_one_request(
     error = refused.json()["error"]
     assert error["code"] == "upstream_in_use"
     assert error["details"]["field"] == "upstreams.anthropic"
-    assert error["details"]["classes"] == ["simplify", "translate"]
+    assert error["details"]["classes"] == ["generate"]
     accepted = put(
         settings_client,
         auth,
         {
-            "routes": {"translate": "local", "simplify": "local"},
+            "routes": {"generate": "local"},
             "upstreams": {"anthropic": None},
         },
     )
     assert accepted.status_code == 200, accepted.text
     document = accepted.json()
     assert document["upstreams"]["anthropic"]["configured"] is False
-    assert document["routes"]["translate"]["route"] == "local"
+    assert document["routes"]["generate"]["route"] == "local"
 
 
 def test_a_refusal_applies_nothing(settings_client, auth) -> None:
@@ -282,7 +276,7 @@ def test_a_refusal_applies_nothing(settings_client, auth) -> None:
         auth,
         {
             "upstreams": {"anthropic": {"key": ANTHROPIC_KEY}},
-            "routes": {"translate": "openai/gpt-5"},
+            "routes": {"generate": "openai/gpt-5"},
         },
     )
     assert body.status_code == 409
@@ -311,9 +305,9 @@ def test_every_refusal_carries_a_dotted_field(settings_client, auth) -> None:
     patches = [
         {"nonsense": 1},
         {"routes": {"tts": "anthropic/x"}},
-        {"routes": {"translate": "nope"}},
-        {"routes": {"translate": 4}},
-        {"routes": {"translate": "openai/gpt-5"}},
+        {"routes": {"generate": "nope"}},
+        {"routes": {"generate": 4}},
+        {"routes": {"generate": "openai/gpt-5"}},
         {"upstreams": {"claude": {"key": "x" * 20}}},
         {"upstreams": {"anthropic": {"url": "http://x"}}},
         {"upstreams": {"anthropic": {"key": "short"}}},
@@ -331,13 +325,13 @@ def test_the_allowance_is_written_and_recomputes_the_capability_rows(
     settings_client, auth, home: Path
 ) -> None:
     before = settings_client.get("/v1/capability", headers=auth).json()
-    assert {row["capability"]: row["enabled"] for row in before["classes"]}["clean"]
+    assert {row["capability"]: row["enabled"] for row in before["classes"]}["decide"]
     body = put(settings_client, auth, {"desktop_allowance_bytes": 25 * 1024 ** 3})
     assert body.status_code == 200, body.text
     after = settings_client.get("/v1/capability", headers=auth).json()
     rows = {row["capability"]: row for row in after["classes"]}
-    assert rows["clean"]["enabled"] is False
-    assert "short by" in rows["clean"]["reason"]
+    assert rows["decide"]["enabled"] is False
+    assert "short by" in rows["decide"]["reason"]
     assert after["desktop_allowance_bytes"] == 25 * 1024 ** 3
     assert load_config(home).desktop_allowance_bytes == 25 * 1024 ** 3
 
@@ -351,15 +345,15 @@ def test_capability_says_the_route_and_keeps_the_local_answer(
             "classes"
         ]
     }
-    local_reason = before["translate"]["reason"]
-    assert before["translate"]["route"] == "local"
+    local_reason = before["generate"]["reason"]
+    assert before["generate"]["route"] == "local"
 
     put(
         settings_client,
         auth,
         {
             "upstreams": {"anthropic": {"key": ANTHROPIC_KEY}},
-            "routes": {"translate": "anthropic/claude-sonnet-5"},
+            "routes": {"generate": "anthropic/claude-sonnet-5"},
         },
     )
     after = {
@@ -368,14 +362,14 @@ def test_capability_says_the_route_and_keeps_the_local_answer(
             "classes"
         ]
     }
-    row = after["translate"]
+    row = after["generate"]
     assert row["route"] == "upstream"
     assert row["enabled"] is True
     assert row["selected"] == "anthropic/claude-sonnet-5"
     assert row["reason"].startswith("routed to anthropic; ")
     assert capabilitywords.LOCAL_ANSWER_PREFIX + local_reason in row["reason"]
-    assert after["clean"]["route"] == "local"
-    assert after["clean"]["reason"] == before["clean"]["reason"]
+    assert after["decide"]["route"] == "local"
+    assert after["decide"]["reason"] == before["decide"]["reason"]
     assert after["tts"]["route"] == "local"
 
 
@@ -388,10 +382,10 @@ def test_routing_back_to_local_restores_the_row_exactly(
         auth,
         {
             "upstreams": {"anthropic": {"key": ANTHROPIC_KEY}},
-            "routes": {"simplify": "anthropic/claude-sonnet-5"},
+            "routes": {"generate": "anthropic/claude-sonnet-5"},
         },
     )
-    put(settings_client, auth, {"routes": {"simplify": "local"}})
+    put(settings_client, auth, {"routes": {"generate": "local"}})
     after = settings_client.get("/v1/capability", headers=auth).json()["classes"]
     strip = lambda rows: [
         {k: v for k, v in row.items() if k != "route"} for row in rows
@@ -411,7 +405,7 @@ def test_the_operators_routes_survive_a_capability_rewrite(
         auth,
         {
             "upstreams": {"anthropic": {"key": ANTHROPIC_KEY}},
-            "routes": {"translate": "anthropic/claude-sonnet-5"},
+            "routes": {"generate": "anthropic/claude-sonnet-5"},
         },
     )
     config = load_config(home)
@@ -425,9 +419,9 @@ def test_the_operators_routes_survive_a_capability_rewrite(
     )
     write_capability(config, FAKE_BACKEND, decisions, {"enable_tts": True})
     after = load_config(home)
-    assert after.route_model("translate") == "anthropic/claude-sonnet-5"
+    assert after.route_model("generate") == "anthropic/claude-sonnet-5"
     assert after.upstream("anthropic").key == ANTHROPIC_KEY
-    row = after.capability.row("translate")
+    row = after.capability.row("generate")
     assert row.selected == "anthropic/claude-sonnet-5"
     assert row.reason.startswith("routed to anthropic; ")
 
@@ -508,7 +502,7 @@ def test_a_config_naming_an_unconfigured_upstream_does_not_load(
     path = home / "config.toml"
     text = path.read_text(encoding="utf-8")
     path.write_text(
-        text + '\n[routes]\ntranslate = "anthropic/claude-sonnet-5"\n',
+        text + '\n[routes]\ngenerate = "anthropic/claude-sonnet-5"\n',
         encoding="utf-8",
     )
     with pytest.raises(ConfigError, match="route_upstream_unconfigured"):
@@ -535,9 +529,11 @@ def test_local_is_never_written_to_the_config(home: Path, settings_client, auth)
         auth,
         {
             "upstreams": {"anthropic": {"key": ANTHROPIC_KEY}},
-            "routes": {"clean": "anthropic/claude-haiku-5", "translate": "local"},
+            "routes": {"generate": "anthropic/claude-haiku-5"},
         },
     )
+    assert "[routes]" in (home / "config.toml").read_text(encoding="utf-8")
+    put(settings_client, auth, {"routes": {"generate": "local"}})
     text = (home / "config.toml").read_text(encoding="utf-8")
     assert '"local"' not in text
-    assert "translate" not in text.split("[routes]")[1].split("[")[0]
+    assert "[routes]" not in text

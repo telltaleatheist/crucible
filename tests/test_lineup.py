@@ -30,13 +30,11 @@ CLASSES = {
     "dots-ocr": ["pages"],
     # every text verb runs down to the small tiers (docs/VERB-SIZING.md rule 1)
     # and rerank reads any decide model (docs/VERB-SIZING.md section 9)
-    "qwen3.5-0.8b": ["clean", "translate", "simplify", "analysis", "generate", "decide", "rerank"],
-    "qwen3.5-2b": ["clean", "translate", "simplify", "analysis", "generate", "decide", "rerank"],
-    "qwen3.5-4b": ["clean", "translate", "simplify", "analysis", "generate", "decide", "rerank"],
-    "qwen3.5-9b": [
-        "clean", "translate", "simplify", "analysis", "generate", "decide", "rerank"
-    ],
-    "qwen3.8-27b-4bit": ["translate", "simplify", "analysis", "generate", "decide", "rerank"],
+    "qwen3.5-0.8b": ["generate", "decide", "rerank"],
+    "qwen3.5-2b": ["generate", "decide", "rerank"],
+    "qwen3.5-4b": ["generate", "decide", "rerank"],
+    "qwen3.5-9b": ["generate", "decide", "rerank"],
+    "qwen3.8-27b-4bit": ["generate", "decide", "rerank"],
 }
 
 ROW_KEYS = ["id", "classes", "label", "description", "local"]
@@ -216,9 +214,7 @@ def test_classes_come_from_the_capability_table(model_id: str) -> None:
 
 
 def test_a_model_with_no_local_form_still_has_classes() -> None:
-    assert classes_for_model("qwen3.8-27b-8bit") == (
-        "translate", "simplify", "analysis", "generate", "decide", "rerank",
-    )
+    assert classes_for_model("qwen3.8-27b-8bit") == ("generate", "decide", "rerank")
 
 
 def test_an_unknown_model_id_is_refused_not_answered_with_no_classes() -> None:
@@ -280,9 +276,7 @@ def test_a_fixture_catalog_builds_the_same_shape(
     assert rows == [
         {
             "id": "demo-1b",
-            "classes": [
-                "clean", "translate", "simplify", "analysis", "generate", "decide", "rerank"
-            ],
+            "classes": ["generate", "decide", "rerank"],
             "label": "Demo",
             "description": "A fixture.",
             "local": {

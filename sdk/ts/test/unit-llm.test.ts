@@ -553,11 +553,11 @@ test('a chat may name a verb and a ceiling instead of a model, and reads the mod
     max_params_b: 4,
   });
   assert.equal(answer.model, 'qwen3.5-4b');
-  await client().chat({ verb: 'translate', messages: [{ role: 'user', content: 'hi' }] });
+  await client().chat({ verb: 'generate', messages: [{ role: 'user', content: 'hi' }] });
   assert.deepEqual(JSON.parse(lastBody), {
     messages: [{ role: 'user', content: 'hi' }],
     stream: false,
-    verb: 'translate',
+    verb: 'generate',
   });
   await assert.rejects(
     client().chat({ maxParamsB: 0, messages: [{ role: 'user', content: 'hi' }] }),

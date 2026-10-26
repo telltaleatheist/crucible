@@ -213,11 +213,11 @@ test('upstream_in_use names the classes that must be re-routed first', async () 
   answer(409, {
     error: {
       code: UPSTREAM_IN_USE,
-      message: 'anthropic cannot be removed while simplify, translate are routed to it',
+      message: 'anthropic cannot be removed while generate is routed to it',
       details: {
         field: 'upstreams.anthropic',
         upstream: 'anthropic',
-        classes: ['simplify', 'translate'],
+        classes: ['generate'],
       },
     },
   });
@@ -225,7 +225,7 @@ test('upstream_in_use names the classes that must be re-routed first', async () 
     assert.ok(error instanceof CrucibleRefused);
     assert.deepEqual(
       (error.details as { classes: string[] }).classes,
-      ['simplify', 'translate'],
+      ['generate'],
     );
     return true;
   });
@@ -297,7 +297,7 @@ test('every capability row says where its work runs', async () => {
     desktop_allowance_bytes: 3221225472,
     classes: [
       {
-        capability: 'clean',
+        capability: 'decide',
         enabled: true,
         selected: 'qwen3.5-9b',
         reason: 'qwen3.5-9b fits',
@@ -307,7 +307,7 @@ test('every capability row says where its work runs', async () => {
         context_ceilings: null,
       },
       {
-        capability: 'translate',
+        capability: 'generate',
         enabled: true,
         selected: 'anthropic/claude-sonnet-5',
         reason: 'routed to anthropic; the local answer would be: disabled …',
@@ -320,13 +320,13 @@ test('every capability row says where its work runs', async () => {
     job_types: [],
   });
   const record = await client().capability();
-  const [clean, translate] = record.classes;
-  assert.ok(clean !== undefined && translate !== undefined);
-  assert.equal(clean.route, 'local');
-  assert.equal(translate.route, 'upstream');
+  const [decide, generate] = record.classes;
+  assert.ok(decide !== undefined && generate !== undefined);
+  assert.equal(decide.route, 'local');
+  assert.equal(generate.route, 'upstream');
   // The upstream row's `selected` is exactly the `model` to send as a chat.
-  assert.equal(translate.selected, 'anthropic/claude-sonnet-5');
-  assert.match(String(translate.reason), /the local answer would be: /);
+  assert.equal(generate.selected, 'anthropic/claude-sonnet-5');
+  assert.match(String(generate.reason), /the local answer would be: /);
 });
 
 test('a row with a route this build has never heard of is a protocol error', async () => {
@@ -336,7 +336,7 @@ test('a row with a route this build has never heard of is a protocol error', asy
     desktop_allowance_bytes: 0,
     classes: [
       {
-        capability: 'clean',
+        capability: 'decide',
         enabled: true,
         selected: 'x',
         reason: 'y',

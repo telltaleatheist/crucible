@@ -141,6 +141,10 @@ reading `config.json` finds that.
 Owen's ruling above is the source for the first row. The rest are placeholders
 until measured.
 
+(2026-10-25: `translate`, `simplify` and `clean` were retired to the apps with `analysis`,
+`crucible/classnames.py` `RETIRED_CLASSES`; their rows here are the record of the reasoning.
+`generate` declares its own working context, and a client states a larger one per request.)
+
 `fits` then stops being a stored boolean and becomes arithmetic that can STATE
 ITSELF, in this repo's refusal voice:
 

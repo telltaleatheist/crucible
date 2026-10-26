@@ -1,5 +1,5 @@
 {
-  "generated_from": "386307b6e3ff747247c76db98bf2fc67261ec852",
+  "generated_from": "7fbed8ef76d7246257e165b9612459ef6b07fdf1",
   "schema": 3,
   "models": [
     {
@@ -25,16 +25,12 @@
     {
       "id": "qwen3.5-0.8b",
       "classes": [
-        "clean",
-        "translate",
-        "simplify",
-        "analysis",
         "generate",
         "decide",
         "rerank"
       ],
       "label": "Qwen 3.5 · 0.8B",
-      "description": "The smallest text model: fast, and able to read an image on a PC or Windows card. Every text verb reaches down to it, so a card too small for anything larger still decides, cleans, translates and generates, at the quality a 0.8B gives.",
+      "description": "The smallest text model: fast, and able to read an image on a PC or Windows card. Every text verb reaches down to it, so a card too small for anything larger still chats and decides, at the quality a 0.8B gives.",
       "local": {
         "kind": "ollama",
         "tag": "qwen3.5:0.8b-bf16",
@@ -48,10 +44,6 @@
     {
       "id": "qwen3.5-2b",
       "classes": [
-        "clean",
-        "translate",
-        "simplify",
-        "analysis",
         "generate",
         "decide",
         "rerank"
@@ -71,10 +63,6 @@
     {
       "id": "qwen3.5-4b",
       "classes": [
-        "clean",
-        "translate",
-        "simplify",
-        "analysis",
         "generate",
         "decide",
         "rerank"
@@ -94,16 +82,12 @@
     {
       "id": "qwen3.5-9b",
       "classes": [
-        "clean",
-        "translate",
-        "simplify",
-        "analysis",
         "generate",
         "decide",
         "rerank"
       ],
       "label": "Qwen 3.5 · 9B",
-      "description": "The cleanup model, in bf16. Cleanup and the other 9B-class text work; wants a 24 GB card at this precision.",
+      "description": "The 9B in bf16: decide's goal, and the text model apps name for their 9B-class work; wants a 24 GB card at this precision.",
       "local": {
         "kind": "ollama",
         "tag": "qwen3.5:9b-bf16",
@@ -117,15 +101,12 @@
     {
       "id": "qwen3.8-27b-4bit",
       "classes": [
-        "translate",
-        "simplify",
-        "analysis",
         "generate",
         "decide",
         "rerank"
       ],
       "label": "Qwen 3.8 · 27B (4-bit)",
-      "description": "The 27B, quantized to fit a 24 GB card: the goal for translation, simplification, analysis and generation.",
+      "description": "The 27B, quantized to fit a 24 GB card: the chat goal (verb `generate`).",
       "local": {
         "kind": "ollama",
         "tag": "qwen3.8:27b",

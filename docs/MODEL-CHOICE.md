@@ -11,6 +11,13 @@ NOT BUILT except where a section says otherwise. Written the day it was given.
 > and decide) caps the automatic pick instead. The default of section 2 is now "the most
 > parameters at or below the goal that fit, then the most bits". The rest stands.
 
+> **RETIRED, 2026-10-25.** The classes this ruling was written for, `clean`, `translate`,
+> `simplify` and `analysis`, have left Crucible: the apps (BookForge, Foundry) pick their own
+> text models and send that work as a chat (`generate`) or to `decide`, and choosing an API
+> model for a job is the app's per-job choice. What is left here applies to `generate` and
+> `decide`; the rest is the record of the decision (`crucible/classnames.py`
+> `RETIRED_CLASSES`, `docs/VERB-SIZING.md`).
+
 ## 0. The ruling, in his words
 
 > *"the user can pick a model to use for translate/simplify/etc, but they cant

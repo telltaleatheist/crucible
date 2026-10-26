@@ -1665,12 +1665,12 @@ def test_write_config_copies_a_carried_table_verbatim(tmp_path: Path) -> None:
         desktop_allowance_basis="stated",
         desktop_allowance_note="",
         carried_tables={
-            "routes": {"translate": "anthropic/claude-sonnet-5"},
+            "routes": {"generate": "anthropic/claude-sonnet-5"},
             "upstreams": {"anthropic": {"key": "sk-ant-x", "a_field_from_the_future": 1}},
         },
     )
     document = tomllib.loads(written.read_text(encoding="utf-8"))
-    assert document["routes"] == {"translate": "anthropic/claude-sonnet-5"}
+    assert document["routes"] == {"generate": "anthropic/claude-sonnet-5"}
     assert document["upstreams"]["anthropic"]["a_field_from_the_future"] == 1
     assert document["backend"]["kind"] == "cuda-linux"
 

@@ -21,7 +21,7 @@ from .. import peer as peer_module
 from .. import settings as settings_module
 from ..backend import Backend
 from ..capabilitystore import decide_for, write_capability
-from ..config import AUTH_NONE, Config, load_config
+from ..config import AUTH_NONE, Config, load_config, rewrite_retired
 from ..connect import PairingRequests
 from ..errors import ApiError, ConfigError
 from ..events import SESSION, EventHub
@@ -495,6 +495,10 @@ def _mount_operator_page(app: FastAPI) -> None:
 
 
 def create_app(config: Config, backend: Backend) -> FastAPI:
+    # A config.toml from before 2026-10-25 may still name the retired capability classes
+    # (classnames.RETIRED_CLASSES); load dropped them, and the starting server writes the
+    # file back once without them.
+    rewrite_retired(config)
     # Before anything reads a model's block: a block with forms is read as the form this
     # card takes (docs/FITS-AND-THE-CARD.md section 8).
     manifests.use_host(config, backend)

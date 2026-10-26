@@ -75,11 +75,9 @@ def test_serving_variant_has_one_home_both_ladders_use() -> None:
     assert asrplan.LADDER_BACKEND == CUDA_LINUX
 
 
-def test_the_batched_classes_share_one_working_context_and_one_goal() -> None:
+def test_the_chat_class_has_the_chat_goal_and_the_text_models() -> None:
     by_name = capabilityclasses.BY_NAME
-    for name in ("translate", "simplify", "analysis"):
-        assert by_name[name].work is capabilityclasses.BATCHED_BLOCKS_WORK
-        assert by_name[name].goal is capabilityclasses.CHAT_GOAL
+    assert by_name["generate"].goal is capabilityclasses.CHAT_GOAL
     assert by_name["generate"].candidates is capabilityclasses.TEXT_MODELS
 
 

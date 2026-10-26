@@ -85,8 +85,9 @@ therefore the model family. Crucible picks the quantization.
 
 1. **A goal, then the most parameters, then the highest precision**
    (docs/VERB-SIZING.md rules 2 and 3, built 2026-10-09). A text class carries a
-   `Goal` (`CapabilityClass.goal`, in `params_b`): 27B for `generate`, `translate`,
-   `simplify` and `analysis`, 9B for `decide` and `clean`. The automatic pick
+   `Goal` (`CapabilityClass.goal`, in `params_b`): 27B for `generate`, 9B for
+   `decide` (`clean` at 9B and `translate`, `simplify`, `analysis` at 27B until they
+   were retired to the apps on 2026-10-25). The automatic pick
    (`CapabilityClass.pick_order`) takes, among the candidates at or below the goal
    that fit, the most `[model] params_b`, then the most bits (each backend block's
    stated `bits`), then a model's own form before its `weights_of` alias; the
@@ -162,10 +163,13 @@ first, then a smaller model.
 ### Classes
 
 - `llm` is split into several classes because the ruling is about the work, not
-  the job type. A 12 GB card that cleans but cannot translate has to be able to
-  say so. `simplify` and `analysis` stay separate from `translate` (Owen,
-  2026-09-13: *"they can't lie to the user and say a translate job is running
-  when it's actually a simplify job"*).
+  the job type: `generate` (chat), `decide`, `embed`, `rerank` and `pages`.
+  `clean`, `translate`, `simplify` and `analysis` were classes of their own until
+  2026-10-25, when they were retired to the apps (`classnames.RETIRED_CLASSES`): the
+  apps pick their own text models and send that work as a chat or to `decide`. A
+  config.toml that still names them has them dropped on load, said once on the
+  server log, and the starting server writes the file back without them
+  (`config.rewrite_retired`).
 - **No floor** (REVERSED 2026-10-09, docs/VERB-SIZING.md section 5). The 9B floor
   for clean/translate/simplify/analysis and `min_params_b` are gone: every text
   verb's lineup runs down to the 0.8B, so a small card gets a smaller model, never

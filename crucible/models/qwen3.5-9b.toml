@@ -7,7 +7,7 @@ context_default = 16384
 trained_context = 262144
 modalities = ["text"]
 display = "Qwen 3.5 · 9B"
-description = "The cleanup model, in bf16. Cleanup and the other 9B-class text work; wants a 24 GB card at this precision."
+description = "The 9B in bf16: decide's goal, and the text model apps name for their 9B-class work; wants a 24 GB card at this precision."
 
 [defaults]
 thinking = false

@@ -23,7 +23,7 @@ from typing import Any
 
 from .capabilityclasses import BY_NAME, CLASSES, CapabilityClass, Goal
 from .cardfacts import card_for
-from .classnames import CHAT_VERBS, DEFAULT_CHAT_VERB
+from .classnames import CHAT_VERBS, DEFAULT_CHAT_VERB, RETIRED_CLASSES, retired_class_words
 from .errors import ApiError
 from .fit import Candidate
 from .formrequest import refuse_unknown_form
@@ -105,6 +105,7 @@ def refuse_unsized_verb(verb: str, where: str) -> None:
             f"{list(SIZED_VERBS)}. Name a `model` instead",
             {"verb": verb, "verbs": list(SIZED_VERBS)},
         )
+    _refuse_retired_verb(verb, where, list(SIZED_VERBS))
     raise ApiError(
         400,
         "unknown_verb",
@@ -114,9 +115,25 @@ def refuse_unsized_verb(verb: str, where: str) -> None:
     )
 
 
+def _refuse_retired_verb(verb: str, where: str, verbs: list[str]) -> None:
+    """A verb retired to the apps (classnames.RETIRED_CLASSES) is refused as unknown, with
+    the sentence that tells a client written before the retirement what happened to it."""
+    if verb not in RETIRED_CLASSES:
+        return
+    raise ApiError(
+        400,
+        "unknown_verb",
+        f"{where} names {verb!r}, which is not a verb this server knows: "
+        f"{retired_class_words(verb)}. Send the work as a chat (verb {DEFAULT_CHAT_VERB!r}, "
+        f"or no verb) or to `decide`; the verbs a request may name are {verbs}",
+        {"verb": verb, "verbs": verbs, "retired": True},
+    )
+
+
 def refuse_unchattable_verb(verb: str) -> None:
     """A chat that names a verb names one whose work is a chat (classnames.CHAT_VERBS)."""
     if verb not in BY_NAME:
+        _refuse_retired_verb(verb, "this chat's `verb`", list(CHAT_VERBS))
         raise ApiError(
             400,
             "unknown_verb",

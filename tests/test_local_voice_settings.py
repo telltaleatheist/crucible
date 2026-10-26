@@ -52,7 +52,7 @@ def test_settings_stay_whole_with_a_local_voice_on_the_box(
     assert response.status_code == 200, response.json()
     body = response.json()
     assert body["choice_problems"] == {}
-    assert body["local_model_choices"]["translate"], "the text pickers still draw"
+    assert body["local_model_choices"]["generate"], "the text pickers still draw"
 
 
 def test_one_class_whose_candidate_has_no_row_does_not_blank_the_others(
@@ -71,7 +71,7 @@ def test_one_class_whose_candidate_has_no_row_does_not_blank_the_others(
     assert missing not in [row["id"] for row in choices["tts"]]
     assert problems["tts"][0]["code"] == "catalog_incomplete"
     assert problems["tts"][0]["details"] == {"capability": "tts", "model": missing}
-    assert choices["translate"] == full["translate"], "every other class draws as before"
+    assert choices["generate"] == full["generate"], "every other class draws as before"
     assert set(problems) == {"tts"}
 
 

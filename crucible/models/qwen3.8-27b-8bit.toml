@@ -8,7 +8,7 @@ trained_context = 262144
 modalities = ["text"]
 
 display = "Qwen 3.8 · 27B (8-bit)"
-description = "The 27B at 8 bits — the best translation a 64 GB Mac can hold. Mac only: its weights alone are 28.75 GiB, more than a 24 GB card, which serves the 4-bit."
+description = "The 27B at 8 bits — the best chat model a 64 GB Mac can hold. Mac only: its weights alone are 28.75 GiB, more than a 24 GB card, which serves the 4-bit."
 
 [backends.mlx-darwin]
 engine = "mlx-lm"

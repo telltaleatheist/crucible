@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
-from .. import capabilityclasses, catalog, jobenv
+from .. import capabilityclasses, catalog, classnames, jobenv
 from ..backend import Backend
 from ..config import Config
 from ..errors import ApiError
@@ -214,6 +214,12 @@ def need_entry(config: Config, backend: Backend, where: str, raw: Any) -> EntryO
     capability_class = raw.get("class")
     if not isinstance(capability_class, str):
         return f"{where}: `class` must be a string"
+    if capability_class in classnames.RETIRED_CLASSES:
+        return (
+            f"{where}: {classnames.retired_class_words(capability_class)}. A module "
+            f"needs `generate` or `decide` instead; the classes are "
+            f"{sorted(capabilityclasses.BY_NAME)}"
+        )
     if capability_class not in capabilityclasses.BY_NAME:
         return (
             f"{where}: {capability_class!r} is not a capability class; they "

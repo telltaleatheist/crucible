@@ -5,6 +5,7 @@ from typing import Any, Mapping
 from .backend import CardFacts
 from .capabilityclasses import BY_NAME, CLASSES, CapabilityClass
 from .capabilityrecord import CapabilityRecord
+from .classnames import RETIRED_CLASSES, retired_class_words
 from .contextceiling import check_ceiling, context_ceilings
 from .errors import ApiError
 from .fit import WorkingContext
@@ -99,10 +100,15 @@ def _named_class(
         return None
     entry = BY_NAME.get(capability_class)
     if entry is None:
+        retired = (
+            f"{retired_class_words(capability_class)}. "
+            if capability_class in RETIRED_CLASSES
+            else ""
+        )
         raise ApiError(
             400,
             "unknown_capability",
-            f"{capability_class!r} is not a capability class; this build "
+            f"{retired}{capability_class!r} is not a capability class; this build "
             f"knows {sorted(BY_NAME)}",
             {"capability": capability_class, "known": sorted(BY_NAME)},
         )

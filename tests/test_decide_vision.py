@@ -166,8 +166,8 @@ def test_the_record_keeps_both_forms_through_config_toml(home: Path) -> None:
     row = load_config(home).capability.row("decide")
     assert (row.selected, row.with_images) == ("qwen3.5-9b", "qwen3.5-4b")
     assert row.with_images_reason == on(PC, "decide").with_images.reason
-    assert load_config(home).capability.row("translate").with_images is None
-    assert "with_images" not in record.row("translate").to_dict()
+    assert load_config(home).capability.row("generate").with_images is None
+    assert "with_images" not in record.row("generate").to_dict()
 
 
 def test_a_row_with_half_the_image_pick_is_refused() -> None:
@@ -195,8 +195,8 @@ def test_v1_capability_shows_decide_with_and_without_images(
     assert rows["decide"]["with_images"] == "qwen3.5-4b"
     assert "qwen3.5-9b-vl, the vision form of qwen3.5-9b" in rows["decide"]["with_images_reason"]
     assert "; with images, qwen3.5-4b" in rows["decide"]["summary"]
-    assert rows["translate"]["with_images"] is None
-    assert rows["translate"]["with_images_reason"] is None
+    assert rows["generate"]["with_images"] is None
+    assert rows["generate"]["with_images_reason"] is None
 
 
 def test_the_install_plan_names_the_image_model() -> None:
@@ -332,14 +332,14 @@ def _advised(decision: Decision) -> bool:
 
 def test_the_threshold_is_4b() -> None:
     assert API_KEY_ADVICE_BELOW_PARAMS_B == 4
-    translate, decide_class = BY_NAME["translate"], BY_NAME["decide"]
+    generate, decide_class = BY_NAME["generate"], BY_NAME["decide"]
     small = Candidate(id="x", memory_bytes_estimate=1, params_b=3.9, bits=16)
-    assert translate.advises_api_key(small)
-    assert not translate.advises_api_key(replace(small, params_b=4))
+    assert generate.advises_api_key(small)
+    assert not generate.advises_api_key(replace(small, params_b=4))
     assert not decide_class.advises_api_key(small), "decide reads logprobs no upstream returns"
 
 
-@pytest.mark.parametrize("name", ["clean", "translate", "simplify", "analysis", "generate"])
+@pytest.mark.parametrize("name", ["generate"])
 def test_a_pick_under_4b_recommends_an_api_key_and_names_where(name: str) -> None:
     verdict = on(CUDA_12, name)
     assert verdict.selected == "qwen3.5-2b"
@@ -353,7 +353,7 @@ def test_a_pick_under_4b_recommends_an_api_key_and_names_where(name: str) -> Non
 
 @pytest.mark.parametrize("card,model", [(CUDA_16, "qwen3.5-4b"), (PC, "qwen3.8-27b-4bit")])
 def test_a_pick_at_4b_or_above_recommends_nothing(card: tuple, model: str) -> None:
-    verdict = on(card, "translate")
+    verdict = on(card, "generate")
     assert verdict.selected == model
     assert not _advised(verdict)
 
@@ -365,13 +365,13 @@ def test_decide_is_never_advised_an_api_key() -> None:
 
 
 def test_a_settings_choice_under_4b_is_not_advised() -> None:
-    verdict = on(PC, "translate", chosen="qwen3.5-2b")
+    verdict = on(PC, "generate", chosen="qwen3.5-2b")
     assert verdict.chosen and verdict.selected == "qwen3.5-2b"
     assert not _advised(verdict)
 
 
 def test_the_advice_changes_neither_the_pick_nor_whether_it_runs() -> None:
-    verdict = on(CUDA_8, "translate")
+    verdict = on(CUDA_8, "generate")
     assert verdict.enabled and verdict.selected == "qwen3.5-0.8b"
     assert verdict.shortfall_bytes == 0
 
@@ -384,7 +384,7 @@ def test_the_install_plan_line_carries_the_advice() -> None:
     )
     plan = installplan.install_plan("llm", decisions, card=None, total_bytes=total, pool="card")
     lines = {row["capability"]: row["line"] for row in plan["classes"]}
-    assert UPSTREAM_SETTINGS_BLOCK in lines["translate"]
+    assert UPSTREAM_SETTINGS_BLOCK in lines["generate"]
     assert UPSTREAM_SETTINGS_BLOCK not in lines["decide"]
 
 
@@ -396,5 +396,5 @@ def test_the_doctor_line_is_the_recorded_reason_with_the_advice() -> None:
         "capability": {**record.to_dict(), "could_enable": []},
         "audio_low_vram": None,
     }
-    lines = [line for line in lines_capability(report) if line.startswith("capability translate")]
+    lines = [line for line in lines_capability(report) if line.startswith("capability generate")]
     assert len(lines) == 1 and UPSTREAM_SETTINGS_BLOCK in lines[0]

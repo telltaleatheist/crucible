@@ -15,22 +15,10 @@ def a_class(name: str):
     return next(entry for entry in CLASSES if entry.name == name)
 
 
-def test_translate_reaches_down_to_the_nine_b() -> None:
-    offered = {c.id for c in a_class("translate").candidates("cuda-linux")}
+def test_generate_reaches_down_to_the_nine_b() -> None:
+    offered = {c.id for c in a_class("generate").candidates("cuda-linux")}
     assert "qwen3.5-9b" in offered
     assert "qwen3.8-27b-4bit" in offered
-
-
-def test_simplify_and_analysis_moved_with_it() -> None:
-    translate = {c.id for c in a_class("translate").candidates("cuda-linux")}
-    for name in ("simplify", "analysis"):
-        assert {c.id for c in a_class(name).candidates("cuda-linux")} == translate
-
-
-def test_clean_reaches_down_to_the_0_8b_and_stays_in_its_family() -> None:
-    assert {c.id for c in a_class("clean").candidates("cuda-linux")} == {
-        "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b"
-    }
 
 
 def test_the_best_model_is_still_chosen_by_default_on_a_card_that_holds_it() -> None:
@@ -45,13 +33,13 @@ def test_the_best_model_is_still_chosen_by_default_on_a_card_that_holds_it() -> 
             audio_low_vram=False,
         )
     }
-    assert decisions["translate"].selected == "qwen3.8-27b-4bit"
-    assert decisions["clean"].selected == "qwen3.5-9b"
+    assert decisions["generate"].selected == "qwen3.8-27b-4bit"
+    assert decisions["decide"].selected == "qwen3.5-9b"
 
 
-def test_a_nine_b_can_be_chosen_for_translation() -> None:
+def test_a_nine_b_can_be_chosen_for_chat() -> None:
     decision = decide(
-        a_class("translate"),
+        a_class("generate"),
         "cuda-linux",
         total_bytes=THREE_NINETY_TI,
         desktop_allowance_bytes=DESKTOP,
@@ -65,7 +53,7 @@ def test_a_nine_b_can_be_chosen_for_translation() -> None:
 
 def test_the_noun_names_the_set_it_counts() -> None:
     decision = decide(
-        a_class("translate"),
+        a_class("generate"),
         "cuda-linux",
         total_bytes=TWELVE_GIG,
         desktop_allowance_bytes=DESKTOP,
@@ -78,7 +66,7 @@ def test_the_noun_names_the_set_it_counts() -> None:
 
 
 def test_a_refused_routable_class_names_the_upstream() -> None:
-    for name in ("clean", "translate", "simplify", "analysis"):
+    for name in ROUTABLE_CLASSES:
         decision = decide(
             a_class(name),
             "cuda-linux",
@@ -109,7 +97,7 @@ def test_pages_is_refused_without_the_offer() -> None:
 
 def test_an_enabled_class_is_not_offered_an_upstream() -> None:
     decision = decide(
-        a_class("translate"),
+        a_class("generate"),
         "cuda-linux",
         total_bytes=THREE_NINETY_TI,
         desktop_allowance_bytes=DESKTOP,

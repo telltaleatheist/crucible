@@ -239,7 +239,7 @@ def test_a_denoise_model_not_installed_names_its_own_pull_command(
 
 def test_a_class_is_checked_once_and_resolved_from_the_same_table() -> None:
     served = capabilityclasses.models_by_class()
-    assert modules.check_class("clean") == served["clean"]
+    assert modules.check_class("generate") == served["generate"]
     for model_id in sorted(set().union(*served.values())):
         assert set(capabilityclasses.classes_for_model(model_id)) == {
             name for name, ids in served.items() if model_id in ids

@@ -1,6 +1,6 @@
 {
   "name": "foundry",
-  "version": "2.0.32+92b04d4bd398",
+  "version": "2.0.32+4b4ff2141d13",
   "job_types": [
     {
       "type": "llm",
@@ -13,16 +13,10 @@
   ],
   "needs": [
     {
-      "class": "clean"
+      "class": "generate"
     },
     {
-      "class": "translate"
-    },
-    {
-      "class": "simplify"
-    },
-    {
-      "class": "analysis"
+      "class": "decide"
     },
     {
       "class": "pages"

@@ -18,7 +18,10 @@ type = "align"
 type = "rvc"
 
 [[needs]]
-class = "clean"
+class = "generate"
+
+[[needs]]
+class = "decide"
 
 [[subjects]]
 kind = "model"

@@ -266,9 +266,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
     @private.get("/resolve")
     async def resolve_preview(
         verb: str | None = Query(None, description=(
-            "The verb whose door is previewed: `generate` (the default: a chat), `clean`, "
-            "`translate`, `simplify`, `analysis` (a chat naming that verb), `decide`, "
-            "`embed`, `rerank`, `image`.")),
+            "The verb whose door is previewed: `generate` (the default: a chat), "
+            "`decide`, `embed`, `rerank`, `image`.")),
         model: str | None = Query(None, description="As the request's `model`."),
         max_params_b: str | None = Query(None, description=(
             "As the request's `max_params_b`, read the same way (a number above 0); "
@@ -280,8 +279,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
     ) -> dict[str, Any]:
         """Which model a request would be served by, without sending it: nothing is
         loaded, reserved or queued. The query is the request's own choosing fields:
-        `verb` (default `generate`, a chat; also `clean`, `translate`, `simplify`,
-        `analysis`, `decide`, `embed`, `rerank`, `image`), `model`, `max_params_b`,
+        `verb` (default `generate`, a chat; also `decide`, `embed`, `rerank`, `image`),
+        `model`, `max_params_b`,
         `form`, and for `decide` `images` (how many the decision carries). The answer
         names the `model`, its `source` (`model`, `max_params_b`, `settings`, `auto`), its
         `params_b`, `bits`, `engine` and `form`, whether it is `installed` and `resident`,

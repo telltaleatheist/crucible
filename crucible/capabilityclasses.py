@@ -152,26 +152,12 @@ TEXT_FAMILIES = ("qwen3.8", "qwen3.5")
 
 TEXT_FAMILIES_NOUN = "qwen3.8 and qwen3.5 variants"
 
-BATCHED_BLOCKS_WORK = WorkingContext(
-    tokens=4096,
-    concurrency=4,
-    source=(
-        "Owen 2026-09-16: \"translate/simplify/etc dont actually need "
-        "that much kv cache because it's batched with small blocks. it "
-        "isnt sending in the entire book to be translated, its only "
-        "sending it in one block (roughly a paragraph) at a time. and "
-        "its batched, so each block doesnt depend on the context of the "
-        "one that came before it\""
-    ),
-)
-
 TEXT_MODELS = _from_catalog(load_all_manifests, *TEXT_FAMILIES)
 
 CHAT_GOAL = Goal(
     params_b=27,
     source=(
-        "Owen 2026-10-09: \"chat should shoot for 27b\"; translate, simplify and "
-        "analysis share it (docs/VERB-SIZING.md rule 2)"
+        "Owen 2026-10-09: \"chat should shoot for 27b\" (docs/VERB-SIZING.md rule 2)"
     ),
 )
 
@@ -207,15 +193,10 @@ RERANK_FAMILY = "qwen3-reranker"
 
 VERB_WORK_TOKENS = 8192
 
-CLEAN_GOAL = Goal(
-    params_b=9,
-    source=(
-        "docs/VERB-SIZING.md rule 2: clean's goal is 9B; cleanup was always "
-        "9B-class work (docs/MODEL-CHOICE.md section 1)"
-    ),
-)
-
-
+# Who picks a class's model, and why the client never picks the quantization:
+# docs/MODEL-CHOICE.md. The text classes it was written for (`clean`, `translate`,
+# `simplify`, `analysis`) were retired to the apps on 2026-10-25 (classnames.RETIRED_CLASSES);
+# `generate` and `decide` carry what it ruled.
 CLASSES: tuple[CapabilityClass, ...] = (
     CapabilityClass(
         name="echo",
@@ -224,57 +205,6 @@ CLASSES: tuple[CapabilityClass, ...] = (
         plainly="run the test job",
         noun="engines",
         candidates=None,
-    ),
-    CapabilityClass(
-        name="clean",
-        job_type="llm",
-        routable=True,
-        work=WorkingContext(
-            tokens=8192,
-            concurrency=2,
-            source=(
-                "Foundry clean/runner.ts CTX_MAX 16384 spent as two in flight; "
-                "PLACEHOLDER until a cleanup run is watched"
-            ),
-        ),
-        purpose="cleanup and the other 9B-class text work",
-        plainly="clean up text",
-        noun="qwen3.5 variants",
-        candidates=_from_catalog(load_all_manifests, "qwen3.5"),
-        goal=CLEAN_GOAL,
-    ),
-    CapabilityClass(
-        name="translate",
-        job_type="llm",
-        routable=True,
-        work=BATCHED_BLOCKS_WORK,
-        purpose="translation, with a 27B as its goal",
-        plainly="translate",
-        noun=TEXT_FAMILIES_NOUN,
-        candidates=TEXT_MODELS,
-        goal=CHAT_GOAL,
-    ),
-    CapabilityClass(
-        name="simplify",
-        job_type="llm",
-        routable=True,
-        work=BATCHED_BLOCKS_WORK,
-        purpose="simplification, with translation's 27B goal",
-        plainly="simplify text",
-        noun=TEXT_FAMILIES_NOUN,
-        candidates=TEXT_MODELS,
-        goal=CHAT_GOAL,
-    ),
-    CapabilityClass(
-        name="analysis",
-        job_type="llm",
-        routable=True,
-        work=BATCHED_BLOCKS_WORK,
-        purpose="structured analysis answers, with translation's 27B goal",
-        plainly="analyse text",
-        noun=TEXT_FAMILIES_NOUN,
-        candidates=TEXT_MODELS,
-        goal=CHAT_GOAL,
     ),
     CapabilityClass(
         name="generate",
@@ -545,12 +475,10 @@ def classes_for_model(model_id: str) -> tuple[str, ...]:
 
 __all__ = [
     "API_KEY_ADVICE_BELOW_PARAMS_B",
-    "BATCHED_BLOCKS_WORK",
     "BY_NAME",
     "CATALOG_DIRECTORY",
     "CHAT_GOAL",
     "CLASSES",
-    "CLEAN_GOAL",
     "CapabilityClass",
     "DECIDE_GOAL",
     "EMBED_FAMILY",

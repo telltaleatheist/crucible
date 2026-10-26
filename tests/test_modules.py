@@ -58,7 +58,7 @@ def test_bookforge_asks_for_what_its_install_door_used_to_print() -> None:
     scope = {s["id"]: s.get("backends") for s in document["subjects"]}
     assert scope["whisper-large-v3-turbo"] == ["cuda-linux", "mlx-darwin"]
     assert scope["qwen3-aligner"] == ["cuda-linux", "mlx-darwin"]
-    assert [need["class"] for need in document["needs"]] == ["clean"]
+    assert [need["class"] for need in document["needs"]] == ["generate", "decide"]
     tts = next(e for e in document["job_types"] if e["type"] == "tts")
     assert tts["narrator_engine"] == "higgs-v3"
 
@@ -81,14 +81,14 @@ def test_generated_job_types_follow_the_core_backend_support_policy() -> None:
 
 
 def test_foundry_asks_for_the_classes_owens_ruling_names() -> None:
+    # Owen 2026-10-25: Foundry's cleanup, translation, simplification and analysis are
+    # plain chat (`generate`) or `decide`; the four classes of their own are retired.
     document = json.loads(
         (MODULES_DIR / "foundry.module.json").read_text(encoding="utf-8")
     )
     assert [need["class"] for need in document["needs"]] == [
-        "clean",
-        "translate",
-        "simplify",
-        "analysis",
+        "generate",
+        "decide",
         "pages",
     ]
     assert document["subjects"] == []
@@ -140,10 +140,10 @@ def test_the_same_content_hashes_the_same_and_a_change_moves_it() -> None:
     assert modules.version_of(moved) != modules.version_of(body)
 
 
-def test_translate_and_simplify_no_longer_resolve_to_a_9b_floor() -> None:
+def test_the_text_classes_do_not_resolve_to_a_9b_floor() -> None:
     # The 9B floor marker is gone (Owen 2026-10-09): a module that needs these classes
     # names its model, as it does for every other class with several candidates.
-    for name in ("translate", "simplify"):
+    for name in ("generate", "decide"):
         with pytest.raises(ModuleError) as caught:
             modules.resolve_class(name, None)
         assert "model =" in str(caught.value)
@@ -154,27 +154,27 @@ def test_a_class_with_one_candidate_resolves_to_it() -> None:
     assert modules.resolve_class("pages", None) == "dots-ocr"
 
 
-def test_clean_now_reaches_the_small_tiers_and_needs_its_model_named() -> None:
+def test_generate_reaches_the_small_tiers_and_needs_its_model_named() -> None:
     with pytest.raises(ModuleError) as caught:
-        modules.resolve_class("clean", None)
+        modules.resolve_class("generate", None)
     assert "qwen3.5-0.8b" in str(caught.value) and "model =" in str(caught.value)
 
 
 def test_a_class_with_several_candidates_and_no_floor_is_refused() -> None:
     with pytest.raises(ModuleError) as caught:
-        modules.resolve_class("analysis", None)
+        modules.resolve_class("generate", None)
     assert "qwen3.8-27b-4bit" in str(caught.value)
     assert "model =" in str(caught.value)
 
 
 def test_a_named_model_is_checked_against_the_class_it_was_named_for() -> None:
-    assert modules.resolve_class("analysis", "qwen3.8-27b-4bit") == "qwen3.8-27b-4bit"
+    assert modules.resolve_class("generate", "qwen3.8-27b-4bit") == "qwen3.8-27b-4bit"
     with pytest.raises(ModuleError, match="does not serve"):
-        modules.resolve_class("analysis", "dots-ocr")
+        modules.resolve_class("generate", "dots-ocr")
 
 
-def test_the_9b_now_serves_the_three_acts_it_used_to_be_refused_for() -> None:
-    for name in ("translate", "simplify", "analysis"):
+def test_the_9b_serves_both_text_verbs() -> None:
+    for name in ("generate", "decide"):
         assert modules.resolve_class(name, "qwen3.5-9b") == "qwen3.5-9b"
 
 

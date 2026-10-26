@@ -241,12 +241,12 @@ the engine's own, which the load already checked against the manifest. Resuming
 with `--since` past that frame is refused rather than guessing a rate
 (`audio_needs_the_ready_frame`); decode `pcm_base64` yourself in that case.
 
-### Chat — the cleanup and translation door
+### Chat — the chat door
 
 ```
 crucible api chat --model qwen3.5-9b --message "…"           one-shot shorthand
 crucible api chat --max-params-b 4 --message "…"             the server's chat model, at most 4B
-crucible api chat --verb translate --message "…"             the server's translate model
+crucible api chat --verb generate --message "…"              the server's chat model (the default verb)
 crucible api chat --body @request.json [--stream] [--act clean]
 crucible api session open --act generate --max-params-b 4    open on the server's chat model, at most 4B
 ```

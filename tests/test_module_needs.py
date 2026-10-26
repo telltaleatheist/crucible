@@ -91,7 +91,7 @@ def test_a_need_carrying_anything_but_a_class_is_refused(
     response = post_module(
         client,
         auth,
-        a_module(needs=[{"class": "clean", "model": "qwen3.5-9b"}]),
+        a_module(needs=[{"class": "generate", "model": "qwen3.5-9b"}]),
     )
     assert response.status_code == 400
     message = response.json()["error"]["message"]
@@ -126,9 +126,9 @@ def test_a_class_resolves_to_what_THIS_card_selected_and_pulls_it(
 
     monkeypatch.setattr("crucible.tasks.TaskStore._pull", fake_pull)
     with make_client(
-        enable_llm=True, capability=record(row("clean", selected="qwen3.5-9b"))
+        enable_llm=True, capability=record(row("generate", selected="qwen3.5-9b"))
     ) as server:
-        accepted = post_module(server, auth, a_module(needs=[{"class": "clean"}]))
+        accepted = post_module(server, auth, a_module(needs=[{"class": "generate"}]))
         assert accepted.status_code == 202, accepted.text
         finished = wait_for(server, auth, accepted.json()["task_id"])
     assert finished["state"] == "done"
@@ -174,9 +174,9 @@ def test_the_unmet_reason_is_the_capability_row_s_OWN_sentence(
 ) -> None:
     said = "disabled: the smallest candidate needs 24.0 GiB and there is 21.0"
     with make_client(
-        capability=record(row("analysis", enabled=False, reason=said))
+        capability=record(row("decide", enabled=False, reason=said))
     ) as server:
-        accepted = post_module(server, auth, a_module(needs=[{"class": "analysis"}]))
+        accepted = post_module(server, auth, a_module(needs=[{"class": "decide"}]))
         finished = wait_for(server, auth, accepted.json()["task_id"])
     assert finished["unmet"][0]["reason"] == said
 
@@ -185,7 +185,7 @@ def test_a_server_with_NO_capability_record_says_so_by_name(
     make_client: Callable[..., TestClient], auth: dict[str, str]
 ) -> None:
     with make_client(capability=None) as server:
-        accepted = post_module(server, auth, a_module(needs=[{"class": "clean"}]))
+        accepted = post_module(server, auth, a_module(needs=[{"class": "generate"}]))
         finished = wait_for(server, auth, accepted.json()["task_id"])
     assert finished["state"] == "done"
     assert "no capability record" in finished["unmet"][0]["reason"]
@@ -249,7 +249,7 @@ def test_a_subject_whose_type_this_server_cannot_turn_on_says_so_per_class(
         finished = wait_for(client, auth, accepted.json()["task_id"])
     assert finished["state"] == "done"
     assert {row["entry"] for row in finished["unmet"]} == {"enable llm"}
-    assert "clean" in {row["class"] for row in finished["unmet"]}
+    assert "generate" in {row["class"] for row in finished["unmet"]}
     assert all("crucible capability --write" in row["reason"] for row in finished["unmet"])
 
 

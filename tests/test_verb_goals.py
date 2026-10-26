@@ -21,7 +21,7 @@ from crucible.verdict import Decision, decide
 
 from .conftest import FAKE_MAC_BACKEND, configure_box
 
-TEXT_VERBS = ("decide", "clean", "translate", "simplify", "analysis", "generate")
+TEXT_VERBS = ("decide", "generate")
 
 PC = (CUDA_LINUX, 24 * GIB, 3 * GIB, "nvidia")
 STUDIO = (
@@ -70,11 +70,6 @@ def test_decide_on_the_mac_studio_takes_the_9b_not_the_8bit_27b() -> None:
     assert "(goal 9B; 16-bit fits with " in verdict.summary
 
 
-@pytest.mark.parametrize("card", [PC, STUDIO], ids=["pc", "studio"])
-def test_clean_never_goes_above_its_9b_goal(card: tuple[str, int, int, str]) -> None:
-    assert on(card, "clean").selected == "qwen3.5-9b"
-
-
 # --- params first, then bits ------------------------------------------------------------
 
 
@@ -88,7 +83,7 @@ def candidate(
 
 
 def test_more_parameters_beat_more_bits_and_bits_settle_a_size() -> None:
-    entry = BY_NAME["translate"]
+    entry = BY_NAME["generate"]
     found = (
         candidate("4b-16", 4, 16, 9 * GIB),
         candidate("9b-4", 9, 4, 6 * GIB),
@@ -109,16 +104,16 @@ def test_a_models_own_form_is_taken_before_its_alias() -> None:
     assert [c.id for c in entry.pick_order(found)] == ["9b", "9b-vl"]
 
 
-def test_the_pc_translates_on_the_4bit_27b_over_the_bf16_9b_that_also_fits() -> None:
-    verdict = on(PC, "translate")
-    assert {"qwen3.8-27b-4bit", "qwen3.5-9b"} <= set(fitting_ids(verdict, "translate"))
+def test_the_pc_chats_on_the_4bit_27b_over_the_bf16_9b_that_also_fits() -> None:
+    verdict = on(PC, "generate")
+    assert {"qwen3.8-27b-4bit", "qwen3.5-9b"} <= set(fitting_ids(verdict, "generate"))
     assert verdict.selected == "qwen3.8-27b-4bit"
     assert "(goal 27B; 4-bit fits with " in verdict.summary
 
 
-def test_the_studio_translates_on_the_8bit_27b_over_the_4bit() -> None:
-    verdict = on(STUDIO, "translate")
-    assert {"qwen3.8-27b-8bit", "qwen3.8-27b-4bit"} <= set(fitting_ids(verdict, "translate"))
+def test_the_studio_chats_on_the_8bit_27b_over_the_4bit() -> None:
+    verdict = on(STUDIO, "generate")
+    assert {"qwen3.8-27b-8bit", "qwen3.8-27b-4bit"} <= set(fitting_ids(verdict, "generate"))
     assert verdict.selected == "qwen3.8-27b-8bit"
 
 
@@ -221,7 +216,7 @@ def test_a_chosen_model_above_the_goal_still_wins() -> None:
 
 
 def test_a_chosen_model_below_the_goal_still_wins() -> None:
-    verdict = on(PC, "translate", chosen="qwen3.5-4b")
+    verdict = on(PC, "generate", chosen="qwen3.5-4b")
     assert (verdict.selected, verdict.chosen) == ("qwen3.5-4b", True)
 
 
@@ -233,7 +228,7 @@ def test_the_store_passes_the_settings_choice_over_the_pick() -> None:
     )
     by_name = {d.capability: d for d in decisions}
     assert by_name["decide"].selected == "qwen3.8-27b-4bit"
-    assert by_name["clean"].selected == "qwen3.5-9b"
+    assert by_name["generate"].selected == "qwen3.8-27b-4bit"
 
 
 # --- the surfaces say it --------------------------------------------------------------------
@@ -256,7 +251,7 @@ def test_the_install_plan_names_the_goal_and_its_best_within_it() -> None:
         "Will decide with qwen3.5-4b-8bit in 8-bit (goal 9B; the largest that fits this card). "
         "The best, qwen3.5-9b, needs "
     )
-    assert rows["translate"]["best"] == "qwen3.8-27b-4bit"
+    assert rows["generate"]["best"] == "qwen3.8-27b-4bit"
     assert rows["pages"]["goal"] is None
 
 

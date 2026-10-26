@@ -39,11 +39,7 @@ def routed(make_client: Callable[..., TestClient], auth, upstream, monkeypatch):
                     "openai": {"key": OPENAI_KEY},
                     "ollama": {"url": upstream.url},
                 },
-                "routes": {
-                    "translate": "anthropic/claude-sonnet-5",
-                    "simplify": "openai/gpt-5",
-                    "clean": "ollama/qwen3.5:9b",
-                },
+                "routes": {"generate": "anthropic/claude-sonnet-5"},
             },
         )
         assert written.status_code == 200, written.text
@@ -394,7 +390,7 @@ def test_an_unreachable_upstream_is_502_upstream_unreachable(
             headers=auth,
             json={
                 "upstreams": {"ollama": {"url": dead}},
-                "routes": {"clean": "ollama/qwen3.5:9b"},
+                "routes": {"generate": "ollama/qwen3.5:9b"},
             },
         )
         body = chat(
@@ -459,7 +455,7 @@ def test_openai_models_lists_every_model_each_upstream_serves(routed, auth) -> N
     }
     row = by_id["anthropic/claude-sonnet-5"]
     assert (row["upstream"], row["owned_by"], row["routed_for"], row["listed"]) == (
-        "anthropic", "anthropic", ["translate"], True)
+        "anthropic", "anthropic", ["generate"], True)
     assert by_id["anthropic/claude-haiku-5"]["routed_for"] == [], (
         "a model no route names is listed all the same: an app picks it per job"
     )
@@ -509,7 +505,7 @@ def test_an_upstream_that_never_answered_lists_only_what_a_route_names(
     with make_client(enable_llm=True, capability=decided()) as client:
         client.put("/v1/settings", headers=auth, json={
             "upstreams": {"anthropic": {"key": ANTHROPIC_KEY}},
-            "routes": {"translate": "anthropic/claude-sonnet-5"},
+            "routes": {"generate": "anthropic/claude-sonnet-5"},
         })
         listed = client.get("/v1/openai/models", headers=auth).json()
     assert [(r["id"], r["listed"]) for r in listed["data"]] == [
@@ -525,18 +521,6 @@ def test_a_new_key_reads_the_vendor_list_again_at_once(routed, auth, upstream) -
                json={"upstreams": {"anthropic": {"key": ANTHROPIC_KEY + "x"}}})
     routed.get("/v1/openai/models", headers=auth)
     assert sum(1 for h in upstream.headers_seen if "x-api-key" in h) == before + 1
-
-def test_two_classes_on_one_model_are_one_row(routed, auth) -> None:
-    routed.put(
-        "/v1/settings",
-        headers=auth,
-        json={"routes": {"simplify": "anthropic/claude-sonnet-5"}},
-    )
-    rows = routed.get("/v1/openai/models", headers=auth).json()["data"]
-    sonnet = [r for r in rows if r["id"] == "anthropic/claude-sonnet-5"]
-    assert len(sonnet) == 1
-    assert sorted(sonnet[0]["routed_for"]) == ["simplify", "translate"]
-
 
 def test_a_forwarded_chat_is_recorded_in_flight_with_its_act_and_model(
     routed, auth, monkeypatch
