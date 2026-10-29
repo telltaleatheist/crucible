@@ -728,7 +728,7 @@ test('chat posts the OpenAI body and reads the completion down to what it promis
     content: 'The forge is lit.',
     toolCalls: [],
     reasoning: null,
-    reasoningBlocks: [],
+    contentBlocks: [],
     finishReason: 'stop',
     usage: { promptTokens: 17, completionTokens: 5, totalTokens: 22, cachedTokens: null },
   });

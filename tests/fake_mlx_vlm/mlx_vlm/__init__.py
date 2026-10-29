@@ -10,6 +10,9 @@ STOP_TEXT = "<|endoftext|>"
 
 STOP_TOKEN = 151643
 
+# Qwen 3.5's ids for its think tags.
+THINK_TAGS = {"<think>": 151667, "</think>": 151668}
+
 
 class _Config:
     def __init__(self) -> None:
@@ -64,6 +67,11 @@ class _Detokenizer:
 
 
 class _Tokenizer:
+
+    def get_vocab(self) -> dict[str, int]:
+        if os.environ.get("CRUCIBLE_FAKE_MLX_VLM_MODEL_TYPE") == "qwen3_5":
+            return dict(THINK_TAGS)
+        return {}
 
     def decode(self, tokens: list[int]) -> str:
         return "".join(STOP_TEXT if token == STOP_TOKEN else chr(token) for token in tokens)

@@ -110,6 +110,12 @@ class SubprocessEngine:
 
     chat_prefill_basis: str | None = None
 
+    reasoning_field: str = "reasoning"
+    """The member an assistant message's thinking is on the engine's wire, both ways.
+    The chat door speaks `reasoning` to every caller (vLLM and mlx-lm write it, and vLLM
+    reads it back); an engine that says it another way is renamed at the door, its
+    replies to `reasoning` and the history it is sent to its own name (api/proxy.py)."""
+
     structured_output_formats: frozenset[str] = frozenset()
     """The `response_format` types beyond `text` the engine enforces."""
 

@@ -466,6 +466,9 @@ class _Handler(BaseHTTPRequestHandler):
         owner = type(self).owner
         preamble = owner.tool_preamble
         usage = {"input_tokens": 11, "output_tokens": 7}
+        if owner.interleaved_thinking:
+            self._anthropic_interleaved(body, uses, usage)
+            return
         if body.get("stream") is not True:
             content: list[dict[str, Any]] = [
                 {"type": "thinking", "thinking": "", "signature": "sig"}
@@ -506,6 +509,55 @@ class _Handler(BaseHTTPRequestHandler):
                                            "partial_json": piece}})
             self._event("content_block_stop", {"index": index})
             index += 1
+        self._event("message_delta", {"delta": {"stop_reason": "tool_use"},
+                                      "usage": {"output_tokens": 7}})
+        self._event("message_stop", {})
+
+    def _anthropic_interleaved(
+        self, body: dict[str, Any], uses: list[dict[str, Any]], usage: dict[str, Any]
+    ) -> None:
+        """Opus 5.5's shape: a thinking block BEFORE EACH call, then the call, and a
+        closing text: thinking, tool_use, thinking, tool_use, text."""
+        content: list[dict[str, Any]] = []
+        for number, use in enumerate(uses, start=1):
+            content.append({"type": "thinking", "thinking": f"Progress {number}.",
+                            "signature": f"sig-{number}"})
+            content.append({"type": "tool_use", **use})
+        content.append({"type": "text", "text": "Checking both."})
+        if body.get("stream") is not True:
+            self._json(200, {"id": "msg_interleaved", "type": "message", "role": "assistant",
+                             "model": body.get("model"), "content": content,
+                             "stop_reason": "tool_use", "usage": usage})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        self._event("message_start", {"message": {"id": "msg_interleaved", "usage": usage}})
+        for index, block in enumerate(content):
+            if block["type"] == "thinking":
+                self._event("content_block_start", {"index": index, "content_block": {
+                    "type": "thinking", "thinking": "", "signature": ""}})
+                half = len(block["thinking"]) // 2
+                for piece in (block["thinking"][:half], block["thinking"][half:]):
+                    self._event("content_block_delta", {"index": index, "delta": {
+                        "type": "thinking_delta", "thinking": piece}})
+                self._event("content_block_delta", {"index": index, "delta": {
+                    "type": "signature_delta", "signature": block["signature"]}})
+            elif block["type"] == "tool_use":
+                self._event("content_block_start", {"index": index, "content_block": {
+                    "type": "tool_use", "id": block["id"], "name": block["name"], "input": {}}})
+                encoded = json.dumps(block["input"]) if block["input"] else ""
+                middle = len(encoded) // 2
+                for piece in (encoded[:middle], encoded[middle:]):
+                    if piece:
+                        self._event("content_block_delta", {"index": index, "delta": {
+                            "type": "input_json_delta", "partial_json": piece}})
+            else:
+                self._event("content_block_start", {"index": index, "content_block": {
+                    "type": "text", "text": ""}})
+                self._event("content_block_delta", {"index": index, "delta": {
+                    "type": "text_delta", "text": block["text"]}})
+            self._event("content_block_stop", {"index": index})
         self._event("message_delta", {"delta": {"stop_reason": "tool_use"},
                                       "usage": {"output_tokens": 7}})
         self._event("message_stop", {})
@@ -593,6 +645,8 @@ class FakeUpstream:
         # A redacted_thinking block's data the Anthropic fake answers with, after its
         # thinking block; None, it answers with none.
         self.redacted_thinking: str | None = None
+        # The tool answer in Opus 5.5's interleaved shape (_anthropic_interleaved).
+        self.interleaved_thinking = False
         self.ollama_tool_calls: list[dict[str, Any]] | None = None
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None

@@ -111,7 +111,7 @@ import {
   type ChatResponse,
   type ChatToolCall,
   type ChatUsage,
-  type ReasoningBlock,
+  type ClaudeContentBlock,
   type ReasoningEffort,
   type ChunkData,
   type PauseCut,
@@ -1422,10 +1422,10 @@ export class CrucibleClient {
         'is for chatStream; a chat() answer carries its thinking in ChatResponse.reasoning',
       );
     }
-    if (options !== undefined && options !== null && options.onReasoningBlocks !== undefined) {
+    if (options !== undefined && options !== null && options.onContentBlocks !== undefined) {
       throw new CrucibleConfigError(
-        'onReasoningBlocks',
-        'is for chatStream; a chat() answer carries them in ChatResponse.reasoningBlocks',
+        'onContentBlocks',
+        'is for chatStream; a chat() answer carries them in ChatResponse.contentBlocks',
       );
     }
     const init = this.#chatRequest(options, false);
@@ -1476,9 +1476,9 @@ export class CrucibleClient {
     const onUsage = options.onUsage;
     const onToolCalls = options.onToolCalls;
     const onReasoning = options.onReasoning;
-    const onReasoningBlocks = options.onReasoningBlocks;
+    const onContentBlocks = options.onContentBlocks;
     const toolCalls = new ToolCallAssembly();
-    let reasoningBlocks: readonly ReasoningBlock[] = [];
+    let contentBlocks: readonly ClaudeContentBlock[] = [];
     let usage: ChatUsage | null = null;
     let finished = false;
     try {
@@ -1490,7 +1490,7 @@ export class CrucibleClient {
         const chunk = readChatChunk(frame.data);
         if (chunk.usage !== null) usage = chunk.usage;
         for (const fragment of chunk.toolCalls) toolCalls.add(fragment);
-        if (chunk.reasoningBlocks !== null) reasoningBlocks = chunk.reasoningBlocks;
+        if (chunk.contentBlocks !== null) contentBlocks = chunk.contentBlocks;
         if (chunk.reasoning !== null && onReasoning !== undefined) onReasoning(chunk.reasoning);
         if (chunk.content !== null) yield chunk.content;
       }
@@ -1515,7 +1515,7 @@ export class CrucibleClient {
       );
     }
     if (onToolCalls !== undefined) onToolCalls(toolCalls.finish());
-    if (onReasoningBlocks !== undefined) onReasoningBlocks(reasoningBlocks);
+    if (onContentBlocks !== undefined) onContentBlocks(contentBlocks);
     if (onUsage !== undefined) {
       if (usage === null) {
         throw new CrucibleProtocolError(
@@ -4722,9 +4722,9 @@ function readChatMessage(entry: unknown, where: string): Record<string, unknown>
       }
       wire['reasoning'] = reasoning;
     }
-    const blocks = message['reasoningBlocks'];
+    const blocks = message['contentBlocks'];
     if (blocks !== undefined) {
-      wire['reasoning_blocks'] = readGivenReasoningBlocks(blocks, `${where}.reasoningBlocks`);
+      wire['content_blocks'] = readGivenClaudeContentBlocks(blocks, `${where}.contentBlocks`);
     }
     return wire;
   }
@@ -4738,23 +4738,26 @@ function readChatMessage(entry: unknown, where: string): Record<string, unknown>
   return { role, content };
 }
 
+/** The block types a Claude turn's `content_blocks` hold. */
+const CONTENT_BLOCK_TYPES: readonly string[] = ['thinking', 'redacted_thinking', 'text', 'tool_use'];
+
 /**
- * A caller's `reasoningBlocks` (an assistant turn sent back): the blocks a reply carried, each a
- * thinking or redacted_thinking block, put on the wire unchanged.
+ * A caller's `contentBlocks` (an assistant turn sent back): the blocks a reply carried, each a
+ * thinking, redacted_thinking, text or tool_use block, put on the wire unchanged.
  */
-function readGivenReasoningBlocks(value: unknown, where: string): unknown[] {
+function readGivenClaudeContentBlocks(value: unknown, where: string): unknown[] {
   if (!Array.isArray(value)) {
-    throw new CrucibleConfigError(where, `must be the reasoningBlocks a reply carried, got ${typeof value}`);
+    throw new CrucibleConfigError(where, `must be the contentBlocks a reply carried, got ${typeof value}`);
   }
   value.forEach((block, index) => {
     const type =
       typeof block === 'object' && block !== null && !Array.isArray(block)
         ? (block as Record<string, unknown>)['type']
         : undefined;
-    if (type !== 'thinking' && type !== 'redacted_thinking') {
+    if (!CONTENT_BLOCK_TYPES.includes(type as string)) {
       throw new CrucibleConfigError(
         `${where}[${index}]`,
-        'must be a thinking or redacted_thinking block, sent back unchanged',
+        'must be a thinking, redacted_thinking, text or tool_use block, sent back unchanged',
       );
     }
   });
@@ -4927,7 +4930,7 @@ function readChatResponse(body: Json): ChatResponse {
     content,
     toolCalls,
     reasoning: readReasoning(message, 'chat.choices[0].message'),
-    reasoningBlocks: readReasoningBlocks(message, 'chat.choices[0].message') ?? [],
+    contentBlocks: readClaudeContentBlocks(message, 'chat.choices[0].message') ?? [],
     finishReason,
     usage: usage === null ? null : readChatUsage(usage),
   };
@@ -4944,19 +4947,19 @@ function readReasoning(container: Json, where: string): string | null {
   return reasoning;
 }
 
-/** `reasoning_blocks` on a message or delta, as the server sent them; null when absent. */
-function readReasoningBlocks(container: Json, where: string): ReasoningBlock[] | null {
-  if (!('reasoning_blocks' in container)) return null;
-  const raw = asArray(container['reasoning_blocks'], `${where}.reasoning_blocks`);
+/** `content_blocks` on a message or delta, as the server sent them; null when absent. */
+function readClaudeContentBlocks(container: Json, where: string): ClaudeContentBlock[] | null {
+  if (!('content_blocks' in container)) return null;
+  const raw = asArray(container['content_blocks'], `${where}.content_blocks`);
   return raw.map((entry, index) => {
-    const block = asObject(entry, `${where}.reasoning_blocks[${index}]`);
+    const block = asObject(entry, `${where}.content_blocks[${index}]`);
     const type = block['type'];
-    if (type !== 'thinking' && type !== 'redacted_thinking') {
+    if (!CONTENT_BLOCK_TYPES.includes(type as string)) {
       throw new CrucibleProtocolError(
-        `${where}.reasoning_blocks[${index}].type is ${JSON.stringify(type)}, not a thinking block`,
+        `${where}.content_blocks[${index}].type is ${JSON.stringify(type)}, not a Claude turn's block`,
       );
     }
-    return block as ReasoningBlock;
+    return block as ClaudeContentBlock;
   });
 }
 
@@ -5706,7 +5709,7 @@ interface ToolCallFragment {
 function readChatChunk(raw: string): {
   content: string | null;
   reasoning: string | null;
-  reasoningBlocks: ReasoningBlock[] | null;
+  contentBlocks: ClaudeContentBlock[] | null;
   toolCalls: ToolCallFragment[];
   usage: ChatUsage | null;
 } {
@@ -5724,8 +5727,8 @@ function readChatChunk(raw: string): {
   return {
     content: delta === null ? null : readDeltaContent(delta),
     reasoning: delta === null ? null : readReasoning(delta, 'chat chunk.choices[0].delta'),
-    reasoningBlocks:
-      delta === null ? null : readReasoningBlocks(delta, 'chat chunk.choices[0].delta'),
+    contentBlocks:
+      delta === null ? null : readClaudeContentBlocks(delta, 'chat chunk.choices[0].delta'),
     toolCalls: delta === null ? [] : readDeltaToolCalls(delta),
     usage,
   };

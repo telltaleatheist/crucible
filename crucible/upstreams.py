@@ -331,14 +331,18 @@ ANTHROPIC_EFFORT_FIELD = "reasoning_effort"
 # readable summary in its thinking blocks instead of empty text. Billed the same.
 ANTHROPIC_THINKING: dict[str, str] = {"type": "adaptive", "display": "summarized"}
 
-# An assistant message's Anthropic thinking blocks, exactly as Claude wrote them
-# ({type: thinking, thinking, signature} or {type: redacted_thinking, data}). A reply
-# carries them (streamed: in the finish chunk's delta) so a tool loop can send them
-# back on the assistant turn unchanged, which the Messages API requires to keep its
-# thinking across the loop. Crucible stores none of it, and every other destination
-# is sent the message without it (strip_reasoning_blocks).
-REASONING_BLOCKS_FIELD = "reasoning_blocks"
-_REASONING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
+# An assistant turn's Messages API content, IN ORDER and exactly as Claude wrote it:
+# its thinking, redacted_thinking, text and tool_use blocks. A reply carries it when
+# the turn holds any thinking (streamed: assembled, in the finish chunk's delta), so a
+# tool loop can send the turn back unchanged, which the Messages API requires to keep
+# its thinking: Opus 5.5 and Sonnet 5.5 write thinking blocks BETWEEN tool calls, and
+# any edit of the turn (a block moved) invalidates them. Sent back, it is the turn's
+# content verbatim, once its text and calls are checked against the message's own
+# (`content_blocks_mismatch`). Crucible stores none of it, and every other destination
+# is sent the message without it (strip_content_blocks).
+CONTENT_BLOCKS_FIELD = "content_blocks"
+_THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
+_CONTENT_BLOCK_TYPES = _THINKING_BLOCK_TYPES | {"text", "tool_use"}
 # The reply's readable thinking. It is never sent back to Claude: the blocks carry it.
 REASONING_FIELD = "reasoning"
 
@@ -486,24 +490,25 @@ def _anthropic_message(
         )
     known = {"role", "content", "tool_calls"}
     if role == "assistant":
-        known |= {REASONING_FIELD, REASONING_BLOCKS_FIELD}
+        known |= {REASONING_FIELD, CONTENT_BLOCKS_FIELD}
     extra = sorted(set(message) - known)
     if extra:
         raise _anthropic_unsupported(
             [f"{where}.{key}" for key in extra],
             "a message crosses as its role, its content, and an assistant's "
-            f"tool_calls and {REASONING_BLOCKS_FIELD}; names have no translation here",
+            f"tool_calls and {CONTENT_BLOCKS_FIELD}; names have no translation here",
         )
-    thinking = _reasoning_blocks(where, message)
     tool_calls = read_tool_calls(where, message, _anthropic_unsupported)
     for call in tool_calls:
         calls[call.id] = call
     content = message.get("content")
-    if tool_calls or thinking:
-        # An assistant turn that thought or called tools: its thinking blocks as Claude
-        # wrote them, its text (when it said any), then a tool_use block per call, in
-        # the order it made them.
-        blocks: list[dict[str, Any]] = list(thinking)
+    written = _content_blocks(where, message, tool_calls)
+    if written is not None:
+        return {"role": role, "content": written}
+    if tool_calls:
+        # An assistant turn that called tools: its text (when it said any), then a
+        # tool_use block per call, in the order it made them.
+        blocks: list[dict[str, Any]] = []
         if isinstance(content, str) and content != "":
             blocks.append({"type": "text", "text": content})
         elif content is not None and not isinstance(content, str):
@@ -519,42 +524,81 @@ def _anthropic_message(
     return {"role": role, "content": _anthropic_blocks(where, content)}
 
 
-def _reasoning_blocks(where: str, message: dict[str, Any]) -> list[dict[str, Any]]:
-    """The assistant turn's `reasoning_blocks`, to be sent back exactly as they came:
-    each a thinking or redacted_thinking block of a Messages API reply. Its readable
-    `reasoning` is not sent (the blocks carry the thinking, signed)."""
-    if message.get(REASONING_BLOCKS_FIELD) is None:
-        return []
-    blocks = message[REASONING_BLOCKS_FIELD]
-    at = f"{where}.{REASONING_BLOCKS_FIELD}"
-    if not isinstance(blocks, list):
+def _content_blocks(
+    where: str, message: dict[str, Any], tool_calls: list[ToolCall]
+) -> list[dict[str, Any]] | None:
+    """The assistant turn's `content_blocks`, sent back as its content verbatim: the
+    blocks a reply carried, in their order. They must say what the message says: their
+    text blocks joined are its `content`, and their tool_use blocks are its
+    `tool_calls` (id, name and input, in order). A turn that differs was edited, and
+    is refused by name rather than rebuilt; its readable `reasoning` is not sent (the
+    blocks carry the thinking, signed). None when the message carries none."""
+    if message.get(CONTENT_BLOCKS_FIELD) is None:
+        return None
+    blocks = message[CONTENT_BLOCKS_FIELD]
+    at = f"{where}.{CONTENT_BLOCKS_FIELD}"
+    if not isinstance(blocks, list) or not blocks:
         raise ApiError(400, "invalid_request",
-                       f"{at} must be the list a reply carried", {"field": at})
+                       f"{at} must be the non-empty list a reply carried", {"field": at})
     for number, block in enumerate(blocks):
-        if not isinstance(block, dict) or block.get("type") not in _REASONING_BLOCK_TYPES:
+        if not isinstance(block, dict) or block.get("type") not in _CONTENT_BLOCK_TYPES:
             raise ApiError(
                 400, "invalid_request",
-                f"{at}[{number}] is not a thinking or redacted_thinking block; send "
-                "back the blocks a reply carried, unchanged",
+                f"{at}[{number}] is not a thinking, redacted_thinking, text or tool_use "
+                "block; send back the blocks a reply carried, unchanged",
                 {"field": f"{at}[{number}]"},
             )
+    content = message.get("content")
+    if content is not None and not isinstance(content, str):
+        raise _blocks_mismatch(
+            at, "content", "beside content_blocks, content is the string the reply carried"
+        )
+    said = "".join(
+        str(block.get("text")) for block in blocks if block.get("type") == "text"
+    )
+    if said != (content or ""):
+        raise _blocks_mismatch(
+            at, "content", "its text blocks joined are not the message's content"
+        )
+    used = [
+        (block.get("id"), block.get("name"), block.get("input"))
+        for block in blocks if block.get("type") == "tool_use"
+    ]
+    made = [(call.id, call.name, call.arguments) for call in tool_calls]
+    if used != made:
+        raise _blocks_mismatch(
+            at, "tool_calls",
+            "its tool_use blocks (id, name, input, in order) are not the message's "
+            "tool_calls",
+        )
     return blocks
 
 
-def strip_reasoning_blocks(body: dict[str, Any]) -> bool:
-    """Take `reasoning_blocks` off every message of a chat going anywhere but an
-    `anthropic/<id>` model: they are Claude's signed thinking, which only the Messages
-    API reads (as a Claude model ignores another model's blocks), and an engine or
-    vendor that does not know the member could refuse the chat for it. True when one
-    was taken."""
+def _blocks_mismatch(at: str, field: str, why: str) -> ApiError:
+    return ApiError(
+        400,
+        "content_blocks_mismatch",
+        f"{at} does not match the message: {why}. The Messages API needs a thinking "
+        "turn back exactly as Claude wrote it, so an edited turn is refused, never "
+        "rebuilt. Send the assistant message as the reply carried it",
+        {"field": at, "differs_in": field},
+    )
+
+
+def strip_content_blocks(body: dict[str, Any]) -> bool:
+    """Take `content_blocks` off every message of a chat going anywhere but an
+    `anthropic/<id>` model: they are Claude's own turn with its signed thinking, which
+    only the Messages API reads (as a Claude model ignores another model's blocks), and
+    an engine or vendor that does not know the member could refuse the chat for it.
+    True when one was taken."""
     messages = body.get("messages")
     if not isinstance(messages, list):
         return False
     taken = False
     for index, message in enumerate(messages):
-        if isinstance(message, dict) and REASONING_BLOCKS_FIELD in message:
+        if isinstance(message, dict) and CONTENT_BLOCKS_FIELD in message:
             messages[index] = {
-                k: v for k, v in message.items() if k != REASONING_BLOCKS_FIELD
+                k: v for k, v in message.items() if k != CONTENT_BLOCKS_FIELD
             }
             taken = True
     return taken
@@ -954,17 +998,21 @@ def anthropic_to_openai(payload: dict[str, Any], model: str) -> dict[str, Any]:
     text_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     thinking: list[dict[str, Any]] = []
+    written: list[dict[str, Any]] = []
     for block in payload.get("content", []) or []:
         if not isinstance(block, dict):
             continue
         if block.get("type") == "text" and isinstance(block.get("text"), str):
             text_parts.append(block["text"])
+            written.append(block)
         elif block.get("type") == "tool_use":
             tool_calls.append(openai_tool_call(
                 block.get("id"), block.get("name"), json.dumps(block.get("input", {}))
             ))
-        elif block.get("type") in _REASONING_BLOCK_TYPES:
+            written.append(block)
+        elif block.get("type") in _THINKING_BLOCK_TYPES:
             thinking.append(block)
+            written.append(block)
     message: dict[str, Any] = {"role": "assistant", "content": "".join(text_parts)}
     if tool_calls:
         # OpenAI's assistant turn that only called tools has no content at all.
@@ -975,7 +1023,7 @@ def anthropic_to_openai(payload: dict[str, Any], model: str) -> dict[str, Any]:
     if reasoning != "":
         message[REASONING_FIELD] = reasoning
     if thinking:
-        message[REASONING_BLOCKS_FIELD] = thinking
+        message[CONTENT_BLOCKS_FIELD] = written
     return {
         "id": payload.get("id") or _completion_id(),
         "object": "chat.completion",
@@ -992,6 +1040,10 @@ def anthropic_to_openai(payload: dict[str, Any], model: str) -> dict[str, Any]:
     }
 
 
+def _block_order(index: Any) -> tuple[int, Any]:
+    return (0, index) if isinstance(index, int) else (1, str(index))
+
+
 class AnthropicStreamTranslator:
 
     def __init__(self, model: str, *, include_usage: bool = False) -> None:
@@ -1006,10 +1058,13 @@ class AnthropicStreamTranslator:
         # index, and whether any of its arguments have been sent yet.
         self._tools: dict[Any, int] = {}
         self._argued: set[Any] = set()
-        # Anthropic's content-block index of each thinking / redacted_thinking block ->
-        # the block as it is assembled (thinking_delta text, signature_delta), handed
-        # back whole in the finish chunk's delta as `reasoning_blocks`.
-        self._thinking: dict[Any, dict[str, Any]] = {}
+        # Anthropic's content-block index of each block of the turn -> the block as it
+        # is assembled (text_delta, thinking_delta, signature_delta, input_json_delta),
+        # handed back in order in the finish chunk's delta as `content_blocks` when the
+        # turn thought. A tool_use block's input is its JSON pieces, parsed at its stop.
+        self._blocks: dict[Any, dict[str, Any]] = {}
+        self._inputs: dict[Any, str] = {}
+        self._unwritten = False
 
     def _frame(self, payload: dict[str, Any]) -> bytes:
         return b"data: " + json.dumps(payload).encode("utf-8") + b"\n\n"
@@ -1030,6 +1085,32 @@ class AnthropicStreamTranslator:
             }
         )
 
+    def _extend(self, index: Any, key: str, piece: str) -> None:
+        block = self._blocks.get(index)
+        if block is not None:
+            block[key] = str(block.get(key) or "") + piece
+
+    def _close_input(self, index: Any) -> None:
+        if index not in self._inputs or index not in self._blocks:
+            return
+        pieces = self._inputs.pop(index)
+        try:
+            self._blocks[index]["input"] = json.loads(pieces) if pieces else {}
+        except json.JSONDecodeError:
+            # A call whose input did not arrive as JSON cannot be written back as
+            # Claude wrote it: the turn carries no content_blocks rather than a
+            # rebuilt one (its tool_calls still carry the arguments as sent).
+            self._unwritten = True
+
+    def _written(self) -> list[dict[str, Any]] | None:
+        """The turn's blocks in order, when it thought and every block is whole."""
+        blocks = [self._blocks[index] for index in sorted(self._blocks, key=_block_order)]
+        if self._unwritten or not any(
+            block.get("type") in _THINKING_BLOCK_TYPES for block in blocks
+        ):
+            return None
+        return blocks
+
     def _translate(self, event: dict[str, Any]) -> Iterator[bytes]:
         if self._done or self._failed:
             return
@@ -1044,12 +1125,14 @@ class AnthropicStreamTranslator:
             yield self._chunk({"role": "assistant"}, None)
         elif kind == "content_block_start":
             block = event.get("content_block")
-            if isinstance(block, dict) and block.get("type") in _REASONING_BLOCK_TYPES:
-                self._thinking[event.get("index")] = dict(block)
+            if isinstance(block, dict) and block.get("type") in _CONTENT_BLOCK_TYPES:
+                self._blocks[event.get("index")] = dict(block)
+            if isinstance(block, dict) and block.get("type") in _THINKING_BLOCK_TYPES:
                 said = block.get("thinking")
                 if block.get("type") == "thinking" and isinstance(said, str) and said:
                     yield self._chunk({REASONING_FIELD: said}, None)
             elif isinstance(block, dict) and block.get("type") == "tool_use":
+                self._inputs[event.get("index")] = ""
                 position = len(self._tools)
                 self._tools[event.get("index")] = position
                 yield self._tool_delta(
@@ -1061,23 +1144,23 @@ class AnthropicStreamTranslator:
             if isinstance(delta, dict) and delta.get("type") == "text_delta":
                 text = delta.get("text")
                 if isinstance(text, str):
+                    self._extend(event.get("index"), "text", text)
                     yield self._chunk({"content": text}, None)
             elif isinstance(delta, dict) and delta.get("type") == "thinking_delta":
                 text = delta.get("thinking")
                 if isinstance(text, str) and text != "":
-                    block = self._thinking.get(event.get("index"))
-                    if block is not None:
-                        block["thinking"] = str(block.get("thinking") or "") + text
+                    self._extend(event.get("index"), "thinking", text)
                     yield self._chunk({REASONING_FIELD: text}, None)
             elif isinstance(delta, dict) and delta.get("type") == "signature_delta":
                 # Never shown: it is what lets the block be sent back.
-                block = self._thinking.get(event.get("index"))
                 signature = delta.get("signature")
-                if block is not None and isinstance(signature, str):
-                    block["signature"] = str(block.get("signature") or "") + signature
+                if isinstance(signature, str):
+                    self._extend(event.get("index"), "signature", signature)
             elif isinstance(delta, dict) and delta.get("type") == "input_json_delta":
                 position = self._tools.get(event.get("index"))
                 partial = delta.get("partial_json")
+                if event.get("index") in self._inputs and isinstance(partial, str):
+                    self._inputs[event.get("index")] += partial
                 if position is not None and isinstance(partial, str) and partial != "":
                     self._argued.add(event.get("index"))
                     yield self._tool_delta(
@@ -1085,6 +1168,7 @@ class AnthropicStreamTranslator:
                     )
         elif kind == "content_block_stop":
             index = event.get("index")
+            self._close_input(index)
             if index in self._tools and index not in self._argued:
                 # A call with no arguments streams none; OpenAI's arguments are a
                 # JSON object even then.
@@ -1100,8 +1184,9 @@ class AnthropicStreamTranslator:
             reason = delta.get("stop_reason") if isinstance(delta, dict) else None
             if isinstance(reason, str):
                 finish: dict[str, Any] = {}
-                if self._thinking:
-                    finish[REASONING_BLOCKS_FIELD] = list(self._thinking.values())
+                written = self._written()
+                if written is not None:
+                    finish[CONTENT_BLOCKS_FIELD] = written
                 yield self._chunk(finish, _finish_reason(reason))
         elif kind == "message_stop":
             self._done = True

@@ -39,11 +39,13 @@ def page_body(model: str, width: int = 100, height: int = 160, **overrides: Any)
 class ServedFake(MlxVlmEngine):
 
     def __init__(
-        self, python: Path, log_path: Path, batches: Path | None = None, model_type: str | None = None
+        self, python: Path, log_path: Path, batches: Path | None = None, model_type: str | None = None,
+        answer: str | None = None,
     ) -> None:
         super().__init__(python, log_path)
         self._batches = batches
         self._model_type = model_type
+        self._answer = answer
 
     def environment(self) -> dict[str, str]:
         environment = {"PYTHONPATH": str(FAKE)}
@@ -51,6 +53,8 @@ class ServedFake(MlxVlmEngine):
             environment["CRUCIBLE_FAKE_MLX_VLM_BATCHES"] = str(self._batches)
         if self._model_type is not None:
             environment["CRUCIBLE_FAKE_MLX_VLM_MODEL_TYPE"] = self._model_type
+        if self._answer is not None:
+            environment["CRUCIBLE_FAKE_MLX_VLM_ANSWER"] = self._answer
         return environment
 
 
@@ -657,3 +661,108 @@ def test_the_served_script_loads_items_forward_by_path_when_run_alone() -> None:
     done = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stderr
     assert done.stdout.split() == ["/v1/crucible/items", "crucible_items_forward"]
+
+
+# Thinking: split on the think tags as mlx-lm splits its own.
+
+THINK = mlx_vlm_serve.THINK_START
+UNTHINK = mlx_vlm_serve.THINK_END
+START, END = 151667, 151668
+
+
+def test_a_prompt_that_opened_a_think_block_starts_in_the_thinking() -> None:
+    assert mlx_vlm_serve.opens_thinking("...assistant\n<think>\n")
+    assert not mlx_vlm_serve.opens_thinking("...assistant\n<think>\n\n</think>\n\n")
+    assert not mlx_vlm_serve.opens_thinking("no tags at all")
+
+
+@pytest.mark.parametrize("tokens, thinking, thought, said", [
+    ([1, 2, END, 3], True, [1, 2], [3]),
+    ([3, 4], False, [], [3, 4]),
+    ([3, START, 1, END, 4], False, [1], [3, 4]),
+    ([1, 2], True, [1, 2], []),
+    ([1, START, 2], True, [1, START, 2], []),
+])
+def test_the_answer_is_split_on_the_tags_and_the_tags_are_neither(
+    tokens, thinking, thought, said
+) -> None:
+    assert mlx_vlm_serve.split_thinking(tokens, START, END, thinking) == (thought, said)
+
+
+@pytest.fixture
+def thinker(tmp_path: Path):
+    started: list[ServedFake] = []
+
+    def start(answer: str, model_type: str | None = "qwen3_5"):
+        weights = tmp_path / f"vl{len(started)}"
+        weights.mkdir()
+        engine = ServedFake(Path(sys.executable), tmp_path / f"engine{len(started)}.log",
+                            model_type=model_type, answer=answer)
+        started.append(engine)
+        engine.start(weights, str(weights), find_free_port(), ["--width", "1"])
+        engine.ready(60.0)
+        return engine, str(weights)
+
+    yield start
+    for engine in started:
+        engine.stop()
+
+
+def asked(name: str, thinking: bool | None, max_tokens: int = 64) -> dict:
+    return {
+        "model": name, "temperature": 0, "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "Say it."}]}],
+        "chat_template_kwargs": {} if thinking is None else {"enable_thinking": thinking},
+    }
+
+
+def test_a_thinking_answer_comes_back_as_reasoning_and_content(thinker) -> None:
+    engine, name = thinker(f"Weighing it.{UNTHINK}\n\nA")
+    status, document = post(engine, asked(name, True))
+    assert status == 200, document
+    message = document["choices"][0]["message"]
+    assert message["reasoning"] == "Weighing it."
+    assert message["content"] == "\n\nA"
+    assert document["usage"]["completion_tokens"] == len("Weighing it.") + 1 + 3
+
+
+def test_thinking_unstated_thinks_as_the_template_does(thinker) -> None:
+    engine, name = thinker(f"Hm.{UNTHINK}A")
+    status, document = post(engine, asked(name, None))
+    assert status == 200, document
+    assert document["choices"][0]["message"] == {
+        "role": "assistant", "content": "A", "reasoning": "Hm.",
+    }
+
+
+def test_thinking_off_is_all_content(thinker) -> None:
+    engine, name = thinker("A")
+    status, document = post(engine, asked(name, False))
+    assert status == 200, document
+    assert document["choices"][0]["message"] == {"role": "assistant", "content": "A"}
+
+
+def test_a_think_tag_in_the_answer_enters_the_thinking(thinker) -> None:
+    engine, name = thinker(f"A{THINK}hm{UNTHINK}B")
+    status, document = post(engine, asked(name, False))
+    assert status == 200, document
+    message = document["choices"][0]["message"]
+    assert (message["content"], message["reasoning"]) == ("AB", "hm")
+
+
+def test_a_run_that_ends_inside_the_thinking_answers_empty_content(thinker) -> None:
+    engine, name = thinker("Still weighing everything")
+    status, document = post(engine, asked(name, True, max_tokens=5))
+    assert status == 200, document
+    choice = document["choices"][0]
+    assert choice["finish_reason"] == "length"
+    assert choice["message"] == {"role": "assistant", "content": "", "reasoning": "Still"}
+
+
+def test_a_model_without_think_tags_answers_every_token_as_content(thinker) -> None:
+    engine, name = thinker(f"Hm{UNTHINK}A", model_type=None)
+    status, document = post(engine, asked(name, True))
+    assert status == 200, document
+    message = document["choices"][0]["message"]
+    assert "reasoning" not in message
+    assert message["content"].startswith("Hm") and message["content"].endswith("A")

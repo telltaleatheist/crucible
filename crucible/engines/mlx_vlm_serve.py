@@ -41,6 +41,16 @@ QUESTION_FIELDS = KNOWN_FIELDS | QUESTION_ONLY_FIELDS
 
 TEMPLATE_KWARGS = frozenset({"enable_thinking"})
 
+# The think tags of a model whose tokenizer has them (Qwen 3.5). A question's answer is
+# split on them as mlx-lm 0.31.3's server splits its own (mlx_lm/server.py L611-617 and
+# L708-715): it starts in the thinking when the prompt's last <think> comes after its
+# last </think> (the template opened one: thinking on), and otherwise in the answer;
+# <think> in the answer enters the thinking and </think> in the thinking leaves it. The
+# tags themselves are neither. The thinking is the reply's `reasoning`, the rest its
+# `content`, so a run that ends inside the thinking answers empty content.
+THINK_START = "<think>"
+THINK_END = "</think>"
+
 ROLES = frozenset({"system", "user", "assistant"})
 
 MAX_TOP_LOGPROBS = 40
@@ -84,6 +94,28 @@ class Row:
     prompt_tokens: int
     completion_tokens: int
     logprobs: list[dict[str, Any]] | None = None
+    reasoning: str | None = None
+
+
+def opens_thinking(prompt: str) -> bool:
+    """Whether the rendered prompt leaves the model inside a thinking block."""
+    return prompt.rfind(THINK_START) > prompt.rfind(THINK_END)
+
+
+def split_thinking(
+    tokens: list[int], start: int, end: int, thinking: bool
+) -> tuple[list[int], list[int]]:
+    """The generated tokens as (thinking, answer), `thinking` the state they start in."""
+    thought: list[int] = []
+    said: list[int] = []
+    for token in tokens:
+        if not thinking and token == start:
+            thinking = True
+        elif thinking and token == end:
+            thinking = False
+        else:
+            (thought if thinking else said).append(token)
+    return thought, said
 
 
 @dataclass
@@ -423,6 +455,7 @@ class Reader:
         input_ids, embedding, gen_kwargs = self._embedded(
             job.images, formatted, self._vision(job)
         )
+        thinking = opens_thinking(formatted)
         reading = job.top_logprobs is not None
         generator = ar.BatchGenerator(
             model.language_model,
@@ -448,24 +481,43 @@ class Reader:
                 steps.extend(response for response in responses if response.uid == uid)
         finally:
             generator.close()
-        row = self._row_of(steps, int(input_ids.shape[1]), reading)
+        row = self._row_of(steps, int(input_ids.shape[1]), reading, thinking)
         mx.clear_cache()
         return row
 
-    def _row_of(self, steps: list[Any], prompt_tokens: int, reading: bool) -> Row:
-        tokenizer = getattr(self.processor, "tokenizer", self.processor)
+    def _think_tags(self) -> tuple[int, int] | None:
+        """The ids of <think> and </think>, when the tokenizer has both (read once)."""
+        if not hasattr(self, "_tags"):
+            tokenizer = getattr(self.processor, "tokenizer", self.processor)
+            vocab = tokenizer.get_vocab() if hasattr(tokenizer, "get_vocab") else {}
+            start, end = vocab.get(THINK_START), vocab.get(THINK_END)
+            self._tags = (start, end) if isinstance(start, int) and isinstance(end, int) else None
+        return self._tags
+
+    def _decoded(self, tokens: list[int]) -> str:
         detokenizer = self.processor.detokenizer
         detokenizer.reset()
-        spoken = [step.token for step in steps if step.finish_reason != "stop"]
-        for token in spoken:
+        for token in tokens:
             detokenizer.add_token(token)
         detokenizer.finalize()
+        return detokenizer.text
+
+    def _row_of(self, steps: list[Any], prompt_tokens: int, reading: bool, thinking: bool) -> Row:
+        tokenizer = getattr(self.processor, "tokenizer", self.processor)
+        spoken = [step.token for step in steps if step.finish_reason != "stop"]
+        tags = self._think_tags()
+        if tags is None:
+            thought, said = [], spoken
+        else:
+            thought, said = split_thinking(spoken, tags[0], tags[1], thinking)
+        reasoning = self._decoded(thought) if thought else ""
         return Row(
-            text=detokenizer.text,
+            text=self._decoded(said),
             finish_reason=steps[-1].finish_reason,
             prompt_tokens=prompt_tokens,
             completion_tokens=len(spoken),
             logprobs=[self._step_entry(tokenizer, step) for step in steps] if reading else None,
+            reasoning=reasoning or None,
         )
 
     @staticmethod
@@ -842,6 +894,8 @@ def completion_document(served: str, row: Row) -> dict[str, Any]:
         "index": 0,
         "message": {"role": "assistant", "content": row.text},
     }
+    if row.reasoning:
+        choice["message"]["reasoning"] = row.reasoning
     if row.logprobs is not None:
         choice["logprobs"] = {"content": row.logprobs}
     choice["finish_reason"] = row.finish_reason

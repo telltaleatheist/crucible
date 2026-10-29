@@ -1146,8 +1146,12 @@ model without the table gets no parser.
 | engine | what sets the thinking apart |
 | --- | --- |
 | vLLM 0.29 | `--reasoning-parser qwen3`, derived from `[reasoning]` |
-| llama-server b10970 | `--jinja` with the default `--reasoning-format deepseek` (common/common.h): the thinking comes back as `message.reasoning_content`, not `reasoning` |
+| llama-server b10970 | `--jinja` with the default `--reasoning-format deepseek` (common/common.h): it writes the thinking as `reasoning_content` and reads a turn's thinking back from `reasoning_content` alone (common/chat.cpp L234, L453-455). The door renames it both ways (`reasoning_field`, api/proxy.py): replies, whole and streamed, to `reasoning`, and an assistant turn's `reasoning` to `reasoning_content` |
 | mlx-lm 0.31.3 | its server splits the tokenizer's think tags into `reasoning` itself; nothing to pass |
+| mlx-vlm (Crucible's `mlx_vlm_serve.py`) | splits the answer on the tokenizer's think tags as mlx-lm does: it starts in the thinking when the prompt's last `<think>` follows its last `</think>`; `<think>` enters, `</think>` leaves; a run that ends thinking answers empty `content`. It answers whole, never streamed |
+
+So every backend speaks one field: an app reads `message.reasoning` (`delta.reasoning`)
+and sends a turn's thinking back as `reasoning`, whatever serves the model.
 
 Every Qwen 3.5 and 3.8 chat model declares `qwen3-think` (read from every template
 on disk, 2026-10-29). The B-Side model does not: it has no vLLM block (llama-server

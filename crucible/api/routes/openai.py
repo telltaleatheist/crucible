@@ -45,7 +45,7 @@ from ...structured import (
     with_compact_json,
     with_llguidance_grammar,
 )
-from ...upstreams import strip_reasoning_blocks
+from ...upstreams import strip_content_blocks
 from ..caller import client_agent, queue_session
 from ..chatlog import ChatLog
 from ..context import AppContext, Routers
@@ -57,6 +57,7 @@ from ..proxy import (
     chat_queue_full,
     engine_unreachable,
     forward_body,
+    history_for_engine,
     model_not_resident,
     post_unless_the_caller_leaves,
     proxy_stream,
@@ -406,9 +407,13 @@ def register(routers: Routers, ctx: AppContext) -> None:
         before anything loads. A thinking model's thinking comes back as the message's
         `reasoning` (`delta.reasoning` streamed), apart from `content` (a local model
         whose manifest declares `[reasoning]`; mlx-lm; Claude's summary). An
-        `anthropic/<id>` reply also carries `reasoning_blocks`, Claude's thinking blocks
-        as it wrote them, which an assistant message sends back unchanged to keep its
-        thinking across a tool loop; they are taken off a chat to any other model.
+        `anthropic/<id>` reply that thought also carries `content_blocks`, the turn's
+        Messages API content in order as Claude wrote it (thinking, text, tool_use),
+        which an assistant message sends back unchanged to keep its thinking across a
+        tool loop: checked against the message's content and tool_calls
+        (`content_blocks_mismatch`) and sent verbatim; they are taken off a chat to any
+        other model. llama-server's `reasoning_content` is renamed `reasoning` both
+        ways, so every backend speaks one field.
         """
         arrived = time.monotonic()
         raw = await request.body()
@@ -442,7 +447,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
         body["model"] = requested
         target = upstreamrecord.split_model(requested)
         # Claude's signed thinking blocks go back to Claude alone.
-        stripped = (target is None or target[0] != "anthropic") and strip_reasoning_blocks(
+        stripped = (target is None or target[0] != "anthropic") and strip_content_blocks(
             body
         )
         log = ChatLog.of(
@@ -520,6 +525,9 @@ def register(routers: Routers, ctx: AppContext) -> None:
                     applied = replace(
                         applied, body=with_prefill(applied.body, prefill), changed=True
                     )
+                renamed = history_for_engine(applied.body, resident)
+                if renamed is not None:
+                    applied = replace(applied, body=renamed, changed=True)
                 sampling_headers = {SAMPLING_HEADER: applied.header()}
                 forwarded = forward_body(raw, applied, resident)
                 url = f"{resident.base_url}/v1/chat/completions"

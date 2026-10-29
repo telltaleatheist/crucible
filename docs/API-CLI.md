@@ -304,8 +304,8 @@ What crosses, and as what (`crucible/upstreams.py`, `_anthropic_document`):
 | `stream`, `stream_options.include_usage` | `stream` | usage is a chunk of its own (below) |
 | `chat_template_kwargs.enable_thinking` | nothing | dropped and said: `"thinking": "dropped"` in `X-Crucible-Sampling` |
 | nothing | `thinking` `{type: adaptive, display: summarized}` | sent to the models that think by default (the table's Summaries column), so their thinking comes back as a summary; never `{type: disabled}` (a 400 on Opus 5.5 and Sonnet 5.5) |
-| an assistant message's `reasoning_blocks` | its `thinking` / `redacted_thinking` blocks, exactly as given, before its text and `tool_use` blocks | what a reply carried, sent back unchanged; anything but those two block types is `400 invalid_request` |
-| an assistant message's `reasoning` | nothing | the readable summary; the blocks carry the thinking |
+| an assistant message's `content_blocks` | the turn's `content`, verbatim | what a reply carried, sent back unchanged: the turn as Claude wrote it, its thinking, text and `tool_use` blocks in order. Its text blocks joined must be the message's `content` and its `tool_use` blocks (id, name, input, in order) its `tool_calls`, or it is refused `400 content_blocks_mismatch` (`details.differs_in`), never rebuilt; a block of another type is `400 invalid_request` |
+| an assistant message's `reasoning` | nothing | the readable summary; `content_blocks` carry the thinking |
 | `context_tokens` | nothing | dropped and said: `X-Crucible-Context` source `dropped` |
 
 Refused, `400 upstream_field_unsupported` with `details.fields` (the paths) and
@@ -388,9 +388,10 @@ reason is relayed as Anthropic said it. Each `tool_use` block is one of
 `message.tool_calls` (`{id, type: function, function: {name, arguments}}`, `arguments`
 its `input` as a JSON string), in order; an answer that only called tools has
 `content: null`. The `thinking` blocks' text, joined by a blank line, is
-`message.reasoning` (absent when it is empty, as without summaries); every `thinking`
-and `redacted_thinking` block, exactly as Claude wrote it (signature and all), is
-`message.reasoning_blocks`. `usage.prompt_tokens` is every prompt token (Anthropic's
+`message.reasoning` (absent when it is empty, as without summaries). A turn that
+thought also carries `message.content_blocks`: its `thinking`, `redacted_thinking`,
+`text` and `tool_use` blocks, in Claude's order and exactly as it wrote them
+(signatures and all). `usage.prompt_tokens` is every prompt token (Anthropic's
 `input_tokens` plus its cache writes and reads), `usage.prompt_tokens_details.cached_tokens`
 the cache reads.
 
@@ -400,19 +401,22 @@ function: {name, arguments: ""}}` and each `input_json_delta` one more `{index,
 function: {arguments: <piece>}}` (a call with no input gets `"{}"` at its
 `content_block_stop`), `index` counting the calls from 0; each `thinking_delta` is a
 `delta.reasoning` chunk; a `signature_delta` is never shown, it completes its block;
-the finish chunk (the one carrying `finish_reason`) carries every thinking and
-redacted_thinking block, assembled, as `delta.reasoning_blocks`; `ping` and event types
-this server does not know are skipped.
+the finish chunk (the one carrying `finish_reason`) carries the turn's
+`delta.content_blocks`, assembled from the stream in Claude's order (thinking with its
+signature, text, each call's input parsed at its `content_block_stop`), when the turn
+thought; a call whose input did not arrive as JSON leaves the turn without them; `ping`
+and event types this server does not know are skipped.
 
 Tool calling holds no state: Crucible stores no tools and remembers nothing between
 rounds. The app sends its tools and the whole conversation every round (its question,
 the assistant's `tool_calls`, its own `tool` results), runs the tools itself and decides
 when the loop ends. To keep Claude's thinking across the loop, send the assistant
-message back with the `reasoning_blocks` its reply carried, unchanged (the Messages API
-requires its own blocks back as they were, history append-only); Crucible puts them
-before the turn's text and `tool_use` blocks. A turn whose thinking fell between two of
-its tool calls is sent back with all its blocks first: the OpenAI shape keeps no block
-order. `reasoning_blocks` is taken off every message of a chat to any other model.
+message back as its reply carried it: its `content`, `tool_calls` and the
+`content_blocks`, unchanged. The Messages API needs a thinking turn back exactly as it
+was (history append-only; Opus 5.5 and Sonnet 5.5 write thinking blocks between their
+tool calls, and a moved block invalidates them), so Crucible sends `content_blocks` as
+the turn's content verbatim, in their order, after checking them against `content` and
+`tool_calls`. `content_blocks` is taken off every message of a chat to any other model.
 
 The `ollama` upstream carries the same tool calling in Ollama's native form: `tools` as
 OpenAI's function shape (`parameters` defaulted as above; `strict: true` is refused

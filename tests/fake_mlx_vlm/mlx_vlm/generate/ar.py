@@ -35,6 +35,25 @@ class _Logits:
         return widened
 
 
+def _answer_codes() -> list[int]:
+    """The question's answer as tokens: CRUCIBLE_FAKE_MLX_VLM_ANSWER, its <think> and
+    </think> as Qwen's tag ids and every other character one token, or QUESTION_ANSWER."""
+    from .. import THINK_TAGS
+
+    answer = os.environ.get("CRUCIBLE_FAKE_MLX_VLM_ANSWER", QUESTION_ANSWER)
+    codes: list[int] = []
+    at = 0
+    while at < len(answer):
+        tag = next((t for t in THINK_TAGS if answer.startswith(t, at)), None)
+        if tag is not None:
+            codes.append(THINK_TAGS[tag])
+            at += len(tag)
+        else:
+            codes.append(ord(answer[at]))
+            at += 1
+    return codes
+
+
 def _record(entry: dict) -> None:
     record = os.environ.get("CRUCIBLE_FAKE_MLX_VLM_BATCHES")
     if record:
@@ -85,7 +104,7 @@ class BatchGenerator:
             "top_logprobs_k": self.top_logprobs_k,
             "logits_dtype": _logits_dtype(processors),
         })
-        return {"uid": self._uid, "codes": [ord(c) for c in QUESTION_ANSWER], "at": 0, "cap": cap,
+        return {"uid": self._uid, "codes": _answer_codes(), "at": 0, "cap": cap,
                 "question": True}
 
     def insert(self, prompts, max_tokens, prompt_kwargs=None, logits_processors=None, **kwargs) -> list[int]:

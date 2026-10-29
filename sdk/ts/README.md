@@ -515,13 +515,14 @@ letters, digits and hyphens, at most 32, shown as sent. A malformed one comes ba
 `invalid_act` before the completion runs. It labels the work and chooses nothing; a chat
 chooses its model by `model`, or by `verb` and `maxParamsB`.
 
-`chat()` returns `ChatResponse {id, model, content, toolCalls, reasoning, reasoningBlocks,
+`chat()` returns `ChatResponse {id, model, content, toolCalls, reasoning, contentBlocks,
 finishReason, usage: {promptTokens, completionTokens, totalTokens}}` — OpenAI's
 `chat.completion` read down to the parts a caller uses, from the first (and only) choice.
 `content` is null only when the model called tools and wrote no text; `toolCalls` is empty
 when it called none. `reasoning` is the model's thinking apart from the answer
-(`message.reasoning`), null when it did not think or said nothing of it; `reasoningBlocks`
-is Claude's signed thinking blocks, empty for every other model (see "Thinking on or off").
+(`message.reasoning`), null when it did not think or said nothing of it, whatever serves
+the model; `contentBlocks` is a Claude turn that thought, as Claude wrote it, empty for
+every other model (see "Thinking on or off").
 
 `finishReason` is the engine's own word, surfaced and never normalised — a plain string, so
 a value this client did not anticipate still reaches you. `length` means the answer is
@@ -551,9 +552,11 @@ last delta, with the calls its `delta.tool_calls` fragments assemble into (by `i
 
 A thinking model's turn goes back with its thinking too: `reasoning: first.reasoning` (a
 local Qwen's template renders it as the turn's `<think>`), and for an `anthropic/<id>`
-model `reasoningBlocks: first.reasoningBlocks`, which Claude needs unchanged to keep
-thinking across the loop. The server takes `reasoning_blocks` off for every other model and
-never sends Claude the plain `reasoning`.
+model `contentBlocks: first.contentBlocks`: the turn as Claude wrote it, thinking between
+its calls included, which Claude needs back unchanged to keep thinking across the loop. Send
+`content` and `toolCalls` as the reply carried them too: the server sends the blocks as the
+turn verbatim once they match, and refuses an edited turn `content_blocks_mismatch`. It takes
+`content_blocks` off for every other model and never sends Claude the plain `reasoning`.
 
 ### Thinking on or off, per call
 
@@ -581,7 +584,8 @@ both backends. `chat()` throws a `CrucibleProtocolError` that says so (raise `ma
 |---|---|---|
 | mlx-darwin (mlx-lm 0.31.3) | the answer in `content`, the thinking in `reasoning` | `content` empty, the partial thinking in `reasoning` |
 | cuda-linux (vLLM 0.29 with `--reasoning-parser qwen3`) | expected: the same | expected: the same |
-| llama-server | the thinking as `message.reasoning_content`, which this client does not read | — |
+| llama-server | the same: the server renames llama-server's `reasoning_content` to `reasoning` | the same |
+| mlx-vlm (Crucible's server, 9b-vl on the Mac) | the same, split by the server; never streamed | the same |
 
 The mlx-darwin row was MEASURED (ContentStudio, 2026-09-25: qwen3.8-27b-4bit, `maxTokens`
 8192, 4 of 9 chapter titles ran out after 405–412 s with 0 chars of content, and the 5 that
@@ -596,8 +600,8 @@ token and answers at once. With thinking off both answer at once.
 An `anthropic/<id>` model thinks by Claude's own rules: the server asks the models that think
 by default (Opus 5.5, Sonnet 5.5, Haiku 5.5, the Fables, Opus 5, Sonnet 5) for their summary,
 which comes back as `reasoning`, and `reasoningEffort` is the knob (`thinking: false` is read
-and dropped there; Claude's thinking is not turned off). Its `reasoningBlocks` (streamed:
-`onReasoningBlocks`, once, after the last delta) go back on the assistant turn unchanged.
+and dropped there; Claude's thinking is not turned off). Its `contentBlocks` (streamed:
+`onContentBlocks`, once, after the last delta) go back on the assistant turn unchanged.
 
 ### Structured output
 

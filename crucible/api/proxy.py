@@ -10,7 +10,7 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
-from ..engines import chat_admission
+from ..engines import chat_admission, engine_class
 from ..errors import ApiError
 from ..inflight import Entry, InFlight
 from ..residency import Residency
@@ -261,8 +261,67 @@ def engine_unreachable(resident: Any, exc: Exception) -> ApiError:
     )
 
 
+REASONING_FIELD = "reasoning"
+
+
+def _engine_reasoning_field(resident: Any) -> str:
+    return engine_class(resident.engine).reasoning_field
+
+
+def _speaks_as_crucible(resident: Any) -> bool:
+    """Whether the engine's answers go out as it wrote them: its model name is
+    Crucible's id and its thinking is `reasoning`."""
+    return (
+        resident.engine_model_name == resident.model_id
+        and _engine_reasoning_field(resident) == REASONING_FIELD
+    )
+
+
+def _as_crucible(document: dict[str, Any], resident: Any) -> None:
+    """A completion or chunk as the door answers it: Crucible's model id, and the
+    thinking of each choice's message or delta as `reasoning`."""
+    if "model" in document:
+        document["model"] = resident.model_id
+    field = _engine_reasoning_field(resident)
+    if field == REASONING_FIELD:
+        return
+    choices = document.get("choices")
+    if not isinstance(choices, list):
+        return
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        for part in ("message", "delta"):
+            said = choice.get(part)
+            if isinstance(said, dict) and field in said:
+                thinking = said.pop(field)
+                if REASONING_FIELD not in said:
+                    said[REASONING_FIELD] = thinking
+
+
+def history_for_engine(body: dict[str, Any], resident: Any) -> dict[str, Any] | None:
+    """The chat as the engine reads its history: each assistant message's `reasoning`
+    under the engine's own name (llama-server reads `reasoning_content` alone). None
+    when nothing is renamed."""
+    field = _engine_reasoning_field(resident)
+    messages = body.get("messages")
+    if field == REASONING_FIELD or not isinstance(messages, list):
+        return None
+    renamed = False
+    sent: list[Any] = []
+    for message in messages:
+        if isinstance(message, dict) and REASONING_FIELD in message:
+            message = dict(message)
+            thinking = message.pop(REASONING_FIELD)
+            message.setdefault(field, thinking)
+            renamed = True
+        sent.append(message)
+    return {**body, "messages": sent} if renamed else None
+
+
 def restore_model_id(raw: bytes, resident: Any) -> bytes:
-    if resident.engine_model_name == resident.model_id:
+    """The engine's whole answer as the door gives it (`_as_crucible`)."""
+    if _speaks_as_crucible(resident):
         return raw
     try:
         body = json.loads(raw)
@@ -281,12 +340,30 @@ def restore_model_id(raw: bytes, resident: Any) -> bytes:
             f"{type(body).__name__}, not a completion object. Its log is "
             f"{resident.log_path}",
         )
-    body["model"] = resident.model_id
+    _as_crucible(body, resident)
     return json.dumps(body).encode("utf-8")
 
 
 def _restore_model_id_in_frame(frame: bytes, resident: Any) -> bytes:
-    return set_model_in_frame(frame, resident.model_id)
+    """One streamed frame as the door gives it (`_as_crucible`)."""
+    lines = frame.split(b"\n")
+    changed = False
+    for index, line in enumerate(lines):
+        if not line.startswith(b"data: "):
+            continue
+        payload = line[len(b"data: "):]
+        if payload.strip() == b"[DONE]":
+            continue
+        try:
+            chunk = json.loads(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(chunk, dict):
+            continue
+        _as_crucible(chunk, resident)
+        lines[index] = b"data: " + json.dumps(chunk).encode("utf-8")
+        changed = True
+    return b"\n".join(lines) if changed else frame
 
 
 def set_model_in_frame(frame: bytes, model_id: str) -> bytes:
@@ -397,7 +474,7 @@ async def proxy_stream(
         )
 
     async def relay() -> AsyncIterator[bytes]:
-        if resident.engine_model_name == resident.model_id:
+        if _speaks_as_crucible(resident):
             async for chunk in upstream.aiter_bytes():
                 if observe is not None:
                     observe(200, chunk)

@@ -1,8 +1,8 @@
 /**
  * Unit tests for a chat's thinking: `message.reasoning` read as `ChatResponse.reasoning`, Claude's
- * `reasoning_blocks` read as `reasoningBlocks` and sent back unchanged on an assistant turn, a
+ * `content_blocks` read as `contentBlocks` and sent back unchanged on an assistant turn, a
  * stream's `delta.reasoning` handed to `onReasoning` apart from the content it yields, and the
- * finish chunk's blocks handed to `onReasoningBlocks`.
+ * finish chunk's blocks handed to `onContentBlocks`.
  *
  * Run: `npm run test:unit` (exits non-zero on any failure).
  */
@@ -16,7 +16,7 @@ import {
   CrucibleClient,
   CrucibleConfigError,
   CrucibleProtocolError,
-  type ReasoningBlock,
+  type ClaudeContentBlock,
 } from '../src/index.js';
 
 type Handler = (request: IncomingMessage, response: ServerResponse, body: string) => void;
@@ -61,9 +61,12 @@ function completion(message: unknown, finishReason: string): unknown {
   };
 }
 
-const BLOCKS: ReasoningBlock[] = [
+// Opus 5.5's interleaved turn: thinking before each call, then its text.
+const BLOCKS: ClaudeContentBlock[] = [
   { type: 'thinking', thinking: 'Weighing it.', signature: 'EqQBCkYIBxgCKkDsig==' },
+  { type: 'tool_use', id: 'call_1', name: 'lookup', input: {} },
   { type: 'redacted_thinking', data: 'opaque' },
+  { type: 'text', text: 'Paris.' },
 ];
 
 before(async () => {
@@ -87,7 +90,7 @@ after(async () => {
 test('a reply reads its reasoning and its blocks apart from the content', async () => {
   handle = (_request, response) =>
     json(response, 200, completion(
-      { role: 'assistant', content: 'Paris.', reasoning: 'Weighing it.', reasoning_blocks: BLOCKS },
+      { role: 'assistant', content: 'Paris.', reasoning: 'Weighing it.', content_blocks: BLOCKS },
       'stop',
     ));
   const answer = await client().chat({
@@ -96,7 +99,7 @@ test('a reply reads its reasoning and its blocks apart from the content', async 
   });
   assert.equal(answer.content, 'Paris.');
   assert.equal(answer.reasoning, 'Weighing it.');
-  assert.deepEqual(answer.reasoningBlocks, BLOCKS);
+  assert.deepEqual(answer.contentBlocks, BLOCKS);
 });
 
 test('a reply without thinking reads reasoning null and no blocks', async () => {
@@ -107,7 +110,7 @@ test('a reply without thinking reads reasoning null and no blocks', async () => 
     messages: [{ role: 'user', content: 'Capital of France?' }],
   });
   assert.equal(answer.reasoning, null);
-  assert.deepEqual(answer.reasoningBlocks, []);
+  assert.deepEqual(answer.contentBlocks, []);
 });
 
 test('a turn that thought and only called tools is an answer, not a refusal', async () => {
@@ -139,7 +142,7 @@ test('thinking that ran out before the answer is still refused by name', async (
   );
 });
 
-test('an assistant turn sends its reasoningBlocks back unchanged as reasoning_blocks', async () => {
+test('an assistant turn sends its contentBlocks back unchanged as content_blocks', async () => {
   handle = (_request, response) =>
     json(response, 200, completion({ role: 'assistant', content: 'Done.' }, 'stop'));
   await client().chat({
@@ -150,19 +153,19 @@ test('an assistant turn sends its reasoningBlocks back unchanged as reasoning_bl
         role: 'assistant',
         content: null,
         reasoning: 'Weighing it.',
-        reasoningBlocks: BLOCKS,
+        contentBlocks: BLOCKS,
         toolCalls: [{ id: 'call_1', type: 'function', function: { name: 'lookup', arguments: '{}' } }],
       },
       { role: 'tool', toolCallId: 'call_1', content: 'found' },
     ],
   });
   const sent = JSON.parse(lastBody);
-  assert.equal(JSON.stringify(sent.messages[1].reasoning_blocks), JSON.stringify(BLOCKS));
+  assert.equal(JSON.stringify(sent.messages[1].content_blocks), JSON.stringify(BLOCKS));
   assert.equal(sent.messages[1].reasoning, 'Weighing it.');
-  assert.equal('reasoningBlocks' in sent.messages[1], false);
+  assert.equal('contentBlocks' in sent.messages[1], false);
 });
 
-test('reasoningBlocks that are not thinking blocks are refused before anything is sent', async () => {
+test('contentBlocks that are not a Claude turn block are refused before anything is sent', async () => {
   let asked = 0;
   handle = (_request, response) => {
     asked += 1;
@@ -176,18 +179,18 @@ test('reasoningBlocks that are not thinking blocks are refused before anything i
         {
           role: 'assistant',
           content: 'said',
-          reasoningBlocks: [{ type: 'text', text: 'x' } as unknown as ReasoningBlock],
+          contentBlocks: [{ type: 'image', source: {} } as unknown as ClaudeContentBlock],
         },
       ],
     }),
     (error: unknown) =>
-      error instanceof CrucibleConfigError && /reasoningBlocks\[0\]/.test(error.message),
+      error instanceof CrucibleConfigError && /contentBlocks\[0\]/.test(error.message),
   );
   assert.equal(asked, 0);
 });
 
 test('chat() refuses the stream-only reasoning callbacks', async () => {
-  for (const option of [{ onReasoning: () => undefined }, { onReasoningBlocks: () => undefined }]) {
+  for (const option of [{ onReasoning: () => undefined }, { onContentBlocks: () => undefined }]) {
     await assert.rejects(
       client().chat({ model: 'qwen3.5-9b', messages: [{ role: 'user', content: 'hi' }], ...option }),
       CrucibleConfigError,
@@ -195,26 +198,26 @@ test('chat() refuses the stream-only reasoning callbacks', async () => {
   }
 });
 
-test('chatStream hands delta.reasoning to onReasoning and the finish blocks to onReasoningBlocks', async () => {
+test('chatStream hands delta.reasoning to onReasoning and the finish blocks to onContentBlocks', async () => {
   handle = (_request, response) => {
     response.writeHead(200, { 'Content-Type': 'text/event-stream' });
     response.write(frame({ role: 'assistant' }));
     response.write(frame({ reasoning: 'Weighing ' }));
     response.write(frame({ reasoning: 'it.' }));
     response.write(frame({ content: 'Paris.' }));
-    response.write(frame({ reasoning_blocks: BLOCKS }, 'stop'));
+    response.write(frame({ content_blocks: BLOCKS }, 'stop'));
     response.write('data: [DONE]\n\n');
     response.end();
   };
   const content: string[] = [];
   const thinking: string[] = [];
-  let blocks: readonly ReasoningBlock[] | null = null;
+  let blocks: readonly ClaudeContentBlock[] | null = null;
   let handed = 0;
   for await (const delta of client().chatStream({
     model: 'anthropic/claude-opus-5-5',
     messages: [{ role: 'user', content: 'Capital of France?' }],
     onReasoning: (piece) => thinking.push(piece),
-    onReasoningBlocks: (given) => {
+    onContentBlocks: (given) => {
       handed += 1;
       blocks = given;
     },
@@ -227,18 +230,18 @@ test('chatStream hands delta.reasoning to onReasoning and the finish blocks to o
   assert.deepEqual(blocks, BLOCKS);
 });
 
-test('chatStream with no blocks hands onReasoningBlocks an empty array', async () => {
+test('chatStream with no blocks hands onContentBlocks an empty array', async () => {
   handle = (_request, response) => {
     response.writeHead(200, { 'Content-Type': 'text/event-stream' });
     response.write(frame({ content: 'Paris.' }, 'stop'));
     response.write('data: [DONE]\n\n');
     response.end();
   };
-  let blocks: readonly ReasoningBlock[] | null = null;
+  let blocks: readonly ClaudeContentBlock[] | null = null;
   for await (const _delta of client().chatStream({
     model: 'qwen3.5-9b',
     messages: [{ role: 'user', content: 'Capital of France?' }],
-    onReasoningBlocks: (given) => {
+    onContentBlocks: (given) => {
       blocks = given;
     },
   })) {

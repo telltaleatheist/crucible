@@ -13,5 +13,7 @@ def apply_chat_template(processor, config, prompt, add_generation_prompt=True, n
     if isinstance(prompt, list):
         turns = "|".join(f"{turn['role']}:{_text_of(turn['content'])}" for turn in prompt)
         thinking = kwargs.get("enable_thinking")
-        return f"{QUESTION_MARK}images={num_images}|thinking={thinking}|{turns}"
+        # The Qwen 3.5 9B's generation prompt: thinking unless stated off.
+        opened = "<think>\n\n</think>\n\n" if thinking is False else "<think>\n"
+        return f"{QUESTION_MARK}images={num_images}|thinking={thinking}|{turns}|{opened}"
     return ("<|img|><|imgpad|><|endofimg|>" * num_images) + prompt

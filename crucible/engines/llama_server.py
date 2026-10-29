@@ -86,6 +86,13 @@ class LlamaServerEngine(SubprocessEngine):
         "the rest queue inside the server"
     )
 
+    reasoning_field = "reasoning_content"
+    # b10970 writes the thinking it lifts (--jinja, --reasoning-format deepseek by
+    # default: common/common.h) as `reasoning_content` on the message and on a stream's
+    # delta (common/chat.cpp L234), and reads an assistant turn's thinking back from
+    # `reasoning_content` alone (common/chat.cpp L453-455): a `reasoning` it is sent is
+    # dropped and the template never sees it. Read at the b10970 tag 2026-10-29.
+
     chat_prefill = True
     chat_prefill_basis = (
         "llama-server b10970 takes continue_final_message with add_generation_prompt "

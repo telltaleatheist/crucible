@@ -1111,12 +1111,12 @@ export interface ChatTextMessage {
 }
 
 /**
- * One of Claude's thinking blocks, exactly as the Messages API wrote it: `{type: 'thinking',
- * thinking, signature}` or `{type: 'redacted_thinking', data}`. Opaque: read
- * {@link ChatResponse.reasoning} for the text, and send these back unchanged.
+ * One block of a Claude turn, exactly as the Messages API wrote it: `thinking`,
+ * `redacted_thinking`, `text` or `tool_use`. Opaque: read {@link ChatResponse.reasoning},
+ * `content` and `toolCalls` for what they say, and send the list back unchanged.
  */
-export type ReasoningBlock = Readonly<Record<string, unknown>> & {
-  readonly type: 'thinking' | 'redacted_thinking';
+export type ClaudeContentBlock = Readonly<Record<string, unknown>> & {
+  readonly type: 'thinking' | 'redacted_thinking' | 'text' | 'tool_use';
 };
 
 /**
@@ -1128,16 +1128,19 @@ export interface ChatAssistantMessage {
   readonly content: string | null;
   readonly toolCalls?: readonly ChatToolCall[];
   /**
-   * The turn's {@link ChatResponse.reasoningBlocks}, sent back exactly as they came (as
-   * `reasoning_blocks`): an `anthropic/<id>` model needs its own thinking blocks on the assistant
-   * turn to keep thinking across a tool loop. The server takes them off for every other model.
+   * The turn's {@link ChatResponse.contentBlocks}, sent back exactly as they came (as
+   * `content_blocks`): an `anthropic/<id>` model needs its own turn back, its thinking in the
+   * order it wrote it among its text and calls, to keep thinking across a tool loop. The server
+   * sends them as the turn's content verbatim once `content` and `toolCalls` match them (send
+   * those as the reply carried them too), refuses an edited turn `content_blocks_mismatch`, and
+   * takes them off for every other model.
    */
-  readonly reasoningBlocks?: readonly ReasoningBlock[];
+  readonly contentBlocks?: readonly ClaudeContentBlock[];
   /**
    * The turn's {@link ChatResponse.reasoning}, sent back as `reasoning`. A local Qwen's template
    * renders it into the history as the turn's `<think>` (Qwen 3.5 for the turns after the last
    * user message, Qwen 3.8 for every turn); an `anthropic/<id>` model is not sent it (its
-   * `reasoningBlocks` carry the thinking).
+   * `contentBlocks` carry the thinking).
    */
   readonly reasoning?: string;
 }
@@ -1240,9 +1243,10 @@ export interface ChatOptions {
   readonly onReasoning?: (delta: string) => void;
   /**
    * `chatStream` only: called once, after the last content delta, with the reply's
-   * {@link ChatResponse.reasoningBlocks} (empty when it carried none). `chat` refuses it.
+   * {@link ChatResponse.contentBlocks}, assembled by the server from the stream in order (empty
+   * when it carried none). `chat` refuses it.
    */
-  readonly onReasoningBlocks?: (blocks: readonly ReasoningBlock[]) => void;
+  readonly onContentBlocks?: (blocks: readonly ClaudeContentBlock[]) => void;
   /**
    * The start of the answer: the model writes on from this text, and the reply's `content` is what
    * it wrote AFTER it (join the two yourself). Sent as `prefill`. Served on vLLM and llama-server;
@@ -1310,10 +1314,12 @@ export interface ChatResponse {
    */
   readonly reasoning: string | null;
   /**
-   * Claude's thinking blocks (`message.reasoning_blocks`), to send back unchanged on this turn's
-   * {@link ChatAssistantMessage.reasoningBlocks}; empty for every other model.
+   * A Claude turn that thought, as Claude wrote it (`message.content_blocks`): its thinking,
+   * text and tool_use blocks in order, to send back unchanged on this turn's
+   * {@link ChatAssistantMessage.contentBlocks}; empty for every other model and for a Claude turn
+   * with no thinking.
    */
-  readonly reasoningBlocks: readonly ReasoningBlock[];
+  readonly contentBlocks: readonly ClaudeContentBlock[];
   /**
    * The engine's own word for why it stopped (`stop`, `length`, `tool_calls`, …); `length` means
    * truncated. Null when the engine did not say (an Ollama answer with no `done_reason`).

@@ -11,9 +11,11 @@ from __future__ import annotations
 # vLLM 0.29.0 hands back everything the model wrote as `content`. llama-server: nothing
 # to pass; b10970's `--reasoning-format` defaults to deepseek (common/common.h
 # `reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK`), which, with `--jinja`, lifts the
-# template's thinking into `message.reasoning_content` (common/chat.cpp). mlx-lm: nothing
-# to pass; 0.31.3's server splits the tokenizer's think tags into `reasoning` itself
-# (mlx_lm/server.py).
+# template's thinking into `message.reasoning_content` (common/chat.cpp), which the chat
+# door renames `reasoning` both ways (engines/base.py `reasoning_field`, api/proxy.py).
+# mlx-lm: nothing to pass; 0.31.3's server splits the tokenizer's think tags into
+# `reasoning` itself (mlx_lm/server.py). mlx-vlm: Crucible's own server splits them the
+# same way (engines/mlx_vlm_serve.py).
 REASONING_FORMATS: dict[str, dict[str, str]] = {
     # <think>...</think> before the answer, on or off by the template's `enable_thinking`
     # (on when unstated). Qwen 3, 3.5 and 3.8's chat templates: thinking on, the
