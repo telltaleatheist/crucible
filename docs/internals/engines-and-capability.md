@@ -1122,6 +1122,59 @@ and one `role: "tool"` message per call:
 It answers in text, with `finish_reason: "stop"`. `arguments` is a JSON string, as
 OpenAI's is. Parse it, and expect the model to make a mistake now and then.
 
+A model that thought before its call answers round one with `reasoning` beside
+`tool_calls` and `content` null ("Reasoning"). Send that `reasoning` back on the
+assistant message: vLLM hands it to the template as `reasoning_content`, and the
+Qwen templates render it as the turn's `<think>`.
+
+## Reasoning (`[reasoning]`, `reasoningformats`)
+
+A chat model's thinking comes back apart from its answer: the reply's message
+carries it as `reasoning` (`delta.reasoning` streamed), and `content` is the
+answer alone. A chat model's manifest declares how its weights write the thinking:
+
+```toml
+[reasoning]
+format = "qwen3-think"
+basis = """Where it was read: the template's generation prompt, on disk."""
+```
+
+`crucible/reasoningformats.py` maps a format to each engine. A manifest never
+names the flag; one that states it is refused `reasoning_flags_stated`, and a
+model without the table gets no parser.
+
+| engine | what sets the thinking apart |
+| --- | --- |
+| vLLM 0.29 | `--reasoning-parser qwen3`, derived from `[reasoning]` |
+| llama-server b10970 | `--jinja` with the default `--reasoning-format deepseek` (common/common.h): the thinking comes back as `message.reasoning_content`, not `reasoning` |
+| mlx-lm 0.31.3 | its server splits the tokenizer's think tags into `reasoning` itself; nothing to pass |
+
+Every Qwen 3.5 and 3.8 chat model declares `qwen3-think` (read from every template
+on disk, 2026-10-29). The B-Side model does not: it has no vLLM block (llama-server
+and mlx-lm), it is served thinking off, and its fine-tune answers JSON at once, so
+the table would change nothing it serves.
+
+What vLLM's qwen3 parser does (vllm/parser/qwen3.py, read 2026-10-29):
+
+- It takes its mode from `chat_template_kwargs.enable_thinking`, **on when
+  unstated**. Thinking off, it starts in the answer and everything is `content`,
+  which is why decide (always thinking off) is untouched.
+- The Qwen 3.5 0.8B and 2B templates think only when `enable_thinking` is `true`,
+  the opposite default. Their manifests' `thinking = false` keeps template and
+  parser agreeing: the door always states it (`sampling.apply_defaults`).
+- Reasoning ends at `</think>`, or at a `<tool_call>` written before one. It runs
+  beside `--tool-call-parser qwen3_coder`.
+- `thinking_token_budget`, a vLLM request member the door passes through, caps the
+  thinking; it acts only with a reasoning parser, so only on cuda-linux.
+- A thinking-on chat that spends `max_tokens` thinking comes back with `reasoning`
+  and no `content`, as mlx-lm's does. Before the parser it came back as the partial
+  thinking in `content`.
+
+Thinking travels as `chat_template_kwargs.enable_thinking` (the SDK's `thinking`).
+A top-level `thinking` member is refused `thinking_field_unknown` before anything
+loads: no engine reads it, so a model that thinks when unstated thought anyway
+(qwen3.8-27b-4bit, 2026-10-29).
+
 ## Structured output (`structured`)
 
 A chat constrains its answer with `response_format` (`json_schema`,
@@ -1265,12 +1318,15 @@ with `mlx_lm/_crucible_grammar.py` (a verbatim copy of `engines/structured_mlx.p
 - EOS is in the mask only while the grammar accepts; once the grammar is complete
   it is the only token left, so a JSON answer stops at its closing brace. Inside
   the object `whitespace_flexible` allows whitespace between tokens, as on vLLM.
-- **Thinking.** vLLM binds the grammar from the first generated token: Crucible
-  starts it with no reasoning parser, so `structured_outputs_config.reasoning_parser`
-  is empty and nothing delays the grammar. mlx-lm matches it: a constrained chat
-  starts in the `normal` state, so a thinking-on request answers JSON at once and
-  it lands in `content`, not `reasoning`. Thinking is not refused; under a grammar
-  it does not happen, on either backend.
+- **Thinking.** The two backends differ here since vLLM runs a reasoning parser
+  ("Reasoning"). vLLM: `--reasoning-parser` also sets
+  `structured_outputs_config.reasoning_parser`, and with `enable_in_reasoning` false
+  the grammar waits for `</think>` (v1/structured_output). A thinking-on request
+  thinks (`reasoning`), then answers the JSON in `content`; a thinking-off one is
+  bound from the first token, because its prompt already holds `</think>`. mlx-lm:
+  a constrained chat starts in the `normal` state, so a thinking-on request answers
+  JSON at once and it lands in `content`, not `reasoning`. Thinking is not refused
+  on either.
 - **A failed matcher** (a resource limit inside llguidance; never a token it
   allowed) stops the sequence at once, and the request is answered
   `structured_output_failed` (500, or an error event before `[DONE]` on a stream),

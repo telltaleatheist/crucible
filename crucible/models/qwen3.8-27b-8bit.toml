@@ -33,3 +33,7 @@ measured_at_context = 12288
 [tools]
 format = "qwen3-xml"
 basis = """read 2026-10-25 from the mlx-darwin chat_template.jinja on owens-mac-studio: it writes calls as <tool_call><function=NAME><parameter=P>V</parameter></function></tool_call> (Qwen3-Coder's XML form, not Qwen 2.5/3's JSON)."""
+
+[reasoning]
+format = "qwen3-think"
+basis = """read 2026-10-29 from the mlx-darwin chat_template.jinja on owens-mac-studio: it opens <think> for the answer's thinking and closes it with </think> before the answer; enable_thinking false writes an empty <think></think> and the model answers at once; unstated, the template thinks."""

@@ -185,6 +185,7 @@ export type {
   CatalogRow,
   CrucibleModule,
   ChatAssistantMessage,
+  ReasoningBlock,
   ChatMessage,
   ChatOptions,
   ChatResponse,

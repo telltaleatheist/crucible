@@ -252,9 +252,15 @@ crucible api session open --act generate --max-params-b 4    open on the server'
 ```
 
 The body is forwarded **verbatim** in both directions except `model`, so
-`thinking`, `chat_template_kwargs`, `max_tokens` and everything else are the
-engine's vocabulary and belong in `--body`, not in flags this CLI would have to
-keep up with.
+`chat_template_kwargs`, `max_tokens` and everything else are the engine's
+vocabulary and belong in `--body`, not in flags this CLI would have to keep up
+with. Thinking is `"chat_template_kwargs": {"enable_thinking": false}`; a
+top-level `"thinking"` member is in no engine's request and is refused
+`400 thinking_field_unknown` before anything loads (for `anthropic/<id>`,
+`reasoning_effort` is the knob). A thinking model's thinking comes back as
+`message.reasoning` (`delta.reasoning` streamed), apart from `content`; on
+cuda-linux that is vLLM's reasoning parser, derived from the manifest's
+`[reasoning]` (docs/internals/engines-and-capability.md, "Reasoning").
 
 > **The route is `POST /v1/openai/chat/completions`** (also mounted at
 > `/openai/v1/chat/completions` for OpenAI clients). There is **no bare
@@ -297,6 +303,9 @@ What crosses, and as what (`crucible/upstreams.py`, `_anthropic_document`):
 | `n: 1` | nothing | one answer is all the Messages API writes |
 | `stream`, `stream_options.include_usage` | `stream` | usage is a chunk of its own (below) |
 | `chat_template_kwargs.enable_thinking` | nothing | dropped and said: `"thinking": "dropped"` in `X-Crucible-Sampling` |
+| nothing | `thinking` `{type: adaptive, display: summarized}` | sent to the models that think by default (the table's Summaries column), so their thinking comes back as a summary; never `{type: disabled}` (a 400 on Opus 5.5 and Sonnet 5.5) |
+| an assistant message's `reasoning_blocks` | its `thinking` / `redacted_thinking` blocks, exactly as given, before its text and `tool_use` blocks | what a reply carried, sent back unchanged; anything but those two block types is `400 invalid_request` |
+| an assistant message's `reasoning` | nothing | the readable summary; the blocks carry the thinking |
 | `context_tokens` | nothing | dropped and said: `X-Crucible-Context` source `dropped` |
 
 Refused, `400 upstream_field_unsupported` with `details.fields` (the paths) and
@@ -343,27 +352,34 @@ and the [Opus 5.5](https://platform.claude.com/docs/en/models/opus-5-5/migration
 [Fable 5.1](https://platform.claude.com/docs/en/models/fable-5-1/migration-guide.md)
 migration guides. A new model is one row.
 
-| Row | Sampling | Structured output | Effort levels | Forced tool use |
-|---|---|---|---|---|
-| `claude-fable-5-1`, `claude-mythos-5-1` | no | yes | low, medium, high, xhigh, max | no |
-| `claude-fable-5`, `claude-mythos-5` | no | yes | low, medium, high, xhigh, max | yes |
-| `claude-opus-5-5` | no | yes | low, medium, high, xhigh, max | no |
-| `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7` | no | yes | low, medium, high, xhigh, max | yes |
-| `claude-sonnet-5-5` | no | yes | low, medium, high, xhigh, max | no |
-| `claude-sonnet-5`, `claude-haiku-5-5` | no | yes | low, medium, high, xhigh, max | yes |
-| `claude-opus-4-6`, `claude-sonnet-4-6` | yes | yes | low, medium, high, max | yes |
-| `claude-opus-4-5` | yes | yes | low, medium, high | yes |
-| `claude-sonnet-4-5`, `claude-haiku-4-5` | yes | yes | none | yes |
+| Row | Sampling | Structured output | Effort levels | Forced tool use | Summaries |
+|---|---|---|---|---|---|
+| `claude-fable-5-1`, `claude-mythos-5-1` | no | yes | low, medium, high, xhigh, max | no | yes |
+| `claude-fable-5`, `claude-mythos-5` | no | yes | low, medium, high, xhigh, max | yes | yes |
+| `claude-opus-5-5` | no | yes | low, medium, high, xhigh, max | no | yes |
+| `claude-opus-5` | no | yes | low, medium, high, xhigh, max | yes | yes |
+| `claude-opus-4-8`, `claude-opus-4-7` | no | yes | low, medium, high, xhigh, max | yes | no |
+| `claude-sonnet-5-5` | no | yes | low, medium, high, xhigh, max | no | yes |
+| `claude-sonnet-5`, `claude-haiku-5-5` | no | yes | low, medium, high, xhigh, max | yes | yes |
+| `claude-opus-4-6`, `claude-sonnet-4-6` | yes | yes | low, medium, high, max | yes | no |
+| `claude-opus-4-5` | yes | yes | low, medium, high | yes | no |
+| `claude-sonnet-4-5`, `claude-haiku-4-5` | yes | yes | none | yes | no |
+
+Summaries (`adaptive_by_default`): the model runs adaptive thinking when a request names
+none, so Crucible sends `thinking: {type: adaptive, display: summarized}` — the same
+thinking, with a readable summary instead of the default empty text (`display:
+omitted`), billed the same. The other rows think only when asked (Opus 4.6–4.8,
+Sonnet 4.6) or only by `budget_tokens` (the 4.5s), and are sent no `thinking`.
 
 **A model no row names is forwarded as asked**, and Anthropic answers for it: what it
 refuses comes back as `502 upstream_rejected` in Anthropic's own words. Sending
 `reasoning_effort` with no row still checks the level is one of the five.
 
 Effort defaults to the model's own when unsent (`high`; `medium` on Opus 5.5 and
-Haiku 5.5). Thinking itself is never configured: the current models think adaptively
-by default, their thinking blocks are not relayed (`display` defaults to `omitted`),
-and a thinking-on model spends part of `max_tokens` thinking — send a `max_tokens` that
-leaves room, because 4096 can end in `finish_reason: "length"` before any text.
+Haiku 5.5). Thinking is not turned off: the models in the Summaries column think
+adaptively by default and are asked for their summary, and a thinking model spends part
+of `max_tokens` thinking — send a `max_tokens` that leaves room, because 4096 can end
+in `finish_reason: "length"` before any text.
 
 The answer: the text blocks joined are `content`; `stop_reason` `end_turn` and
 `stop_sequence` are `stop`, `max_tokens` and `model_context_window_exceeded` are
@@ -371,22 +387,32 @@ The answer: the text blocks joined are `content`; `stop_reason` `end_turn` and
 reason is relayed as Anthropic said it. Each `tool_use` block is one of
 `message.tool_calls` (`{id, type: function, function: {name, arguments}}`, `arguments`
 its `input` as a JSON string), in order; an answer that only called tools has
-`content: null`. `usage.prompt_tokens` is every prompt token (Anthropic's `input_tokens` plus
-its cache writes and reads), `usage.prompt_tokens_details.cached_tokens` the cache
-reads.
+`content: null`. The `thinking` blocks' text, joined by a blank line, is
+`message.reasoning` (absent when it is empty, as without summaries); every `thinking`
+and `redacted_thinking` block, exactly as Claude wrote it (signature and all), is
+`message.reasoning_blocks`. `usage.prompt_tokens` is every prompt token (Anthropic's
+`input_tokens` plus its cache writes and reads), `usage.prompt_tokens_details.cached_tokens`
+the cache reads.
 
 Streaming: text deltas become content chunks; a `tool_use` block's
 `content_block_start` is a `delta.tool_calls` entry `{index, id, type: function,
 function: {name, arguments: ""}}` and each `input_json_delta` one more `{index,
 function: {arguments: <piece>}}` (a call with no input gets `"{}"` at its
-`content_block_stop`), `index` counting the calls from 0; `ping`, thinking deltas and
-event types this server does not know are skipped.
+`content_block_stop`), `index` counting the calls from 0; each `thinking_delta` is a
+`delta.reasoning` chunk; a `signature_delta` is never shown, it completes its block;
+the finish chunk (the one carrying `finish_reason`) carries every thinking and
+redacted_thinking block, assembled, as `delta.reasoning_blocks`; `ping` and event types
+this server does not know are skipped.
 
 Tool calling holds no state: Crucible stores no tools and remembers nothing between
 rounds. The app sends its tools and the whole conversation every round (its question,
 the assistant's `tool_calls`, its own `tool` results), runs the tools itself and decides
-when the loop ends. Thinking blocks are not relayed, so a later round replays the
-assistant's text and calls without them.
+when the loop ends. To keep Claude's thinking across the loop, send the assistant
+message back with the `reasoning_blocks` its reply carried, unchanged (the Messages API
+requires its own blocks back as they were, history append-only); Crucible puts them
+before the turn's text and `tool_use` blocks. A turn whose thinking fell between two of
+its tool calls is sent back with all its blocks first: the OpenAI shape keeps no block
+order. `reasoning_blocks` is taken off every message of a chat to any other model.
 
 The `ollama` upstream carries the same tool calling in Ollama's native form: `tools` as
 OpenAI's function shape (`parameters` defaulted as above; `strict: true` is refused
@@ -585,9 +611,10 @@ evicted. Loading the resident model again at a new context is a reload:
 crucible api job submit --type load-model --model qwen3.5-9b --params '{"context": 65536}' --follow
 ```
 
-Send `"thinking": false` in the body for a cleanup pass: Qwen3.5 otherwise
-spends a bounded budget entirely on reasoning (measured; the same rule
-BookForge's `crucible` provider follows).
+Send `"chat_template_kwargs": {"enable_thinking": false}` in the body (the SDK's
+`thinking: false`) for a cleanup pass: Qwen3.5 otherwise spends a bounded budget
+entirely on reasoning (measured; the same rule BookForge's `crucible` provider
+follows). A top-level `"thinking": false` is refused `thinking_field_unknown`.
 
 ### The other job types, as bodies
 

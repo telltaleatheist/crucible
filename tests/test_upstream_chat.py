@@ -1494,7 +1494,7 @@ def test_an_anthropic_stream_error_is_relayed_and_gets_no_done(
                      "upstream": "anthropic"}
 
 
-def test_the_stream_translator_skips_pings_thinking_and_unknown_events() -> None:
+def test_the_stream_translator_skips_pings_and_unknown_events_and_relays_thinking() -> None:
     translator = upstreams.AnthropicStreamTranslator("anthropic/x", include_usage=False)
     events = [
         {"type": "message_start", "message": {"id": "msg_1", "usage": {"input_tokens": 3}}},
@@ -1515,7 +1515,7 @@ def test_the_stream_translator_skips_pings_thinking_and_unknown_events() -> None
     assert lines[-1] == "data: [DONE]"
     chunks = [json.loads(line[6:]) for line in lines[:-1]]
     assert [c["choices"][0]["delta"] for c in chunks] == [
-        {"role": "assistant"}, {"content": "ok"}, {}
+        {"role": "assistant"}, {"reasoning": "hm"}, {"content": "ok"}, {}
     ]
 
 
@@ -1975,3 +1975,199 @@ def test_ollamas_streamed_tool_calls_arrive_as_deltas(routed, auth, upstream) ->
             "arguments": json.dumps({"city": "Paris"})},
         1: {"id": "call_abc", "type": "function", "name": "get_time", "arguments": "{}"},
     }
+
+
+# Claude's thinking: summaries asked for, read back as `reasoning`, and its blocks sent
+# back unchanged on the assistant turn of a tool loop.
+
+SUMMARY = "".join(fake_upstream.CLAUDE_SUMMARY)
+SIGNED = {"type": "thinking", "thinking": SUMMARY, "signature": fake_upstream.CLAUDE_SIGNATURE}
+
+
+@pytest.mark.parametrize("model", [
+    "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1",
+    "claude-sonnet-5", "claude-opus-5",
+])
+def test_a_model_that_thinks_by_default_is_asked_for_its_summary(
+    routed, auth, upstream, model
+) -> None:
+    assert _anthropic(routed, auth, model).status_code == 200
+    assert upstream.requests[-1]["thinking"] == {"type": "adaptive", "display": "summarized"}
+
+
+@pytest.mark.parametrize("model", [
+    "claude-opus-4-8", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5",
+    "claude-opus-4-5", "claude-haiku-5",
+])
+def test_a_model_that_thinks_only_when_asked_is_sent_no_thinking(
+    routed, auth, upstream, model
+) -> None:
+    assert _anthropic(routed, auth, model).status_code == 200
+    assert "thinking" not in upstream.requests[-1]
+
+
+def test_thinking_stated_off_still_never_sends_disabled(routed, auth, upstream) -> None:
+    body = _anthropic(routed, auth, "claude-opus-5-5",
+                      chat_template_kwargs={"enable_thinking": False})
+    assert body.status_code == 200, body.text
+    assert upstream.requests[-1]["thinking"]["type"] == "adaptive"
+    assert json.loads(body.headers[SAMPLING_HEADER])["thinking"] == "dropped"
+
+
+def test_claudes_summary_comes_back_as_reasoning_with_its_blocks(routed, auth, upstream) -> None:
+    upstream.redacted_thinking = "EmwKAhgBEgy3va3pzix/LafPsn4aDFIT"
+    message = _anthropic(routed, auth, "claude-opus-5-5").json()["choices"][0]["message"]
+    assert message["content"] == ANSWER
+    assert message["reasoning"] == SUMMARY
+    assert message["reasoning_blocks"] == [
+        SIGNED, {"type": "redacted_thinking", "data": upstream.redacted_thinking},
+    ]
+
+
+def test_empty_thinking_text_gives_no_reasoning_but_keeps_the_blocks(
+    routed, auth, upstream
+) -> None:
+    message = _anthropic(routed, auth, "claude-sonnet-4-6").json()["choices"][0]["message"]
+    assert "reasoning" not in message
+    assert message["reasoning_blocks"] == [
+        {"type": "thinking", "thinking": "", "signature": "sig"}
+    ]
+
+
+def test_claudes_summary_streams_as_delta_reasoning_and_the_blocks_end_it(
+    routed, auth, upstream
+) -> None:
+    upstream.redacted_thinking = "opaque"
+    frames, _ = _stream(routed, auth, {
+        "model": "anthropic/claude-opus-5-5",
+        "messages": [{"role": "user", "content": "hi"}], "stream": True,
+    })
+    deltas = [p["choices"][0]["delta"] for p in _payloads(frames) if p["choices"]]
+    assert [d["reasoning"] for d in deltas if "reasoning" in d] == fake_upstream.CLAUDE_SUMMARY
+    assert "".join(d.get("content", "") for d in deltas) == ANSWER
+    finish = [p["choices"][0] for p in _payloads(frames) if p["choices"]][-1]
+    assert finish["finish_reason"] == "stop"
+    assert finish["delta"] == {"reasoning_blocks": [
+        SIGNED, {"type": "redacted_thinking", "data": "opaque"},
+    ]}
+    # The signature is never shown as text.
+    assert not any(fake_upstream.CLAUDE_SIGNATURE in d.get("reasoning", "") for d in deltas)
+
+
+def _replayed(routed, auth, upstream, assistant: dict[str, Any], *after: dict[str, Any]):
+    body = chat(routed, auth, {
+        "model": "anthropic/claude-opus-5-5",
+        "messages": [{"role": "user", "content": "look it up"}, assistant, *after],
+    })
+    assert body.status_code == 200, body.text
+    return upstream.requests[-1]["messages"][1]
+
+
+def test_a_tool_loop_sends_the_blocks_back_byte_identical_before_its_calls(
+    routed, auth, upstream
+) -> None:
+    upstream.redacted_thinking = "opaque"
+    first = _anthropic(routed, auth, "claude-opus-5-5").json()["choices"][0]["message"]
+    blocks = first["reasoning_blocks"]
+    sent = _replayed(routed, auth, upstream, {
+        "role": "assistant", "content": None, "reasoning": first["reasoning"],
+        "reasoning_blocks": blocks,
+        "tool_calls": [{"id": "toolu_1", "type": "function",
+                        "function": {"name": "lookup", "arguments": "{\"q\": \"x\"}"}}],
+    }, {"role": "tool", "tool_call_id": "toolu_1", "content": "found"})
+    assert sent["role"] == "assistant"
+    assert json.dumps(sent["content"][:2]) == json.dumps(blocks)
+    assert sent["content"][2] == {"type": "tool_use", "id": "toolu_1", "name": "lookup",
+                                  "input": {"q": "x"}}
+    assert len(sent["content"]) == 3
+
+
+def test_a_streamed_turns_blocks_go_back_as_they_were_assembled(
+    routed, auth, upstream
+) -> None:
+    frames, _ = _stream(routed, auth, {
+        "model": "anthropic/claude-opus-5-5",
+        "messages": [{"role": "user", "content": "hi"}], "stream": True,
+    })
+    blocks = [p for p in _payloads(frames) if p["choices"]][-1]["choices"][0]["delta"][
+        "reasoning_blocks"
+    ]
+    sent = _replayed(routed, auth, upstream, {
+        "role": "assistant", "content": ANSWER, "reasoning_blocks": blocks,
+    }, {"role": "user", "content": "and?"})
+    assert sent["content"] == [SIGNED, {"type": "text", "text": ANSWER}]
+
+
+def test_a_text_turn_sends_its_blocks_back_before_its_text(routed, auth, upstream) -> None:
+    sent = _replayed(routed, auth, upstream, {
+        "role": "assistant", "content": "said", "reasoning_blocks": [SIGNED],
+    }, {"role": "user", "content": "and?"})
+    assert sent["content"] == [SIGNED, {"type": "text", "text": "said"}]
+
+
+def test_reasoning_alone_is_not_sent_back(routed, auth, upstream) -> None:
+    sent = _replayed(routed, auth, upstream, {
+        "role": "assistant", "content": "said", "reasoning": "unsigned",
+    }, {"role": "user", "content": "and?"})
+    assert sent == {"role": "assistant", "content": "said"}
+
+
+@pytest.mark.parametrize("blocks, field", [
+    ("nope", "messages[1].reasoning_blocks"),
+    ([{"type": "text", "text": "x"}], "messages[1].reasoning_blocks[0]"),
+])
+def test_reasoning_blocks_that_are_not_thinking_blocks_are_refused(
+    routed, auth, upstream, blocks, field
+) -> None:
+    before = len(upstream.requests)
+    error = _refused(chat(routed, auth, {
+        "model": "anthropic/claude-opus-5-5",
+        "messages": [{"role": "user", "content": "hi"},
+                     {"role": "assistant", "content": "said", "reasoning_blocks": blocks},
+                     {"role": "user", "content": "and?"}],
+    }), "invalid_request")
+    assert error["details"]["field"] == field
+    assert len(upstream.requests) == before
+
+
+def test_reasoning_blocks_on_a_user_turn_are_refused(routed, auth, upstream) -> None:
+    error = _refused(chat(routed, auth, {
+        "model": "anthropic/claude-opus-5-5",
+        "messages": [{"role": "user", "content": "hi", "reasoning_blocks": [SIGNED]}],
+    }), "upstream_field_unsupported")
+    assert error["details"]["fields"] == ["messages[0].reasoning_blocks"]
+
+
+def test_reasoning_blocks_never_reach_another_vendor(routed, auth, upstream) -> None:
+    body = chat(routed, auth, {
+        "model": "openai/gpt-5",
+        "messages": [{"role": "user", "content": "hi"},
+                     {"role": "assistant", "content": "said", "reasoning_blocks": [SIGNED]},
+                     {"role": "user", "content": "and?"}],
+    })
+    assert body.status_code == 200, body.text
+    assert upstream.requests[-1]["messages"][1] == {"role": "assistant", "content": "said"}
+
+
+def test_strip_reasoning_blocks_takes_them_off_every_message() -> None:
+    body = {"messages": [{"role": "user", "content": "hi"},
+                         {"role": "assistant", "content": "x", "reasoning_blocks": [SIGNED]}]}
+    assert upstreams.strip_reasoning_blocks(body) is True
+    assert body["messages"][1] == {"role": "assistant", "content": "x"}
+    assert upstreams.strip_reasoning_blocks(body) is False
+
+
+@pytest.mark.parametrize("model", ["anthropic/claude-opus-5-5", "qwen3.8-27b-4bit"])
+@pytest.mark.parametrize("value", [False, True, {"type": "adaptive"}])
+def test_a_top_level_thinking_member_is_refused_before_anything_loads(
+    routed, auth, upstream, model, value
+) -> None:
+    before = len(upstream.requests)
+    error = _refused(chat(routed, auth, {
+        "model": model, "messages": [{"role": "user", "content": "hi"}],
+        "thinking": value, "queue": False,
+    }), "thinking_field_unknown")
+    assert "chat_template_kwargs" in error["message"]
+    assert "reasoning_effort" in error["message"]
+    assert error["details"] == {"field": "thinking"}
+    assert len(upstream.requests) == before

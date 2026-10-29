@@ -65,14 +65,15 @@ Labels used below:
   - **0.8B and 2B** do not: "Qwen3.5-0.8B operates in non-thinking mode by default" [S3, S4]. Their template opens a thinking block only when `enable_thinking` is explicitly `true` [S5].
 - With thinking off, every size's template pre-fills an empty `<think>\n\n</think>\n\n` after `<|im_start|>assistant\n` [S5].
 - **No soft switch.** "Qwen3.5 does not officially support the soft switch of Qwen3, i.e., `/think` and `/nothink`" [S1, S3]. Do not put those tokens in prompts.
-- **History.** The final output alone belongs in the history, not the thinking. The template does this itself: it keeps `reasoning_content` only for assistant turns after the last real user query. It also splits a `<think>…</think>` found inline in `content` [S1 Best Practices item 4; S5].
+- **History.** The final output alone belongs in the history, not the thinking. The template does this itself: it keeps `reasoning_content` only for assistant turns after the last real user query. It also splits a `<think>…</think>` found inline in `content` [S1 Best Practices item 4; S5]. On Crucible, send an assistant turn back with its `content` and, within a tool loop, its `reasoning` (vLLM hands the template `reasoning` as `reasoning_content`).
 
 **How Crucible maps this.** [C1, C2, C3, C4]
 - `thinking` in the SDK becomes `chat_template_kwargs.enable_thinking` on the wire. Crucible owns only that one key in `chat_template_kwargs`.
 - All six manifests set `[defaults] thinking = false`. A chat that does not state it is sent `enable_thinking: false`, and the `X-Crucible-Sampling` header reports `"thinking":"manifest"`.
 - `decide` always states thinking off itself and takes no manifest defaults [C5, PHASE22 §2.4].
-- Crucible starts vLLM **without** `--reasoning-parser` [C1, "Structured output → Thinking"; C3]. So when thinking is on, the thinking text arrives inside `content` on cuda-linux. This is read from source, not yet measured. On mlx-darwin a finished answer arrives with no `<think>` in `content` (measured) [C3].
-- `max_tokens` is the only thinking budget. vLLM's `thinking_token_budget` would need a reasoning parser [C3].
+- Every Qwen3.5 manifest declares `[reasoning] format = "qwen3-think"`, so Crucible starts vLLM **with** `--reasoning-parser qwen3` (since the reasoning-parser change, 2026-10-29) [C1, "Reasoning"; C4]. When thinking is on, the thinking comes back as `message.reasoning` (`delta.reasoning` streamed) and `content` is the answer alone, on cuda-linux as on mlx-darwin (mlx-lm splits it itself). llama-server answers it as `message.reasoning_content` [C1]. The cuda-linux split is read from vLLM 0.29.0's source, not yet measured.
+- The parser takes its mode from `enable_thinking` and assumes **on** when unstated, while the 0.8B/2B templates assume off. The manifests' `thinking = false` default keeps the two agreeing; an app never sees the difference because Crucible always states it [C4].
+- `thinking_token_budget` (vLLM's request field) now works on cuda-linux: Crucible passes it through, and vLLM ends the thinking after that many tokens. It is not a field on mlx-darwin or llama-server. `max_tokens` still caps thinking plus answer together; a thinking-on run that spends it all comes back with `reasoning` and no `content` on both backends [C3].
 
 **Template mirrors differ.** Unsloth's GGUF template, used by the `llama-windows` blocks, flips the default for 4B and 9B to **non-thinking** (`enable_thinking` must be `true` to think). The same is stated in prose: "Thinking is disabled by default for all small models (0.8B, 2B, 4B, 9B)" [S9, S10]. The MLX mirrors are byte-identical to upstream [S8]. Because Crucible states `thinking` on every Qwen3.5 chat, the two defaults never decide anything in practice. An app that bypasses the manifest default could still see different behaviour per backend.
 
@@ -326,8 +327,8 @@ Only facts from Crucible's docs and changelog and from Owen's memory notes.
    - This matters only when an app turns thinking on.
 4. **Reasoning parser.**
    - Official serving examples (4B/9B) start vLLM and SGLang with `--reasoning-parser qwen3`.
-   - Crucible runs vLLM without it, so thinking lands in `content` and there is no `thinking_token_budget` [S1, C1, C3].
-   - This is deliberate in Crucible (the grammar binds from token one), but it differs from upstream.
+   - Crucible now runs vLLM with it too (`[reasoning]` in the manifest), so thinking comes back as `reasoning` and `thinking_token_budget` works [S1, C1, C3].
+   - One consequence differs from mlx-darwin: with thinking on, a `response_format` grammar waits for `</think>` on vLLM, so the model thinks and then answers the JSON in `content`; mlx-lm binds the grammar from the first token and answers at once. Thinking off, both answer at once.
 
 **Conflicts within the sources**
 

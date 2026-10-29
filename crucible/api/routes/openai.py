@@ -45,6 +45,7 @@ from ...structured import (
     with_compact_json,
     with_llguidance_grammar,
 )
+from ...upstreams import strip_reasoning_blocks
 from ..caller import client_agent, queue_session
 from ..chatlog import ChatLog
 from ..context import AppContext, Routers
@@ -140,6 +141,30 @@ def _documented_body() -> dict[str, Any]:
     schema = ChatCompletionBody.model_json_schema(ref_template="#/components/schemas/{model}")
     schema.pop("$defs", None)
     return {"requestBody": {"required": True, "content": {"application/json": {"schema": schema}}}}
+
+
+THINKING_MEMBER = "thinking"
+
+
+def refuse_a_top_level_thinking_member(body: dict[str, Any]) -> None:
+    """A chat's thinking travels as `chat_template_kwargs.enable_thinking`. A top-level
+    `thinking` member is in no engine's request: vLLM, llama-server and mlx-lm ignore
+    it, so a model whose template thinks when unstated thinks anyway, and its
+    deliberation is billed to the answer (2026-10-29: `"thinking": false` sent to
+    qwen3.8-27b-4bit, which thought). Refused by name before anything loads."""
+    if THINKING_MEMBER not in body:
+        return
+    raise ApiError(
+        400,
+        "thinking_field_unknown",
+        f"this chat sends a top-level `{THINKING_MEMBER}` ({body[THINKING_MEMBER]!r}), "
+        "which no engine reads: the model would think or not by its template's default. "
+        'Thinking travels as `chat_template_kwargs.enable_thinking` (`{"chat_template_'
+        'kwargs": {"enable_thinking": false}}`), which is where the SDK\'s `thinking` '
+        "option sends it. For an `anthropic/<id>` model, `reasoning_effort` is the knob "
+        "(Claude's thinking is not turned off). Nothing was sent",
+        {"field": THINKING_MEMBER},
+    )
 
 
 def refuse_tools_this_model_cannot_take(
@@ -376,10 +401,19 @@ def register(routers: Routers, ctx: AppContext) -> None:
         refused `tools_unsupported`, and tools beside a `response_format` are refused
         `tools_with_response_format` ("Tool calling"). An `anthropic/<id>` or
         `ollama/<id>` chat is translated both ways.
+        Thinking travels as `chat_template_kwargs.enable_thinking`; a top-level
+        `thinking` member is read by no engine and is refused `thinking_field_unknown`
+        before anything loads. A thinking model's thinking comes back as the message's
+        `reasoning` (`delta.reasoning` streamed), apart from `content` (a local model
+        whose manifest declares `[reasoning]`; mlx-lm; Claude's summary). An
+        `anthropic/<id>` reply also carries `reasoning_blocks`, Claude's thinking blocks
+        as it wrote them, which an assistant message sends back unchanged to keep its
+        thinking across a tool loop; they are taken off a chat to any other model.
         """
         arrived = time.monotonic()
         raw = await request.body()
         body = chat_body(raw)
+        refuse_a_top_level_thinking_member(body)
         named = body.get("model")
         if named is not None and (not isinstance(named, str) or named == ""):
             raise ApiError(
@@ -406,6 +440,11 @@ def register(routers: Routers, ctx: AppContext) -> None:
         )
         requested = chosen.model
         body["model"] = requested
+        target = upstreamrecord.split_model(requested)
+        # Claude's signed thinking blocks go back to Claude alone.
+        stripped = (target is None or target[0] != "anthropic") and strip_reasoning_blocks(
+            body
+        )
         log = ChatLog.of(
             body, requested,
             verbmodel.source_of(chosen, DEFAULT_CHAT_VERB if verb is None else verb, ctx.config),
@@ -414,12 +453,13 @@ def register(routers: Routers, ctx: AppContext) -> None:
         if (
             sent_choice
             or sent_queue
+            or stripped
             or prefill is not None
             or form is not None
             or json_whitespace is not None
         ):
             raw = json.dumps(body).encode("utf-8")
-        if upstreamrecord.split_model(requested) is not None:
+        if target is not None:
             if form is not None:
                 refuse_upstream_form(requested)
             if prefill is not None:

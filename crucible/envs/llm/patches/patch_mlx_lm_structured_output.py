@@ -12,8 +12,9 @@ Two files:
 - mlx_lm/server.py: GenerationArguments carries the constraint; do_POST reads it;
   both _make_logits_processors call sites pass the tokenizer and get the grammar
   processor appended; a constrained chat starts in the "normal" state, because the
-  grammar binds from the first generated token as it does on vLLM 0.29.0 (no
-  reasoning parser), so the answer is content and not reasoning; and a matcher that
+  grammar binds from the first generated token (as it did on vLLM 0.29.0 before
+  Crucible gave it a reasoning parser, 2026-10-29; vLLM now waits for </think> on a
+  thinking-on chat), so the answer is content and not reasoning; and a matcher that
   failed during generation answers with the error, not the partial text.
 - mlx_lm/generate.py: two stock defects in how a batch carries per-sequence logits
   processors, harmless while every list is empty and fatal or silent once one is

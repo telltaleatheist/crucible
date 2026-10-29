@@ -13,6 +13,7 @@ from .classnames import RETRIEVAL_PACKAGE
 from .errors import CrucibleError
 from .memorybudget import available_bytes, gib_text
 from .precision import MIN_WEIGHT_BITS, below_floor, gguf_bits, implied_bits
+from .reasoningformats import REASONING_FORMATS
 from .tomltable import HF_REPO_PATTERN, MODEL_ID_PATTERN, REVISION_PATTERN, check_table
 from .toolformats import TOOL_FORMATS
 from .verbspec import EmbedSpec, RerankSpec, VerbSpecError, parse_embed, parse_rerank
@@ -612,6 +613,40 @@ def _parse_tools(table: Any, path: Path) -> ToolsSpec:
 
 
 @dataclass(frozen=True)
+class ReasoningSpec:
+    """A chat model's [reasoning] table: the reasoning `format` its chat template and
+    weights write (how the thinking is set apart from the answer), and the `basis`
+    sentence saying where that was read."""
+
+    format: str
+    basis: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"format": self.format, "basis": self.basis}
+
+
+def _parse_reasoning(table: Any, path: Path) -> ReasoningSpec:
+    where = f"{path.name} [reasoning]"
+    if not isinstance(table, dict):
+        raise ManifestError(f"{where} must be a table")
+    stray = sorted(set(table) - {"format", "basis"})
+    if stray:
+        raise ManifestError(f"{where}: unknown key(s) {stray}; it has exactly format and basis")
+    fmt, basis = table.get("format"), table.get("basis")
+    if fmt not in REASONING_FORMATS:
+        raise ManifestError(
+            f"{where}: format {fmt!r} is not a reasoning format this build knows; "
+            f"they are {sorted(REASONING_FORMATS)}"
+        )
+    if not isinstance(basis, str) or not basis.strip():
+        raise ManifestError(
+            f"{where}: `basis` must say where the format was read (the model's chat "
+            "template, its card)"
+        )
+    return ReasoningSpec(format=fmt, basis=basis.strip())
+
+
+@dataclass(frozen=True)
 class ModelManifest:
     id: str
     family: str
@@ -635,6 +670,9 @@ class ModelManifest:
     rerank: RerankSpec | None = None
     # The tool-call format its chat template is trained on; None refuses `tools`.
     tools: ToolsSpec | None = None
+    # How its thinking is set apart from its answer; None leaves the thinking (if any)
+    # wherever the engine puts it without being told.
+    reasoning: ReasoningSpec | None = None
 
     weights_family = "models"
 
@@ -739,6 +777,7 @@ class ModelManifest:
             "weights_of": self.weights_of,
             "embed": None if self.embed is None else self.embed.to_dict(),
             "tools": None if self.tools is None else self.tools.to_dict(),
+            "reasoning": None if self.reasoning is None else self.reasoning.to_dict(),
             "rerank": None if self.rerank is None else self.rerank.to_dict(),
             "backends": {k: v.to_dict() for k, v in sorted(self.backends.items())},
         }
@@ -1011,7 +1050,7 @@ def _parse_serves(
 
 
 _TOP_LEVEL_TABLES = frozenset(
-    {"model", "backends", "defaults", "local", "embed", "rerank", "tools"}
+    {"model", "backends", "defaults", "local", "embed", "rerank", "tools", "reasoning"}
 )
 
 
@@ -1021,8 +1060,8 @@ def _check_document(document: dict[str, Any], path: Path) -> None:
         raise ManifestError(
             f"{path.name}: unknown top-level table(s) {unknown}; a manifest has "
             "exactly [model], [backends.<kind>], an optional [defaults], an "
-            "optional [local], an optional [tools] and, for a model that embeds or "
-            "reranks, its [embed] or [rerank]"
+            "optional [local], an optional [tools], an optional [reasoning] and, for "
+            "a model that embeds or reranks, its [embed] or [rerank]"
         )
     if "model" not in document:
         raise ManifestError(f"{path.name}: missing the [model] table")
@@ -1611,6 +1650,11 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
         embed=embed,
         rerank=rerank,
         tools=None if "tools" not in document else _parse_tools(document["tools"], path),
+        reasoning=(
+            None
+            if "reasoning" not in document
+            else _parse_reasoning(document["reasoning"], path)
+        ),
     )
 
 

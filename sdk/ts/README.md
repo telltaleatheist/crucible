@@ -515,10 +515,13 @@ letters, digits and hyphens, at most 32, shown as sent. A malformed one comes ba
 `invalid_act` before the completion runs. It labels the work and chooses nothing; a chat
 chooses its model by `model`, or by `verb` and `maxParamsB`.
 
-`chat()` returns `ChatResponse {id, model, content, toolCalls, finishReason, usage:
-{promptTokens, completionTokens, totalTokens}}` — OpenAI's `chat.completion` read down to
-the parts a caller uses, from the first (and only) choice. `content` is null only when the
-model called tools and wrote no text; `toolCalls` is empty when it called none.
+`chat()` returns `ChatResponse {id, model, content, toolCalls, reasoning, reasoningBlocks,
+finishReason, usage: {promptTokens, completionTokens, totalTokens}}` — OpenAI's
+`chat.completion` read down to the parts a caller uses, from the first (and only) choice.
+`content` is null only when the model called tools and wrote no text; `toolCalls` is empty
+when it called none. `reasoning` is the model's thinking apart from the answer
+(`message.reasoning`), null when it did not think or said nothing of it; `reasoningBlocks`
+is Claude's signed thinking blocks, empty for every other model (see "Thinking on or off").
 
 `finishReason` is the engine's own word, surfaced and never normalised — a plain string, so
 a value this client did not anticipate still reaches you. `length` means the answer is
@@ -546,28 +549,55 @@ const answer = await crucible.chat({ model, messages, tools: [weatherTool] });
 last delta, with the calls its `delta.tool_calls` fragments assemble into (by `index`, the
 `arguments` pieces joined), or an empty array when there were none.
 
+A thinking model's turn goes back with its thinking too: `reasoning: first.reasoning` (a
+local Qwen's template renders it as the turn's `<think>`), and for an `anthropic/<id>`
+model `reasoningBlocks: first.reasoningBlocks`, which Claude needs unchanged to keep
+thinking across the loop. The server takes `reasoning_blocks` off for every other model and
+never sends Claude the plain `reasoning`.
+
 ### Thinking on or off, per call
 
 `thinking: true | false` (sent as `chat_template_kwargs.enable_thinking`) and `maxTokens`
 are passed to the engine exactly as stated on both backends. A model's manifest default fills
 only what a request omits, and every reply's `X-Crucible-Sampling` header says whether each
-value came from the `request`, the `manifest` or the `engine`. `maxTokens` is the ONLY think
-budget today. vLLM's `thinking_token_budget` acts only with a reasoning parser, which
-Crucible does not start vLLM with, and mlx-lm has no such knob.
+value came from the `request`, the `manifest` or the `engine`. A top-level `thinking` member
+in a hand-written body is in no engine's request: the server refuses it,
+`thinking_field_unknown`.
 
-**A thinking-on answer that runs out of `maxTokens` looks different on the two backends**,
-so fail on `finishReason === 'length'` alone, never on "content is empty":
+The thinking comes back apart from the answer: `ChatResponse.reasoning`, and streamed, each
+`delta.reasoning` handed to `onReasoning` while the stream yields content alone. On
+cuda-linux that needs the model's manifest to declare `[reasoning]` (every Qwen 3.5 and 3.8
+chat model does, so vLLM runs its reasoning parser); mlx-lm splits it itself.
+
+`maxTokens` caps thinking and answer together. On cuda-linux vLLM's `thinking_token_budget`
+(a body member the door passes through) caps the thinking alone; mlx-lm has no such knob.
+
+**A thinking-on answer that runs out of `maxTokens` gives `reasoning` and no `content`**, on
+both backends. `chat()` throws a `CrucibleProtocolError` that says so (raise `maxTokens`, or
+`thinking: false`); a stream yields no content. Fail on `finishReason === 'length'`, never on
+"content is empty":
 
 | backend | finished (`stop`) | ran out (`length`) |
 |---|---|---|
-| mlx-darwin (mlx-lm 0.31.3) | the answer only; no `<think>` in `content` | `content` is empty |
-| cuda-linux (vLLM 0.29, no reasoning parser) | expected: `<think>…</think>` then the answer, in `content` | expected: the PARTIAL thinking in `content` |
+| mlx-darwin (mlx-lm 0.31.3) | the answer in `content`, the thinking in `reasoning` | `content` empty, the partial thinking in `reasoning` |
+| cuda-linux (vLLM 0.29 with `--reasoning-parser qwen3`) | expected: the same | expected: the same |
+| llama-server | the thinking as `message.reasoning_content`, which this client does not read | — |
 
 The mlx-darwin row was MEASURED (ContentStudio, 2026-09-25: qwen3.8-27b-4bit, `maxTokens`
 8192, 4 of 9 chapter titles ran out after 405–412 s with 0 chars of content, and the 5 that
-finished had 325–351 chars with no think text). The cuda-linux row is read from vLLM's source
-and not yet measured; strip `<think>…</think>` (and an unclosed `<think>` to the end) before
-using `content` there.
+finished had 325–351 chars with no think text). The cuda-linux row is read from vLLM 0.29.0's
+source (vllm/parser/qwen3.py) and not yet measured. Before the reasoning parser (Crucible
+before 2026-10-29) the cuda-linux thinking arrived inside `content`.
+
+With thinking on and a `responseFormat`, vLLM's grammar waits for the thinking to end: the
+model thinks, then answers the JSON in `content`. mlx-lm binds the grammar from the first
+token and answers at once. With thinking off both answer at once.
+
+An `anthropic/<id>` model thinks by Claude's own rules: the server asks the models that think
+by default (Opus 5.5, Sonnet 5.5, Haiku 5.5, the Fables, Opus 5, Sonnet 5) for their summary,
+which comes back as `reasoning`, and `reasoningEffort` is the knob (`thinking: false` is read
+and dropped there; Claude's thinking is not turned off). Its `reasoningBlocks` (streamed:
+`onReasoningBlocks`, once, after the last delta) go back on the assistant turn unchanged.
 
 ### Structured output
 

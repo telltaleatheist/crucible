@@ -283,24 +283,39 @@ class AnthropicModelRule:
     # tool_choice `any` / `tool` (OpenAI's `required` / a named function): the models
     # that removed forced tool use answer either with a 400.
     forced_tool: bool = True
+    # The model runs adaptive thinking when a request names no `thinking`: Crucible
+    # then sends ANTHROPIC_THINKING, the same thinking with its summary shown (their
+    # `display` defaults to "omitted", empty thinking text). The rest think only when
+    # asked (Opus 4.6-4.8, Sonnet 4.6) or only by budget_tokens (the 4.5s), and are
+    # sent no `thinking`, as before. `{type: "disabled"}` is never sent: it is a 400
+    # on Opus 5.5 and Sonnet 5.5.
+    adaptive_by_default: bool = False
 
 
 ANTHROPIC_MODEL_RULES: dict[str, AnthropicModelRule] = {
-    "claude-fable-5-1": AnthropicModelRule(False, True, _EVERY_EFFORT, forced_tool=False),
-    "claude-mythos-5-1": AnthropicModelRule(False, True, _EVERY_EFFORT, forced_tool=False),
-    "claude-fable-5": AnthropicModelRule(False, True, _EVERY_EFFORT),
-    "claude-mythos-5": AnthropicModelRule(False, True, _EVERY_EFFORT),
-    "claude-opus-5-5": AnthropicModelRule(False, True, _EVERY_EFFORT, forced_tool=False),
-    "claude-opus-5": AnthropicModelRule(False, True, _EVERY_EFFORT),
+    "claude-fable-5-1": AnthropicModelRule(
+        False, True, _EVERY_EFFORT, forced_tool=False, adaptive_by_default=True
+    ),
+    "claude-mythos-5-1": AnthropicModelRule(
+        False, True, _EVERY_EFFORT, forced_tool=False, adaptive_by_default=True
+    ),
+    "claude-fable-5": AnthropicModelRule(False, True, _EVERY_EFFORT, adaptive_by_default=True),
+    "claude-mythos-5": AnthropicModelRule(False, True, _EVERY_EFFORT, adaptive_by_default=True),
+    "claude-opus-5-5": AnthropicModelRule(
+        False, True, _EVERY_EFFORT, forced_tool=False, adaptive_by_default=True
+    ),
+    "claude-opus-5": AnthropicModelRule(False, True, _EVERY_EFFORT, adaptive_by_default=True),
     "claude-opus-4-8": AnthropicModelRule(False, True, _EVERY_EFFORT),
     "claude-opus-4-7": AnthropicModelRule(False, True, _EVERY_EFFORT),
     "claude-opus-4-6": AnthropicModelRule(True, True, _NO_XHIGH),
     "claude-opus-4-5": AnthropicModelRule(True, True, ("low", "medium", "high")),
-    "claude-sonnet-5-5": AnthropicModelRule(False, True, _EVERY_EFFORT, forced_tool=False),
-    "claude-sonnet-5": AnthropicModelRule(False, True, _EVERY_EFFORT),
+    "claude-sonnet-5-5": AnthropicModelRule(
+        False, True, _EVERY_EFFORT, forced_tool=False, adaptive_by_default=True
+    ),
+    "claude-sonnet-5": AnthropicModelRule(False, True, _EVERY_EFFORT, adaptive_by_default=True),
     "claude-sonnet-4-6": AnthropicModelRule(True, True, _NO_XHIGH),
     "claude-sonnet-4-5": AnthropicModelRule(True, True, ()),
-    "claude-haiku-5-5": AnthropicModelRule(False, True, _EVERY_EFFORT),
+    "claude-haiku-5-5": AnthropicModelRule(False, True, _EVERY_EFFORT, adaptive_by_default=True),
     "claude-haiku-4-5": AnthropicModelRule(True, True, ()),
 }
 
@@ -311,6 +326,21 @@ ANTHROPIC_SAMPLING: tuple[str, ...] = ("temperature", "top_p", "top_k")
 ANTHROPIC_DEFAULT_TEMPERATURE = 1
 
 ANTHROPIC_EFFORT_FIELD = "reasoning_effort"
+
+# What a model with `adaptive_by_default` is sent: the thinking it runs anyway, with a
+# readable summary in its thinking blocks instead of empty text. Billed the same.
+ANTHROPIC_THINKING: dict[str, str] = {"type": "adaptive", "display": "summarized"}
+
+# An assistant message's Anthropic thinking blocks, exactly as Claude wrote them
+# ({type: thinking, thinking, signature} or {type: redacted_thinking, data}). A reply
+# carries them (streamed: in the finish chunk's delta) so a tool loop can send them
+# back on the assistant turn unchanged, which the Messages API requires to keep its
+# thinking across the loop. Crucible stores none of it, and every other destination
+# is sent the message without it (strip_reasoning_blocks).
+REASONING_BLOCKS_FIELD = "reasoning_blocks"
+_REASONING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
+# The reply's readable thinking. It is never sent back to Claude: the blocks carry it.
+REASONING_FIELD = "reasoning"
 
 _ANTHROPIC_READS: frozenset[str] = frozenset(
     {
@@ -454,26 +484,30 @@ def _anthropic_message(
             f"a {role!r} message has no translation here: user, assistant and tool "
             "messages cross",
         )
-    extra = sorted(set(message) - {"role", "content", "tool_calls"})
+    known = {"role", "content", "tool_calls"}
+    if role == "assistant":
+        known |= {REASONING_FIELD, REASONING_BLOCKS_FIELD}
+    extra = sorted(set(message) - known)
     if extra:
         raise _anthropic_unsupported(
             [f"{where}.{key}" for key in extra],
-            "a message crosses as its role, its content and an assistant's "
-            "tool_calls; names have no translation here",
+            "a message crosses as its role, its content, and an assistant's "
+            f"tool_calls and {REASONING_BLOCKS_FIELD}; names have no translation here",
         )
+    thinking = _reasoning_blocks(where, message)
     tool_calls = read_tool_calls(where, message, _anthropic_unsupported)
     for call in tool_calls:
         calls[call.id] = call
     content = message.get("content")
-    if tool_calls:
-        # An assistant turn that called tools: its text (when it said any) and then a
-        # tool_use block per call, in the order it made them.
-        if content is None or content == "":
-            blocks: list[dict[str, Any]] = []
-        elif isinstance(content, str):
-            blocks = [{"type": "text", "text": content}]
-        else:
-            blocks = _anthropic_blocks(where, content)
+    if tool_calls or thinking:
+        # An assistant turn that thought or called tools: its thinking blocks as Claude
+        # wrote them, its text (when it said any), then a tool_use block per call, in
+        # the order it made them.
+        blocks: list[dict[str, Any]] = list(thinking)
+        if isinstance(content, str) and content != "":
+            blocks.append({"type": "text", "text": content})
+        elif content is not None and not isinstance(content, str):
+            blocks.extend(_anthropic_blocks(where, content))
         blocks.extend(
             {"type": "tool_use", "id": call.id, "name": call.name,
              "input": call.arguments}
@@ -483,6 +517,47 @@ def _anthropic_message(
     if isinstance(content, str):
         return {"role": role, "content": content}
     return {"role": role, "content": _anthropic_blocks(where, content)}
+
+
+def _reasoning_blocks(where: str, message: dict[str, Any]) -> list[dict[str, Any]]:
+    """The assistant turn's `reasoning_blocks`, to be sent back exactly as they came:
+    each a thinking or redacted_thinking block of a Messages API reply. Its readable
+    `reasoning` is not sent (the blocks carry the thinking, signed)."""
+    if message.get(REASONING_BLOCKS_FIELD) is None:
+        return []
+    blocks = message[REASONING_BLOCKS_FIELD]
+    at = f"{where}.{REASONING_BLOCKS_FIELD}"
+    if not isinstance(blocks, list):
+        raise ApiError(400, "invalid_request",
+                       f"{at} must be the list a reply carried", {"field": at})
+    for number, block in enumerate(blocks):
+        if not isinstance(block, dict) or block.get("type") not in _REASONING_BLOCK_TYPES:
+            raise ApiError(
+                400, "invalid_request",
+                f"{at}[{number}] is not a thinking or redacted_thinking block; send "
+                "back the blocks a reply carried, unchanged",
+                {"field": f"{at}[{number}]"},
+            )
+    return blocks
+
+
+def strip_reasoning_blocks(body: dict[str, Any]) -> bool:
+    """Take `reasoning_blocks` off every message of a chat going anywhere but an
+    `anthropic/<id>` model: they are Claude's signed thinking, which only the Messages
+    API reads (as a Claude model ignores another model's blocks), and an engine or
+    vendor that does not know the member could refuse the chat for it. True when one
+    was taken."""
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return False
+    taken = False
+    for index, message in enumerate(messages):
+        if isinstance(message, dict) and REASONING_BLOCKS_FIELD in message:
+            messages[index] = {
+                k: v for k, v in message.items() if k != REASONING_BLOCKS_FIELD
+            }
+            taken = True
+    return taken
 
 
 def _anthropic_tool_result(
@@ -719,6 +794,8 @@ def _anthropic_document(model_id: str, body: dict[str, Any]) -> tuple[dict[str, 
     }
     if system is not None:
         document["system"] = system
+    if rule is not None and rule[1].adaptive_by_default:
+        document["thinking"] = dict(ANTHROPIC_THINKING)
 
     for key in ANTHROPIC_SAMPLING:
         if key not in body:
@@ -863,9 +940,20 @@ def anthropic_usage(usage: Any) -> dict[str, Any]:
     return counted
 
 
+def _thinking_text(blocks: list[dict[str, Any]]) -> str:
+    """The readable thinking of a turn's thinking blocks (their summaries), one
+    paragraph per block that has any; redacted_thinking has none."""
+    return "\n\n".join(
+        block["thinking"] for block in blocks
+        if block.get("type") == "thinking"
+        and isinstance(block.get("thinking"), str) and block["thinking"] != ""
+    )
+
+
 def anthropic_to_openai(payload: dict[str, Any], model: str) -> dict[str, Any]:
     text_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
+    thinking: list[dict[str, Any]] = []
     for block in payload.get("content", []) or []:
         if not isinstance(block, dict):
             continue
@@ -875,12 +963,19 @@ def anthropic_to_openai(payload: dict[str, Any], model: str) -> dict[str, Any]:
             tool_calls.append(openai_tool_call(
                 block.get("id"), block.get("name"), json.dumps(block.get("input", {}))
             ))
+        elif block.get("type") in _REASONING_BLOCK_TYPES:
+            thinking.append(block)
     message: dict[str, Any] = {"role": "assistant", "content": "".join(text_parts)}
     if tool_calls:
         # OpenAI's assistant turn that only called tools has no content at all.
         if not text_parts:
             message["content"] = None
         message["tool_calls"] = tool_calls
+    reasoning = _thinking_text(thinking)
+    if reasoning != "":
+        message[REASONING_FIELD] = reasoning
+    if thinking:
+        message[REASONING_BLOCKS_FIELD] = thinking
     return {
         "id": payload.get("id") or _completion_id(),
         "object": "chat.completion",
@@ -911,6 +1006,10 @@ class AnthropicStreamTranslator:
         # index, and whether any of its arguments have been sent yet.
         self._tools: dict[Any, int] = {}
         self._argued: set[Any] = set()
+        # Anthropic's content-block index of each thinking / redacted_thinking block ->
+        # the block as it is assembled (thinking_delta text, signature_delta), handed
+        # back whole in the finish chunk's delta as `reasoning_blocks`.
+        self._thinking: dict[Any, dict[str, Any]] = {}
 
     def _frame(self, payload: dict[str, Any]) -> bytes:
         return b"data: " + json.dumps(payload).encode("utf-8") + b"\n\n"
@@ -945,7 +1044,12 @@ class AnthropicStreamTranslator:
             yield self._chunk({"role": "assistant"}, None)
         elif kind == "content_block_start":
             block = event.get("content_block")
-            if isinstance(block, dict) and block.get("type") == "tool_use":
+            if isinstance(block, dict) and block.get("type") in _REASONING_BLOCK_TYPES:
+                self._thinking[event.get("index")] = dict(block)
+                said = block.get("thinking")
+                if block.get("type") == "thinking" and isinstance(said, str) and said:
+                    yield self._chunk({REASONING_FIELD: said}, None)
+            elif isinstance(block, dict) and block.get("type") == "tool_use":
                 position = len(self._tools)
                 self._tools[event.get("index")] = position
                 yield self._tool_delta(
@@ -958,6 +1062,19 @@ class AnthropicStreamTranslator:
                 text = delta.get("text")
                 if isinstance(text, str):
                     yield self._chunk({"content": text}, None)
+            elif isinstance(delta, dict) and delta.get("type") == "thinking_delta":
+                text = delta.get("thinking")
+                if isinstance(text, str) and text != "":
+                    block = self._thinking.get(event.get("index"))
+                    if block is not None:
+                        block["thinking"] = str(block.get("thinking") or "") + text
+                    yield self._chunk({REASONING_FIELD: text}, None)
+            elif isinstance(delta, dict) and delta.get("type") == "signature_delta":
+                # Never shown: it is what lets the block be sent back.
+                block = self._thinking.get(event.get("index"))
+                signature = delta.get("signature")
+                if block is not None and isinstance(signature, str):
+                    block["signature"] = str(block.get("signature") or "") + signature
             elif isinstance(delta, dict) and delta.get("type") == "input_json_delta":
                 position = self._tools.get(event.get("index"))
                 partial = delta.get("partial_json")
@@ -982,7 +1099,10 @@ class AnthropicStreamTranslator:
             delta = event.get("delta")
             reason = delta.get("stop_reason") if isinstance(delta, dict) else None
             if isinstance(reason, str):
-                yield self._chunk({}, _finish_reason(reason))
+                finish: dict[str, Any] = {}
+                if self._thinking:
+                    finish[REASONING_BLOCKS_FIELD] = list(self._thinking.values())
+                yield self._chunk(finish, _finish_reason(reason))
         elif kind == "message_stop":
             self._done = True
             if self.include_usage:

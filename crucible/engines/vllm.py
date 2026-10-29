@@ -5,6 +5,7 @@ from typing import Any
 
 from ..enginespec import VLLM_ENGINE
 from ..errors import EngineError
+from ..reasoningformats import REASONING_FORMATS
 from ..toolformats import TOOL_FORMATS
 from .base import SubprocessEngine, int_flag, plan_flags
 
@@ -16,6 +17,9 @@ LOGPROBS_MODE = "raw_logprobs"
 
 # Derived from a model's [tools] (model_args); never stated in a manifest.
 TOOL_FLAGS: tuple[str, ...] = ("--enable-auto-tool-choice", "--tool-call-parser")
+
+# Derived from a model's [reasoning] (model_args); never stated in a manifest.
+REASONING_FLAG = "--reasoning-parser"
 
 DECIDE_ARGS: tuple[str, ...] = (
     "--max-logprobs",
@@ -198,11 +202,22 @@ class VllmEngine(SubprocessEngine):
     def model_args(
         cls, manifest: Any, args: list[str], weights_dir: Path, context: int
     ) -> list[str]:
-        """Tool calling, derived from the model's [tools] (one owner): the parser for the
-        format its chat template writes, so a request's `tools` are rendered through the
-        template and the model's calls come back as OpenAI `tool_calls`. vLLM only reads
-        calls for a request that sends `tools`. A manifest stating the flags itself is
-        refused."""
+        """Tool calling and reasoning, each derived from its own manifest table (one
+        owner each).
+
+        [tools]: the parser for the format its chat template writes, so a request's
+        `tools` are rendered through the template and the model's calls come back as
+        OpenAI `tool_calls`. vLLM only reads calls for a request that sends `tools`.
+
+        [reasoning]: the parser for the way the model writes its thinking, so the
+        thinking comes back as the reply's `reasoning` (`delta.reasoning` streamed) and
+        `content` is the answer alone. Without it vLLM 0.29.0 hands back everything the
+        model wrote as `content`, the thinking and its closing tag first. With it, a
+        response_format grammar waits for the thinking to end before it binds
+        (v1/structured_output, enable_in_reasoning false), and `thinking_token_budget`
+        is honoured. Thinking off, the parser starts in the answer and changes nothing.
+
+        A manifest stating any of these flags itself is refused."""
         stated = [flag for flag in TOOL_FLAGS if flag in args]
         if stated:
             raise EngineError(
@@ -210,11 +225,20 @@ class VllmEngine(SubprocessEngine):
                 f"({args}); Crucible derives them from the manifest's [tools] table. "
                 "Remove them from engine_args"
             )
+        if any(arg == REASONING_FLAG or arg.startswith(REASONING_FLAG + "=") for arg in args):
+            raise EngineError(
+                f"reasoning_flags_stated: {manifest.path.name} states {REASONING_FLAG} in "
+                f"engine_args ({args}); Crucible derives it from the manifest's "
+                "[reasoning] table. Remove it from engine_args"
+            )
         tools = getattr(manifest, "tools", None)
-        if tools is None:
-            return args
-        parser = TOOL_FORMATS[tools.format]["vllm"]
-        return [*args, "--enable-auto-tool-choice", "--tool-call-parser", parser]
+        if tools is not None:
+            parser = TOOL_FORMATS[tools.format]["vllm"]
+            args = [*args, "--enable-auto-tool-choice", "--tool-call-parser", parser]
+        reasoning = getattr(manifest, "reasoning", None)
+        if reasoning is not None:
+            args = [*args, REASONING_FLAG, REASONING_FORMATS[reasoning.format]["vllm"]]
+        return args
 
     def start(
         self, model_dir: Path, served_name: str, port: int, args: list[str]

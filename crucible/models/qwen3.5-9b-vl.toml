@@ -72,3 +72,7 @@ measured_at_context = 16384
 [tools]
 format = "qwen3-xml"
 basis = """the same family and chat template as qwen3.5-9b, whose template was read 2026-10-25 (Qwen3-Coder's XML form); this variant's own template was not on any machine to read."""
+
+[reasoning]
+format = "qwen3-think"
+basis = """the same family and chat template as qwen3.5-9b, whose template was read 2026-10-29 (<think>...</think>, thinks when unstated); this variant's own template was not on any machine to read."""

@@ -111,6 +111,7 @@ import {
   type ChatResponse,
   type ChatToolCall,
   type ChatUsage,
+  type ReasoningBlock,
   type ReasoningEffort,
   type ChunkData,
   type PauseCut,
@@ -1415,6 +1416,18 @@ export class CrucibleClient {
         'is for chatStream; a chat() answer carries its calls in ChatResponse.toolCalls',
       );
     }
+    if (options !== undefined && options !== null && options.onReasoning !== undefined) {
+      throw new CrucibleConfigError(
+        'onReasoning',
+        'is for chatStream; a chat() answer carries its thinking in ChatResponse.reasoning',
+      );
+    }
+    if (options !== undefined && options !== null && options.onReasoningBlocks !== undefined) {
+      throw new CrucibleConfigError(
+        'onReasoningBlocks',
+        'is for chatStream; a chat() answer carries them in ChatResponse.reasoningBlocks',
+      );
+    }
     const init = this.#chatRequest(options, false);
     const body = await this.#json('/v1/openai/chat/completions', init, 'chat');
     return readChatResponse(body);
@@ -1462,7 +1475,10 @@ export class CrucibleClient {
 
     const onUsage = options.onUsage;
     const onToolCalls = options.onToolCalls;
+    const onReasoning = options.onReasoning;
+    const onReasoningBlocks = options.onReasoningBlocks;
     const toolCalls = new ToolCallAssembly();
+    let reasoningBlocks: readonly ReasoningBlock[] = [];
     let usage: ChatUsage | null = null;
     let finished = false;
     try {
@@ -1474,6 +1490,8 @@ export class CrucibleClient {
         const chunk = readChatChunk(frame.data);
         if (chunk.usage !== null) usage = chunk.usage;
         for (const fragment of chunk.toolCalls) toolCalls.add(fragment);
+        if (chunk.reasoningBlocks !== null) reasoningBlocks = chunk.reasoningBlocks;
+        if (chunk.reasoning !== null && onReasoning !== undefined) onReasoning(chunk.reasoning);
         if (chunk.content !== null) yield chunk.content;
       }
     } catch (cause) {
@@ -1497,6 +1515,7 @@ export class CrucibleClient {
       );
     }
     if (onToolCalls !== undefined) onToolCalls(toolCalls.finish());
+    if (onReasoningBlocks !== undefined) onReasoningBlocks(reasoningBlocks);
     if (onUsage !== undefined) {
       if (usage === null) {
         throw new CrucibleProtocolError(
@@ -4694,7 +4713,20 @@ function readChatMessage(entry: unknown, where: string): Record<string, unknown>
         `must be a string (or null beside toolCalls), got ${typeof content}`,
       );
     }
-    return calls === null ? { role, content } : { role, content, tool_calls: calls };
+    const wire: Record<string, unknown> =
+      calls === null ? { role, content } : { role, content, tool_calls: calls };
+    const reasoning = message['reasoning'];
+    if (reasoning !== undefined) {
+      if (typeof reasoning !== 'string') {
+        throw new CrucibleConfigError(`${where}.reasoning`, `must be a string, got ${typeof reasoning}`);
+      }
+      wire['reasoning'] = reasoning;
+    }
+    const blocks = message['reasoningBlocks'];
+    if (blocks !== undefined) {
+      wire['reasoning_blocks'] = readGivenReasoningBlocks(blocks, `${where}.reasoningBlocks`);
+    }
+    return wire;
   }
   if (typeof content !== 'string') {
     throw new CrucibleConfigError(`${where}.content`, `must be a string, got ${typeof content}`);
@@ -4704,6 +4736,29 @@ function readChatMessage(entry: unknown, where: string): Record<string, unknown>
     return { role, tool_call_id: toolCallId, content };
   }
   return { role, content };
+}
+
+/**
+ * A caller's `reasoningBlocks` (an assistant turn sent back): the blocks a reply carried, each a
+ * thinking or redacted_thinking block, put on the wire unchanged.
+ */
+function readGivenReasoningBlocks(value: unknown, where: string): unknown[] {
+  if (!Array.isArray(value)) {
+    throw new CrucibleConfigError(where, `must be the reasoningBlocks a reply carried, got ${typeof value}`);
+  }
+  value.forEach((block, index) => {
+    const type =
+      typeof block === 'object' && block !== null && !Array.isArray(block)
+        ? (block as Record<string, unknown>)['type']
+        : undefined;
+    if (type !== 'thinking' && type !== 'redacted_thinking') {
+      throw new CrucibleConfigError(
+        `${where}[${index}]`,
+        'must be a thinking or redacted_thinking block, sent back unchanged',
+      );
+    }
+  });
+  return value;
 }
 
 /** A caller's `ChatToolCall` (an assistant turn sent back), checked and put on the wire. */
@@ -4858,8 +4913,9 @@ function readChatResponse(body: Json): ChatResponse {
   // Null when the engine did not say: crucible/upstreams.py ollama_to_openai writes null for an
   // Ollama answer with no `done_reason`, and OpenAI's own schema allows it.
   const finishReason = nullableStr(choice, 'finish_reason', 'chat.choices[0]');
-  refuseReasoningWithoutContent(message, finishReason);
   const toolCalls = readReplyToolCalls(message, 'chat.choices[0].message');
+  // A turn that thought and then only called tools has reasoning and no content: an answer.
+  if (toolCalls.length === 0) refuseReasoningWithoutContent(message, finishReason);
   // A turn that only called tools may have no text; one with neither is no answer at all.
   const content =
     toolCalls.length > 0
@@ -4870,9 +4926,38 @@ function readChatResponse(body: Json): ChatResponse {
     model: optStr(body, 'model', where),
     content,
     toolCalls,
+    reasoning: readReasoning(message, 'chat.choices[0].message'),
+    reasoningBlocks: readReasoningBlocks(message, 'chat.choices[0].message') ?? [],
     finishReason,
     usage: usage === null ? null : readChatUsage(usage),
   };
+}
+
+/** `reasoning` on a message or delta: its text, or null when absent, null or empty. */
+function readReasoning(container: Json, where: string): string | null {
+  if (!('reasoning' in container)) return null;
+  const reasoning = container['reasoning'];
+  if (reasoning === null || reasoning === '') return null;
+  if (typeof reasoning !== 'string') {
+    throw new CrucibleProtocolError(`${where}.reasoning is neither a string nor null`);
+  }
+  return reasoning;
+}
+
+/** `reasoning_blocks` on a message or delta, as the server sent them; null when absent. */
+function readReasoningBlocks(container: Json, where: string): ReasoningBlock[] | null {
+  if (!('reasoning_blocks' in container)) return null;
+  const raw = asArray(container['reasoning_blocks'], `${where}.reasoning_blocks`);
+  return raw.map((entry, index) => {
+    const block = asObject(entry, `${where}.reasoning_blocks[${index}]`);
+    const type = block['type'];
+    if (type !== 'thinking' && type !== 'redacted_thinking') {
+      throw new CrucibleProtocolError(
+        `${where}.reasoning_blocks[${index}].type is ${JSON.stringify(type)}, not a thinking block`,
+      );
+    }
+    return block as ReasoningBlock;
+  });
 }
 
 function readChatUsage(usage: Json): ChatUsage {
@@ -5620,6 +5705,8 @@ interface ToolCallFragment {
  */
 function readChatChunk(raw: string): {
   content: string | null;
+  reasoning: string | null;
+  reasoningBlocks: ReasoningBlock[] | null;
   toolCalls: ToolCallFragment[];
   usage: ChatUsage | null;
 } {
@@ -5636,6 +5723,9 @@ function readChatChunk(raw: string): {
   const delta = readChatDelta(chunk);
   return {
     content: delta === null ? null : readDeltaContent(delta),
+    reasoning: delta === null ? null : readReasoning(delta, 'chat chunk.choices[0].delta'),
+    reasoningBlocks:
+      delta === null ? null : readReasoningBlocks(delta, 'chat chunk.choices[0].delta'),
     toolCalls: delta === null ? [] : readDeltaToolCalls(delta),
     usage,
   };

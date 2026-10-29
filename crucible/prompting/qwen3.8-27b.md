@@ -88,8 +88,9 @@ The differences from 3.5 are in thinking, below.
   - `none` turns thinking off;
   - `high`, `minimal` or `max` makes the template raise, and vLLM returns an error [T12].
 - **`reasoning_effort` on mlx-darwin.** mlx-lm 0.31.3 reads `chat_template_kwargs` and passes every key to the template [T16 L540-547], but has no top-level `reasoning_effort` field [T16 L1170-1192]. Send it as `chat_template_kwargs: {"reasoning_effort": "low"}`. This is not measured.
-- **No reasoning parser.** Crucible starts vLLM without `--reasoning-parser` [C1]. On cuda-linux, thinking therefore comes back inside `content`, and **no `reasoning_content` is returned**. The template will not strip that inline thinking from later turns (above). An app holding a multi-turn chat on the PC must strip it itself, or send it back as `reasoning_content`.
-- **Thinking budget.** `max_tokens` is the only one [C3].
+- **Reasoning parser.** The manifests declare `[reasoning] format = "qwen3-think"`, so Crucible starts vLLM with `--reasoning-parser qwen3` (2026-10-29) [C1, "Reasoning"; C4]. On cuda-linux the thinking now comes back as `message.reasoning` (`delta.reasoning` streamed) and `content` is the answer alone, as on mlx-darwin. Before that change it came back inside `content`. For a multi-turn chat, send each assistant turn back with its `content` and its `reasoning`; vLLM hands the template `reasoning` as `reasoning_content`, which this template renders for every turn (`preserve_thinking`).
+- **Thinking stated, always.** Thinking travels as `chat_template_kwargs.enable_thinking` (the SDK's `thinking`). A top-level `"thinking": false` was ignored by every engine, so the 27B thought anyway; the door now refuses it, `thinking_field_unknown` [C2].
+- **Thinking budget.** `thinking_token_budget` (a vLLM request field, passed through) caps the thinking on cuda-linux. Elsewhere `max_tokens` is the only one, and it caps thinking plus answer together; a run that spends it thinking comes back with `reasoning` and no `content` [C3].
 
 ---
 
@@ -127,7 +128,7 @@ The differences from 3.5 are in thinking, below.
 
 ### Output length [T1]
 
-The card suggests up to 262,144 tokens of reasoning and 131,072 of final response, "for frameworks that support separate token limits". It frames these as agentic-task budgets "within the 1M context length". Neither applies to Crucible: its 27B contexts are 16K–98K and it has no separate thinking budget [C3, C4].
+The card suggests up to 262,144 tokens of reasoning and 131,072 of final response, "for frameworks that support separate token limits". It frames these as agentic-task budgets "within the 1M context length". Neither applies to Crucible: its 27B contexts are 16K–98K, and its only separate thinking budget is vLLM's `thinking_token_budget` on cuda-linux [C3, C4].
 
 ### Mapped to Crucible
 
@@ -168,7 +169,8 @@ The card suggests up to 262,144 tokens of reasoning and 131,072 of final respons
 - `json_whitespace: compact` everywhere except llama-windows.
 
 **Thinking matters more here**, because thinking is the 27B's default:
-- On vLLM and mlx-lm a grammar binds from the first token, so a thinking-on JSON request simply produces JSON with no reasoning. The template has already opened `<think>\n` and, when thinking is on, injected the `xhigh` system instruction. Whether that degrades the JSON is unmeasured.
+- On mlx-lm a grammar binds from the first token, so a thinking-on JSON request simply produces JSON with no reasoning. The template has already opened `<think>\n` and, when thinking is on, injected the `xhigh` system instruction. Whether that degrades the JSON is unmeasured.
+- On vLLM, with the reasoning parser, the grammar waits for `</think>`: a thinking-on JSON request thinks first (`reasoning`) and then answers the JSON in `content`. Unmeasured; budget `max_tokens` for the thinking.
 - On llama-server (cuda-linux) the same combination is refused (`structured_output_with_thinking`).
 - **State `thinking: false` with every schema.** This is a recommendation built on the C1 facts, not official guidance.
 

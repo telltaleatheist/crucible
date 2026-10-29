@@ -1111,6 +1111,15 @@ export interface ChatTextMessage {
 }
 
 /**
+ * One of Claude's thinking blocks, exactly as the Messages API wrote it: `{type: 'thinking',
+ * thinking, signature}` or `{type: 'redacted_thinking', data}`. Opaque: read
+ * {@link ChatResponse.reasoning} for the text, and send these back unchanged.
+ */
+export type ReasoningBlock = Readonly<Record<string, unknown>> & {
+  readonly type: 'thinking' | 'redacted_thinking';
+};
+
+/**
  * An assistant turn. `content` may be null only when `toolCalls` is non-empty (a turn in which the
  * model only called tools). `toolCalls` is sent as `tool_calls`.
  */
@@ -1118,6 +1127,19 @@ export interface ChatAssistantMessage {
   readonly role: 'assistant';
   readonly content: string | null;
   readonly toolCalls?: readonly ChatToolCall[];
+  /**
+   * The turn's {@link ChatResponse.reasoningBlocks}, sent back exactly as they came (as
+   * `reasoning_blocks`): an `anthropic/<id>` model needs its own thinking blocks on the assistant
+   * turn to keep thinking across a tool loop. The server takes them off for every other model.
+   */
+  readonly reasoningBlocks?: readonly ReasoningBlock[];
+  /**
+   * The turn's {@link ChatResponse.reasoning}, sent back as `reasoning`. A local Qwen's template
+   * renders it into the history as the turn's `<think>` (Qwen 3.5 for the turns after the last
+   * user message, Qwen 3.8 for every turn); an `anthropic/<id>` model is not sent it (its
+   * `reasoningBlocks` carry the thinking).
+   */
+  readonly reasoning?: string;
 }
 
 /** A tool's result, answering the call whose id is `toolCallId` (sent as `tool_call_id`). */
@@ -1211,6 +1233,17 @@ export interface ChatOptions {
    */
   readonly onToolCalls?: (toolCalls: readonly ChatToolCall[]) => void;
   /**
+   * `chatStream` only: called with each piece of the model's thinking (`delta.reasoning`) as it
+   * arrives, apart from the content the stream yields. `chat` refuses it (its answer carries
+   * `reasoning`).
+   */
+  readonly onReasoning?: (delta: string) => void;
+  /**
+   * `chatStream` only: called once, after the last content delta, with the reply's
+   * {@link ChatResponse.reasoningBlocks} (empty when it carried none). `chat` refuses it.
+   */
+  readonly onReasoningBlocks?: (blocks: readonly ReasoningBlock[]) => void;
+  /**
    * The start of the answer: the model writes on from this text, and the reply's `content` is what
    * it wrote AFTER it (join the two yourself). Sent as `prefill`. Served on vLLM and llama-server;
    * needs thinking off (`thinking: false`, or the model's manifest) and no `responseFormat`, and
@@ -1270,6 +1303,17 @@ export interface ChatResponse {
   readonly content: string | null;
   /** The calls the model made (`message.tool_calls`); empty when it made none. */
   readonly toolCalls: readonly ChatToolCall[];
+  /**
+   * The model's thinking, apart from the answer (`message.reasoning`): a local Qwen's
+   * `<think>` text, an Ollama model's `thinking`, Claude's thinking summary. Null when the model
+   * did not think or said nothing of it.
+   */
+  readonly reasoning: string | null;
+  /**
+   * Claude's thinking blocks (`message.reasoning_blocks`), to send back unchanged on this turn's
+   * {@link ChatAssistantMessage.reasoningBlocks}; empty for every other model.
+   */
+  readonly reasoningBlocks: readonly ReasoningBlock[];
   /**
    * The engine's own word for why it stopped (`stop`, `length`, `tool_calls`, …); `length` means
    * truncated. Null when the engine did not say (an Ollama answer with no `done_reason`).

@@ -34,7 +34,10 @@ def test_every_qwen_chat_model_declares_the_xml_form_its_template_writes(model: 
 
 def test_vllm_starts_the_parser_for_the_declared_format() -> None:
     args = VllmEngine.model_args(load_manifest("qwen3.5-9b"), ["--x"], Path("."), 4096)
-    assert args == ["--x", "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder"]
+    assert args == [
+        "--x", "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder",
+        "--reasoning-parser", "qwen3",
+    ]
 
 
 def test_a_model_with_no_tools_table_starts_without_tool_flags() -> None:
