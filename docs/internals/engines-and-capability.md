@@ -1086,6 +1086,13 @@ With none sent, the call it lifted was dropped, and the answer came back
 Patched, a request without tools gets the token as text, as vLLM and llama-server
 give it.
 
+**mlx-lm patch `mlx-lm-tool-call-ends-reasoning`.** Stock 0.31.3 leaves its
+reasoning state only on `</think>`. A Qwen that writes its tool call before
+closing its thinking (qwen3.5-9b, round two of a tool loop with thinking on,
+2026-10-29) had the call read as thinking: no `tool_calls`, empty `content`.
+Patched, `<tool_call>` also ends the reasoning and the call is parsed, as vLLM's
+qwen3 reasoning parser does.
+
 Two rounds. Round one sends the tools:
 
 ```json

@@ -241,6 +241,24 @@ MLX_LM_TOOLS_ONLY_WHEN_SENT = EnvPatch(
     ),
 )
 
+MLX_LM_TOOL_CALL_ENDS_REASONING = EnvPatch(
+    id="mlx-lm-tool-call-ends-reasoning",
+    distribution="mlx-lm",
+    rel_path="mlx_lm/server.py",
+    marker='transitions["reasoning"].append((ts, "tool"))',
+    absent_marker=None,
+    stale_marker=None,
+    script="patch_mlx_lm_tool_call_ends_reasoning.py",
+    why=(
+        "stock mlx-lm 0.31.3 leaves its reasoning state only on </think>, so a Qwen "
+        "that writes its tool call before closing its thinking had the call read as "
+        "thinking: finish stop, no tool_calls, empty content (qwen3.5-9b, round two of "
+        "a tool loop with thinking on, bookforge pc 1, 2026-10-29). Patched, <tool_call> "
+        "ends the reasoning and is parsed as a call, as vLLM's qwen3 reasoning parser "
+        "does. MlxLmEngine applies it itself at start"
+    ),
+)
+
 
 MLX_LM_FATAL_GENERATION_THREAD = EnvPatch(
     id="mlx-lm-fatal-generation-thread",
@@ -422,6 +440,7 @@ SELF_APPLIED_LLM_PATCHES: tuple[EnvPatch, ...] = (
     MLX_LM_STRUCTURED_OUTPUT_BATCH,
     MLX_LM_QWEN3_BARE_CHECKPOINT,
     MLX_LM_TOOLS_ONLY_WHEN_SENT,
+    MLX_LM_TOOL_CALL_ENDS_REASONING,
 )
 
 LLM_PATCHES: tuple[EnvPatch, ...] = (
@@ -685,6 +704,7 @@ __all__ = [
     "MLX_LM_DETOKENIZER_TOKENMAP",
     "MLX_LM_FATAL_GENERATION_THREAD",
     "MLX_LM_TOOLS_ONLY_WHEN_SENT",
+    "MLX_LM_TOOL_CALL_ENDS_REASONING",
     "MLX_LM_FP32_LOGPROBS",
     "MLX_LM_STRUCTURED_OUTPUT",
     "MLX_LM_STRUCTURED_OUTPUT_BATCH",

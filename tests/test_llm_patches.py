@@ -640,6 +640,7 @@ def test_the_engine_applies_the_items_patches_itself_at_start(
         envpatches.MLX_LM_STRUCTURED_OUTPUT.script,
         BARE.script,
         envpatches.MLX_LM_TOOLS_ONLY_WHEN_SENT.script,
+        envpatches.MLX_LM_TOOL_CALL_ENDS_REASONING.script,
     ]
     assert ITEMS.marker in server_of(env).read_text(encoding="utf-8")
     assert helper_of(env).is_file()
@@ -811,3 +812,53 @@ def test_the_detokenizer_script_and_the_table_name_the_same_strings() -> None:
     assert namespace["ABSENT_MARKER"] == DETOK.absent_marker
     assert namespace["REL"] == DETOK.rel_path
     assert DETOK in envpatches.SELF_APPLIED_LLM_PATCHES
+
+
+def _state_machine_of(text: str, has_thinking: bool, tools: bool) -> dict:
+    """The patched _make_state_machine, run on its own with a stub tokenizer: the
+    transitions it builds, by state."""
+    start = text.index("    def _make_state_machine(")
+    body = text[start:text.index("    def _is_batchable(", start)]
+    namespace: dict = {"SequenceStateMachine": lambda transitions, initial: transitions}
+    exec("class ResponseGenerator:\n" + body, namespace)
+    generator = namespace["ResponseGenerator"]()
+    generator._state_machine_cache = {}
+    tokenizer = SimpleNamespace(
+        eos_token_ids=[1], convert_ids_to_tokens=lambda t: "<eos>", encode=lambda *a, **k: [],
+        has_thinking=has_thinking, think_start_tokens=(2,), think_end_tokens=(3,),
+        think_start="<think>", think_end="</think>",
+        has_tool_calling=True, tool_call_start_tokens=(4,), tool_call_end_tokens=(5,),
+        tool_call_start="<tool_call>", tool_call_end="</tool_call>",
+    )
+    transitions, _ = generator._make_state_machine(
+        "m", tokenizer, [], initial_state="reasoning", tools=tools
+    )
+    return transitions
+
+
+def test_a_tool_call_written_while_thinking_ends_the_thinking(tmp_path: Path) -> None:
+    env = make_env(tmp_path)
+    tools_only = envpatches.LLM_SCRIPTS_DIR / envpatches.MLX_LM_TOOLS_ONLY_WHEN_SENT.script
+    ends = envpatches.LLM_SCRIPTS_DIR / envpatches.MLX_LM_TOOL_CALL_ENDS_REASONING.script
+    assert run_script(env, tools_only).returncode == 0
+    done = run_script(env, ends)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.startswith("PATCHED ")
+    assert run_script(env, ends).stdout.startswith("ALREADY_PATCHED ")
+    text = server_of(env).read_text(encoding="utf-8")
+    assert text.count(envpatches.MLX_LM_TOOL_CALL_ENDS_REASONING.marker) == 1
+
+    thinking = _state_machine_of(text, has_thinking=True, tools=True)
+    assert ((4,), "tool") in thinking["reasoning"], "<tool_call> leaves the thinking"
+    assert ((3,), "normal") in thinking["reasoning"], "</think> still ends it"
+    assert ((5,), "normal") in thinking["tool"]
+    no_tools = _state_machine_of(text, has_thinking=True, tools=False)
+    assert "tool" not in no_tools and ((4,), "tool") not in no_tools["reasoning"]
+    assert "reasoning" not in _state_machine_of(text, has_thinking=False, tools=True)
+
+    before = make_env(tmp_path / "before")
+    assert run_script(before, tools_only).returncode == 0
+    unpatched = _state_machine_of(
+        server_of(before).read_text(encoding="utf-8"), has_thinking=True, tools=True
+    )
+    assert ((4,), "tool") not in unpatched["reasoning"], "the bug: only </think> left it"
