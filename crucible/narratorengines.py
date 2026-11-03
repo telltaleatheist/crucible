@@ -73,30 +73,36 @@ def declared_tts_footprints(backend_kind: str) -> tuple[EngineFootprint, ...]:
                 memory_bytes_estimate=19_000_000_000,
                 estimate_basis="declared",
                 estimate_note=(
-                    "SGLang-Omni's configured reservation on this arm, not a "
-                    "watched card: `--mem-fraction-static 0.60 holds ~19 GB at 16 "
-                    "in flight` (BookForge higgs-models.json "
+                    "SGLang-Omni's configured reservation on this arm as first "
+                    "stated: `--mem-fraction-static 0.60 holds ~19 GB at 16 in "
+                    "flight` (BookForge higgs-models.json "
                     "serving.sglang._memFractionStaticNote, owens-pc RTX 3090 Ti, "
-                    "2026-09-05). It is the SERVER's footprint rather than any "
-                    "one checkpoint's, which is why every Higgs v3 voice on this "
-                    "arm declared it until 2026-09-19 and why it is stated once "
-                    "here now. Owed: a real reading on this card."
+                    "2026-09-05). KNOWN LOW since narrator's fp32 vocoder (2.0.24): "
+                    "on owens-pc 2026-11-02, 16 in flight held 22,290 MiB "
+                    "(23.4e9 bytes) in the WSL VM. Not raised to that reading "
+                    "because it is a 16-wide figure, the width is now 12, and a "
+                    "23.4e9 estimate would refuse every load while the desktop "
+                    "holds more than ~2.4 GB. It is the SERVER's footprint rather "
+                    "than any one checkpoint's, so it is stated once here. Owed: "
+                    "a reading at 12 on this card."
                 ),
-                max_num_seqs=16,
+                max_num_seqs=12,
                 max_num_seqs_note=(
-                    "16 is vllm-omni's OWN stage-0 value in "
-                    "higgs_multimodal_qwen3.yaml, and a measured ceiling at the "
-                    "shipped memory fractions: on owens-pc (RTX 3090 Ti, "
-                    "2026-09-05) 16 concurrent at 0.35 + 0.10 ran 11,387-11,584 "
-                    "chars/min over three runs while 32 filled the card and "
-                    "stalled. THE deathstalker CAP CERTIFICATE RAN AT 64, at the "
-                    "older fractions and before that stall was measured, so 16 is "
-                    "not the width its cap was certified at; nothing measured says "
-                    "whether batch width moves the safe chunk length, and if it "
-                    "does, that certificate is bound to 64 and this is the field "
-                    "that would have to change. It is also the width of narrator's "
-                    "own batch (v3_served.serve_concurrency), so raising it raises "
-                    "concurrent POSTs and VRAM pressure together."
+                    "12 since 2026-11-02, down from 16, chosen to FIT and not yet "
+                    "speed-measured. On owens-pc (RTX 3090 Ti 24 GB) 2026-11-02 a "
+                    "fine-tune at 16 in flight with mem-fraction-static 0.60 and "
+                    "the fp32 vocoder held 22,290 MiB in the WSL VM, the card "
+                    "reached 24,024 of 24,564 MiB with the desktop at ~1.7 GiB, "
+                    "and ~0.45 GiB spilled to shared memory - the WDDM paging "
+                    "2026-09-19 measured as 4-10x slower with no error. The 16 "
+                    "before it was vllm-omni's own stage-0 value and a measured "
+                    "ceiling at the OLD fractions (11,387-11,584 chars/min, "
+                    "2026-09-05), taken before the fp32 vocoder. THE deathstalker "
+                    "CAP CERTIFICATE RAN AT 64; nothing measured says whether "
+                    "width moves the safe chunk length. It is also the width of "
+                    "narrator's own batch (v3_served.serve_concurrency), so it "
+                    "moves concurrent POSTs and VRAM pressure together. Owed: a "
+                    "chars/min and VRAM reading at 12."
                 ),
             ),
         )

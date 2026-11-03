@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- On cuda-linux, `crucible init` now writes `[tts.higgs-v3] max_num_seqs = 12` instead of 16. On owens-pc (RTX 3090 Ti), 2026-11-02, a Higgs fine-tune at 16 in flight with narrator's fp32 vocoder held 22,290 MiB and spilled ~0.45 GiB to shared memory, the WDDM paging measured in September as 4-10x slower. 12 is chosen to fit and is not yet speed-measured. The `memory_bytes_estimate` stays 19e9, now noted as known low: the 16-wide reading (23.4e9) would refuse loads whenever the desktop holds more than ~2.4 GB. Existing machines keep their own `[tts.higgs-v3]`; owens-pc was set to 12 through `PUT /v1/settings/tts/higgs-v3`. The built-in `higgs-default` and `zeroshot` voices still carry 16 in `engines/higgs-v3/base.toml`, whose `[voice.serving]` is shared by both arms.
+
 ## 2.0.34 — 2026-10-29
 
 - On mlx-darwin, a tool call a Qwen writes before it closes its thinking is now a tool call. Stock mlx-lm 0.31.3 left its reasoning state only on `</think>`, so qwen3.5-9b on the Mac, in round two of a tool loop with thinking on, had its `<tool_call>` block read as thinking: finish `stop`, no `tool_calls`, empty `content`, the call as text at the end of `reasoning` (bookforge pc 1, 2026-10-29, 2 of 2 runs). A new self-applied patch, `mlx-lm-tool-call-ends-reasoning`, lets `<tool_call>` end the reasoning, as vLLM's qwen3 reasoning parser does; only a request that sent tools has a tool state, so one without tools is unchanged.
