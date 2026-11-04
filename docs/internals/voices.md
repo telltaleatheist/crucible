@@ -361,6 +361,21 @@ saved back as a home voice once lost it with no line in `not_carried`. Voice ids
 
 ## The narrator engine (`engines/narrator`)
 
+- **The worker is Crucible's own code** (2026-11-04): the package
+  `crucible_higgs` under `crucible/jobs/tts/higgs/`, run in the tts env's
+  interpreter as `python -m crucible_higgs.serve` with `PYTHONPATH` set to that
+  directory (`WORKER_ROOT`, which holds the package and nothing else). It was
+  moved from BookForge's `narrator` package at dc05e7e7 — the sha the tts
+  recipes pin — Higgs only: `serve/` (this wire), `engine/` (the protocol, the
+  registry and Higgs v3, served and MLX, with its `launch/` scripts as package
+  data), `env.py` and three pieces of narrator's `text/` (the gap rule, the
+  sentence splitter the split ladder cuts on, the unspoken-tag pattern).
+  narrator's Orpheus and its Higgs v2 scaffold did not come along:
+  `NARRATOR_ENGINE` must name `higgs-v3`, and an unset or unknown value exits 3
+  before `ready`. The env recipes still install narrator at that sha; nothing
+  runs it. The worker never imports `crucible`, and the server never imports
+  the worker. Its tests are `tests/higgs_worker/`, which need the tts env's
+  packages (`numpy`, `num2words`, `regex`, `soundfile`).
 - The wire is newline-delimited JSON on stdin/stdout. Readiness is narrator's
   `ready` line. There is no `base_url`. stdout carries protocol only, and a
   non-JSON line is a refusal, never skipped. stderr goes to the engine log.
@@ -415,7 +430,7 @@ saved back as a home voice once lost it with no line in `not_carried`. Voice ids
   narrator). The directory must agree with the document's. No `caps` are
   sent, because that channel raises on keys it does not know. Sampling
   travels in the document.
-- `itemTake: true` on `ready` means this narrator build reads per-item
+- `itemTake: true` on `ready` means this worker build reads per-item
   `sampling` and `take`. Without it a rung is silently dropped (measured
   2026-09-15: take 0 and take 1 were byte-identical).
 

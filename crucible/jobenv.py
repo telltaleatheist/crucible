@@ -29,7 +29,22 @@ BACKEND_HEADLINE_PACKAGE: dict[str, str] = {
     "mlx-darwin": "mlx-lm",
 }
 
-NARRATOR_PACKAGE = "narrator"
+# WHAT A TTS ENV EXISTS FOR, now that the worker is Crucible's own
+# (crucible/jobs/tts/higgs/): the serving stack's package on cuda-linux, and the
+# in-process runtime on mlx-darwin. Until the move it was `narrator`, the package
+# the worker came out of; the recipes still pin narrator at the commit the worker
+# was moved from, and nothing runs it.
+TTS_HEADLINE_PACKAGE: dict[str, str] = {
+    CUDA_LINUX: "sglang-omni",
+    MLX_DARWIN: "mlx-audio",
+}
+
+# What `python -m crucible_higgs.serve` imports beyond the standard library and its
+# own package: numpy, num2words (the Listen door's number reading), regex (the
+# split ladder's sentence splitter) and soundfile (the served arm's WAV decode).
+# The worker itself is Crucible's and ships in its wheel, so it is not what an env
+# install proves; these are.
+HIGGS_WORKER_SMOKE_IMPORT = "numpy, num2words, regex, soundfile"
 
 CUDA_LINUX_SERVING_STACK: dict[str, str] = {
     HIGGS_V3: "sglang-omni",
@@ -134,8 +149,8 @@ SMOKE_IMPORT: dict[str, dict[str, str]] = {
         CUDA_LINUX: SCORE_SMOKE_IMPORT,
         MLX_DARWIN: SCORE_SMOKE_IMPORT,
     },
-    "tts-higgs-v3": {CUDA_LINUX: NARRATOR_PACKAGE},
-    "tts": {MLX_DARWIN: NARRATOR_PACKAGE},
+    "tts-higgs-v3": {CUDA_LINUX: HIGGS_WORKER_SMOKE_IMPORT},
+    "tts": {MLX_DARWIN: HIGGS_WORKER_SMOKE_IMPORT},
     **{
         f"{AUDIO_JOB_TYPE}-{engine}": {
             backend_kind: ", ".join(
@@ -224,7 +239,7 @@ def tts_env(narrator_engine: str, backend_kind: str) -> EnvSpec:
             job_type="tts",
             key=f"tts-{narrator_engine}",
             recipe_name=recipe_name,
-            headline=NARRATOR_PACKAGE,
+            headline=TTS_HEADLINE_PACKAGE[backend_kind],
             serving_stack=CUDA_LINUX_SERVING_STACK.get(narrator_engine),
             python_version=RECIPE_PYTHON.get(recipe_name),
         )
@@ -232,7 +247,7 @@ def tts_env(narrator_engine: str, backend_kind: str) -> EnvSpec:
         job_type="tts",
         key="tts",
         recipe_name=backend_kind,
-        headline=NARRATOR_PACKAGE,
+        headline=TTS_HEADLINE_PACKAGE[backend_kind],
     )
 
 

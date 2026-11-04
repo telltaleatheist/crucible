@@ -15,7 +15,9 @@ from ..errors import EngineError, JobCancelled
 from ..narratorengines import HIGGS_V3, VOICES_PULL_COMMAND, VoicesDocumentView
 from .base import SubprocessEngine, find_free_port
 
-MODULE = "narrator.serve"
+WORKER_ROOT = Path(__file__).resolve().parent.parent / "jobs" / "tts" / "higgs"
+WORKER_PACKAGE = "crucible_higgs"
+MODULE = f"{WORKER_PACKAGE}.serve"
 
 ENGINE_VARIABLE = "NARRATOR_ENGINE"
 
@@ -366,12 +368,21 @@ class NarratorEngine(SubprocessEngine):
     def command(
         self, model_dir: Path, served_name: str, port: int, args: list[str]
     ) -> list[str]:
+        entry = WORKER_ROOT / WORKER_PACKAGE / "serve" / "__main__.py"
+        if not entry.is_file():
+            raise EngineError(
+                f"cannot start {self.name}: Crucible's Higgs worker is not at "
+                f"{entry}. It ships inside the crucible package "
+                "(crucible/jobs/tts/higgs/), so an install without it is a broken "
+                "install, not a missing env"
+            )
         return [str(self._python), "-m", MODULE]
 
     def environment(self) -> dict[str, str]:
         environment = {
             ENGINE_VARIABLE: self._narrator_engine,
             "PYTHONUNBUFFERED": "1",
+            "PYTHONPATH": str(WORKER_ROOT),
         }
         if self._env_prefix is not None:
             assert self._serving_stack is not None

@@ -27,6 +27,7 @@ from crucible.engines.narrator import (
     MODULE,
     STACK_ENV_PREFIX_VARIABLE,
     STACK_VARIABLE,
+    WORKER_ROOT,
     EngineWouldNotStop,
     env_prefix_variable_for,
     higgs_env_prefix,
@@ -109,7 +110,7 @@ def up(engine: FakeNarratorEngine, weights: Path) -> FakeNarratorEngine:
     return engine
 
 
-def test_the_argv_is_narrator_serve_and_nothing_else() -> None:
+def test_the_argv_is_crucibles_own_higgs_worker_and_nothing_else() -> None:
     built = NarratorEngine(
         narrator_engine=A_FUTURE_ENGINE,
         python=Path("/opt/env/bin/python"),
@@ -129,6 +130,27 @@ def test_the_argv_is_narrator_serve_and_nothing_else() -> None:
     ]
     assert "owen" not in built.command(Path("/weights"), "owen", 7100, [])
     assert built.environment()[ENGINE_VARIABLE] == A_FUTURE_ENGINE
+    assert MODULE == "crucible_higgs.serve"
+    assert built.environment()["PYTHONPATH"] == str(WORKER_ROOT)
+    assert sorted(path.name for path in WORKER_ROOT.iterdir()
+                  if not path.name.startswith("__")) == ["crucible_higgs"], (
+        "PYTHONPATH names this directory in an env full of other packages, so it "
+        "must hold the worker package and nothing else")
+
+
+def test_a_missing_worker_is_refused_by_name_before_a_spawn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from crucible.engines import narrator as narrator_module
+
+    monkeypatch.setattr(narrator_module, "WORKER_ROOT", tmp_path)
+    built = NarratorEngine(
+        narrator_engine=A_FUTURE_ENGINE, python=Path("/opt/env/bin/python"),
+        log_path=Path("/tmp/x.log"), serving_stack=None, max_num_seqs=None,
+        mem_fraction=None, context_length=None, stall_guard=None, voices=None,
+        mlx_total_bytes=None)
+    with pytest.raises(EngineError, match="Higgs worker is not at"):
+        built.command(Path("/weights"), "owen", 7100, [])
 
 
 def a_venv(tmp_path: Path, name: str = "tts-higgs-v3") -> Path:

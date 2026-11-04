@@ -39,6 +39,7 @@ include = ["crucible*"]
 [tool.setuptools.package-data]
 crucible = [
   "jobs/audio/yue2music/LICENSE",
+  "jobs/tts/higgs/crucible_higgs/engine/higgs/launch/*",
   "ui/*",
   "ui/**/*",
   "models/*.toml",

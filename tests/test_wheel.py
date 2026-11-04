@@ -25,6 +25,9 @@ REQUIRED_TREES: tuple[tuple[str, str], ...] = (
     ("crucible/envs", "llm/cuda-linux.txt"),
     ("crucible/ui", "index.html"),
     ("crucible/desktop_app/assets", "crucible.icns"),
+    # The Higgs worker the tts env runs (`python -m crucible_higgs.serve`): its
+    # python AND its launch directory, whose scripts bash runs by path.
+    ("crucible/jobs/tts/higgs", "crucible_higgs/engine/higgs/launch/serve_higgs_sgl.sh"),
 )
 
 

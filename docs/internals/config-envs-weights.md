@@ -371,6 +371,15 @@ A recipe measured on its own replaces its row here and its header line together.
 - On cuda-linux, `tts` has one env **per narrator engine** (`tts-higgs-v3`),
   because engines pin conflicting serving stacks and torches. On mlx-darwin every
   engine shares `tts`.
+- **What a tts env is for, and what proves it.** The Higgs worker is Crucible's
+  own (`crucible/jobs/tts/higgs/`, voices.md "The narrator engine") and ships in
+  the wheel, so a tts env is the runtime it runs on: its headline package
+  (`TTS_HEADLINE_PACKAGE`) is `sglang-omni` on cuda-linux and `mlx-audio` on
+  mlx-darwin, and its smoke import (`HIGGS_WORKER_SMOKE_IMPORT`) is what the
+  worker imports beyond its own package: `numpy, num2words, regex, soundfile`.
+  Both used to be `narrator`. The recipes still pin narrator at the commit the
+  worker was moved from, and it brings `num2words` with it; a recipe that drops
+  the narrator line must pin `num2words` itself.
 - **Serving stack: SGLang-Omni.** Owen 2026-09-15: *"we dont use vllm-omni. we use
   sglang. vllm-omni doesnt work for higgs."* vllm-omni's batched talker corrupts the
   newest batch row. Measured on the same 50 chunks: vllm-omni had 13/50 damaged at
