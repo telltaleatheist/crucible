@@ -90,6 +90,9 @@ class Subject:
     # Files this subject's manifest pins itself, {path under its directory: sha256}: what a
     # repair judges them by, because they do not come from the subject's main repo.
     pinned_files: Callable[[], dict[str, str]] | None = None
+    # True when the pins are ALL of this subject's files and its directory holds other
+    # subjects' too (every separator shares one).
+    pinned_only: bool = False
 
     def would_move(self) -> str | None:
         return None if self.moves_to is None else self.moves_to()
@@ -347,6 +350,8 @@ def _rvc_base_subject(config: Config) -> Subject:
         remove=lambda: weights.remove_files(
             rvcbase.base_root(config), assets.targets
         ),
+        pinned_files=lambda: {entry.target: entry.sha256 for entry in assets.files},
+        pinned_only=True,
     )
 
 
@@ -388,6 +393,11 @@ def _denoise_subjects(config: Config, backend: Backend) -> list[Subject]:
                 installed=_installed_denoise(config, separator, spec),
                 pull=_pull_denoise(config, separator, spec),
                 remove=_remove_denoise(config, separator),
+                pinned_files=lambda separator=separator, spec=spec: {
+                    entry.target: entry.sha256
+                    for entry in denoisemodels.model_files(separator, spec)
+                },
+                pinned_only=True,
             )
         )
     return found

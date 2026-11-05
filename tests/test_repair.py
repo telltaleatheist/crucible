@@ -292,6 +292,40 @@ def test_a_damaged_weight_file_alone_is_deleted_and_fetched(
     assert report.healthy and report.repaired[0]["subject"] == {"kind": "model", "id": "m"}
 
 
+def test_a_pull_that_answers_from_its_stamp_is_asked_for_the_whole_subject(
+    box: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A separator or the RVC base: pull_files answers from its own stamp, so the first pull
+    fetches nothing. The owner asked for repair by re-download, not a named failure."""
+    s = _subject_on_disk(box, monkeypatch, {"bad.bin": b"bad"})
+    (s.target / "bad.bin").write_bytes(b"bit rot")
+    pulls: list[bool] = []
+
+    def pull(*, force: bool, on_line: Any, on_progress: Any) -> None:
+        pulls.append(force)
+        if force:
+            (s.target / "bad.bin").write_bytes(b"bad")
+
+    subject = replace(s.subject, pull=pull, installed=lambda: weights.InstalledWeights(
+        s.target, "org/repo", "abc123", 10, None, "pulled"))
+    monkeypatch.setattr(catalog, "subjects", lambda *a: [subject])
+    report, _ = _run(box)
+    assert pulls == [False, True]
+    assert report.healthy and report.repaired
+
+
+def test_a_subject_whose_pins_are_all_it_has_leaves_its_neighbours_alone(
+    box: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every separator shares one directory: only its own files are its to judge."""
+    s = _subject_on_disk(box, monkeypatch, {"mine.ckpt": b"mine"})
+    (s.target / "another_separators.ckpt").write_bytes(b"someone else's")
+    subject = replace(s.subject, pinned_files=lambda: {"mine.ckpt": _sha(b"mine")}, pinned_only=True)
+    monkeypatch.setattr(catalog, "subjects", lambda *a: [subject])
+    report, _ = _run(box)
+    assert report.healthy and report.not_hash_checked == [] and s.pulls == []
+
+
 def test_a_fetch_that_brings_the_same_bad_bytes_is_failed_by_name(
     box: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:

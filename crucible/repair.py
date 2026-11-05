@@ -20,7 +20,12 @@ many gigabytes:
   another repo, to the sha256 its manifest pins. If the hub cannot be asked (the network is
   weather), or none of a subject's files can be matched to anything, the subject is `unverified`,
   never broken: nothing is deleted on a guess. What could not be hashed against anything is listed
-  in `not_hash_checked`, so a clean result never claims more than was checked.
+  in `not_hash_checked`, so a clean result never claims more than was checked. An RVC voice is one
+  of those: its manifest pins the archive it came in and not the files unpacked from it.
+
+The cure for weights is the bad files alone, and when a subject's pull cannot fetch just those it
+is the whole subject again. If that does not cure it, or the subject has no source, it fails by
+name.
 
 Nothing here touches the card, and nothing here takes files out from under a running engine: an
 env or a subject that is in use is still READ and judged, and its repair waits until it is free,
@@ -423,9 +428,12 @@ def weights_problem(
     missing += [relative for relative in sorted(pins) if not (found.path / relative).is_file()]
     different: list[str] = []
     unjudged: list[str] = []
+    only_pinned = getattr(subject, "pinned_only", False)
     for path in _on_disk(found.path):
         relative = path.relative_to(found.path).as_posix()
         pin = pins.get(relative)
+        if pin is None and only_pinned:
+            continue
         if pin is not None:
             if not hasher.matches(path, "sha256", (pin,), hasher.sha256):
                 different.append(relative)
@@ -473,6 +481,8 @@ def _put_back(
         if relative not in pins and found.hf_repo is not None and found.revision is not None:
             _drop_hub_copy(found.hf_repo, found.revision, relative)
     (found.path / weights.STAMP_NAME).unlink(missing_ok=True)
+    # A pull_files subject (a separator, the RVC base) has its own stamp and answers from it, so
+    # this can come back having fetched nothing; `_repair_subject` then asks for the whole of it.
     subject.pull(force=False, on_line=on_line, on_progress=on_progress)
 
 
@@ -700,23 +710,31 @@ def _repair_subject(
             raise weights.PullCancelled("the repair was cancelled")
         emit("progress", {"bytes_done": done, "bytes_total": total, "file": name})
 
+    def cured() -> tuple[bool, list[str]]:
+        now = subject.installed()
+        if now is None:
+            return False, ["the subject still does not read as installed"]
+        still, gone, _unjudged = weights_problem(subject, now, hub, hasher)
+        # What this repair deleted has to be back: a file that is absent is not one that differs.
+        gone += [name for name in different if not (now.path / name).is_file()]
+        return not still and not gone, still + gone
+
     try:
         _put_back(subject, found, different, on_line, on_progress)
+        fixed, left = cured()
+        if not fixed:
+            on_line(f"{subject.id}: {', '.join(left[:3])} after fetching the bad files; fetching all of it")
+            subject.pull(force=True, on_line=on_line, on_progress=on_progress)
+            fixed, left = cured()
     except weights.PullCancelled:
         raise RepairCancelled() from None
     except Exception as exc:  # noqa: BLE001 (any way a fetch fails is one failed row, by name)
         report.failed.append({"subject": row, "code": "pull_failed", "message": str(exc)})
         emit("repair", {"step": "repull", "subject": row, "state": "failed", "detail": str(exc)})
         return
-    now = subject.installed()
-    if now is None:
-        message = "the fetch finished and the subject still does not read as installed"
-        report.failed.append({"subject": row, "code": "pull_failed", "message": message})
-        emit("repair", {"step": "repull", "subject": row, "state": "failed", "detail": message})
-        return
-    still, gone, _unjudged = weights_problem(subject, now, hub, hasher)
-    if still or gone:
-        message = f"after a fresh fetch {', '.join((still + gone)[:5])} still do(es) not match the hub"
+    if not fixed:
+        still = left
+        message = f"after fetching all of it again, {', '.join(still[:5])} still do(es) not match"
         report.failed.append({"subject": row, "code": "weights_sha_mismatch", "message": message})
         emit("repair", {"step": "repull", "subject": row, "state": "failed", "detail": message})
         return
