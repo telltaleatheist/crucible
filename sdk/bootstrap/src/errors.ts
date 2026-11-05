@@ -48,7 +48,9 @@ export type BootstrapRefusalCode =
   | 'host_no_token'
   | 'host_install_running'
   | 'host_install_failed'
-  | 'host_install_unwitnessed';
+  | 'host_install_unwitnessed'
+  | 'server_unrepairable'
+  | 'repair_failed';
 
 export interface BootstrapRefusalOptions {
   /** The exact command the host must run, when there is one. */

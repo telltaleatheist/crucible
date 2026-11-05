@@ -119,6 +119,9 @@ export type { LocalConfig, LocalConfigOptions } from './config.js';
 export { health } from './health.js';
 export type { ActivityClient, HealthOptions } from './health.js';
 
+export { repair } from './repair.js';
+export type { LocalRepairResult, RepairClient, RepairOptions, RepairStep, RepairStepName } from './repair.js';
+
 export { BootstrapRefusal, BootstrapStepFailed } from './errors.js';
 export type { BootstrapRefusalCode, BootstrapRefusalOptions } from './errors.js';
 
