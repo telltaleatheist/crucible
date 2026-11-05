@@ -930,6 +930,7 @@ Every voice this build has a manifest for, and where it stands here.
 | `update_error` | string or null | no | — | Why the last look-up failed; the voice stays on the revision it has. |
 | `sampling` | object of integer or number or null | no | — | `{temperature, top_p, top_k}` this backend's arm renders take 0 with: the sampling Crucible writes into narrator's voice document. |
 | `edge_fade_ms` | object of integer or number or null | no | — | `{in, out}`: raised-cosine fades, in milliseconds, at each chunk edge on this arm. |
+| `edges` | object or null | no | — | How this voice's chunks join, what an assembler reads: `pads` (true: the engine bakes the silence into each chunk and the assembler concatenates; false: it emits bare speech, and the assembler fades each edge and inserts the gaps), and `fade_in_ms`, `fade_out_ms`: the engine's numbers, or the `edge_fade_ms` the voice states instead. Null where this backend has no arm of the voice. |
 | `chunk_gap` | object or null | no | — | The silence to add after each chunk: `inject_s` (net of the model's own tail), `target_join_s`, `model_self_tail_s`, optional `reader_sentence_gap_s` and `model_internal_gap_s`, and `rule`, `method`, `source`, `measured_on`. |
 | `reference_seconds_cap` | integer or number or null | no | — | The most reference-clip audio this arm takes, in seconds. |
 | `allowed_controls` | array of string or null | no | — | The inline control tokens (`<\|group:name\|>`) this arm allows; `[]` allows none. |
@@ -3586,6 +3587,7 @@ One row of `GET /v1/voices`: a voice and where it stands on this server.
 | `update_error` | string or null | no | — | Why the last look-up failed; the voice stays on the revision it has. |
 | `sampling` | object of integer or number or null | no | — | `{temperature, top_p, top_k}` this backend's arm renders take 0 with: the sampling Crucible writes into narrator's voice document. |
 | `edge_fade_ms` | object of integer or number or null | no | — | `{in, out}`: raised-cosine fades, in milliseconds, at each chunk edge on this arm. |
+| `edges` | object or null | no | — | How this voice's chunks join, what an assembler reads: `pads` (true: the engine bakes the silence into each chunk and the assembler concatenates; false: it emits bare speech, and the assembler fades each edge and inserts the gaps), and `fade_in_ms`, `fade_out_ms`: the engine's numbers, or the `edge_fade_ms` the voice states instead. Null where this backend has no arm of the voice. |
 | `chunk_gap` | object or null | no | — | The silence to add after each chunk: `inject_s` (net of the model's own tail), `target_join_s`, `model_self_tail_s`, optional `reader_sentence_gap_s` and `model_internal_gap_s`, and `rule`, `method`, `source`, `measured_on`. |
 | `reference_seconds_cap` | integer or number or null | no | — | The most reference-clip audio this arm takes, in seconds. |
 | `allowed_controls` | array of string or null | no | — | The inline control tokens (`<\|group:name\|>`) this arm allows; `[]` allows none. |
