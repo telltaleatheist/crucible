@@ -17,6 +17,8 @@ jobs:
   server:
     name: server (${{ matrix.os }}, py${{ matrix.python }})
     runs-on: ${{ matrix.os }}
+    # A full run takes under an hour on macOS. A hung test without this ran to GitHub's 6 h default.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
