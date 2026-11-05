@@ -137,8 +137,8 @@ interpreter nobody pinned is `interpreter_not_pinned` before `venv` runs.
 `pip install -r` into the venv that is already there — pip skips what is
 satisfied, so the cost is the difference. `--force` is the one thing that
 deletes an env, for one that is genuinely broken. The recipe's two halves are
-stamped apart, because they move for different reasons: a moved `narrator` git
-sha costs one `pip install --no-deps` of that line and leaves the 13 GB around
+stamped apart, because they move for different reasons: a moved git sha on a
+`name @ git+…` line costs one `pip install --no-deps` of that line and leaves the 13 GB around
 it alone.
 
 ```bash

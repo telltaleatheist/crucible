@@ -40,6 +40,7 @@ diffusers==0.37.0
 dill==0.4.1
 diskcache==5.6.3
 distro==1.9.0
+docopt==0.6.2
 docstring_parser==0.18.0
 dots.tts==0.2.1
 easydict==1.13
@@ -120,7 +121,6 @@ msgpack==1.2.2
 msgspec==0.21.1
 multidict==6.7.1
 multiprocess==0.70.19
-narrator @ git+https://github.com/telltaleatheist/bookforge@dc05e7e7cd3166210dc32f1be317b24b66b93993#subdirectory=python
 narwhals==2.25.0
 nccl4py==0.5.0
 nemo_text_processing==1.2.0
@@ -128,6 +128,7 @@ nest-asyncio==1.6.0
 networkx==3.6.1
 ninja==1.13.2
 nixl-cu13==1.4.1
+num2words==0.5.14
 numba==0.65.1
 numpy==2.3.5
 nvidia-cublas==13.1.1.3

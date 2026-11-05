@@ -79,12 +79,21 @@ def test_the_engines_the_server_names_are_exactly_the_engines_with_a_recipe() ->
     }
 
 
-def test_every_tts_recipe_pins_the_same_narrator_commit() -> None:
-    shas = {
-        spec.recipe_name: jobenv.recipe_direct_references(recipe_for(spec))["narrator"]
-        for spec in tts_specs()
-    }
-    assert len(set(shas.values())) == 1, shas
+def test_no_tts_recipe_installs_narrator_and_each_pins_what_the_worker_imports() -> None:
+    """The worker is Crucible's (crucible/jobs/tts/higgs/). narrator, and the
+    Orpheus codec only it used, left the recipes in REORG C3; what the worker
+    imports beyond its own package came with narrator, so each recipe pins it."""
+    smoke = [name.strip() for name in jobenv.HIGGS_WORKER_SMOKE_IMPORT.split(",")]
+    for spec in tts_specs():
+        recipe = recipe_for(spec)
+        assert "narrator" not in jobenv.recipe_direct_references(recipe), recipe.name
+        pinned = {
+            line.split("==", 1)[0].strip().lower()
+            for line in recipe.read_text(encoding="utf-8").splitlines()
+            if "==" in line and not line.startswith(("#", "-"))
+        }
+        assert "narrator" not in pinned and "snac" not in pinned, recipe.name
+        assert set(smoke) <= pinned, (recipe.name, sorted(set(smoke) - pinned))
 
 
 def test_the_serving_stack_is_the_recipe_s_and_only_cuda_higgs_has_one() -> None:

@@ -32,8 +32,7 @@ BACKEND_HEADLINE_PACKAGE: dict[str, str] = {
 # WHAT A TTS ENV EXISTS FOR, now that the worker is Crucible's own
 # (crucible/jobs/tts/higgs/): the serving stack's package on cuda-linux, and the
 # in-process runtime on mlx-darwin. Until the move it was `narrator`, the package
-# the worker came out of; the recipes still pin narrator at the commit the worker
-# was moved from, and nothing runs it.
+# the worker came out of; no recipe pins narrator any more (REORG C3).
 TTS_HEADLINE_PACKAGE: dict[str, str] = {
     CUDA_LINUX: "sglang-omni",
     MLX_DARWIN: "mlx-audio",

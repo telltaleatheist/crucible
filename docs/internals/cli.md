@@ -387,8 +387,8 @@ The installer's `env-patch-llm` step. An upgrade installs a new wheel and never 
 `crucible install`, so patches for an unchanged recipe would never be applied. It exits 0
 only when every row is `applied` or `not_applicable`. No env installed is not a failure.
 `env patch tts` walks every narrator engine's tts env on this backend (one on the Mac);
-the installer does not need it, because narrator applies the stall-guard patch itself
-before it starts the server.
+the installer does not need it, because the tts engine (`engines/narrator.py`) applies
+the stall-guard patch itself before it starts the server.
 
 ## `env tools`
 

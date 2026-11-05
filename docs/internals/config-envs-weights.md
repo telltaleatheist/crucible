@@ -331,13 +331,13 @@ publisher, and is never rebuilt, re-hosted or re-downloaded because code changed
 - **Everything else comes from its publisher, pinned by version and digest**: CPython from
   python-build-standalone (`interpreter.py`), Crucible's own dependencies from PyPI
   (`pyproject.toml`), a job env from PyPI and the indexes its recipe names
-  (`envs/<type>/<recipe>.txt`, exact pins), narrator from bookforge git at a commit, the WSL
+  (`envs/<type>/<recipe>.txt`, exact pins), the WSL
   image from Canonical with Canonical's `SHA256SUMS`, `llama-server` from ggml-org's release,
   weights from Hugging Face.
 - **An upgrade** is `pip install` of the new wheel into the interpreter already there, then a
   restart. A job env is touched only when its recipe's hash changed, and then by
   `pip install -r` into the existing venv, never delete-and-rebuild (the plan below). A moved
-  narrator commit alone reinstalls that one line.
+  commit on a `name @ git+url` line alone reinstalls that one line.
 - **Repair is install.** `crucible doctor` names a missing or drifted env and `crucible
   install <job>` repairs it from its recipe: one path for a first install and a repair.
 - **A normal deploy runs no tests** (`scripts.md`, "Tests"). The tests that matter ran on the
@@ -377,14 +377,15 @@ A recipe measured on its own replaces its row here and its header line together.
   (`TTS_HEADLINE_PACKAGE`) is `sglang-omni` on cuda-linux and `mlx-audio` on
   mlx-darwin, and its smoke import (`HIGGS_WORKER_SMOKE_IMPORT`) is what the
   worker imports beyond its own package: `numpy, num2words, regex, soundfile`.
-  Both used to be `narrator`. The recipes still pin narrator at the commit the
-  worker was moved from, and it brings `num2words` with it; a recipe that drops
-  the narrator line must pin `num2words` itself.
+  Both used to be `narrator`. Neither recipe pins narrator any more (REORG C3):
+  `num2words` and its `docopt` are pinned outright, and the mlx-darwin recipe is a
+  freeze of the working Mac env without narrator, `snac` and `torch`, which only
+  narrator's Orpheus path needed.
 - **Serving stack: SGLang-Omni.** Owen 2026-09-15: *"we dont use vllm-omni. we use
   sglang. vllm-omni doesnt work for higgs."* vllm-omni's batched talker corrupts the
   newest batch row. Measured on the same 50 chunks: vllm-omni had 13/50 damaged at
   10,752 chars/min; SGLang had 5/50 at 26,666. `CUDA_LINUX_SERVING_STACK` names the
-  stack the recipe installs. On mlx-darwin narrator renders in-process and reads no
+  stack the recipe installs. On mlx-darwin the worker renders in-process and reads no
   `HIGGS_STACK`. The `HIGGS_SGL_*` knobs are left unset because
   `serve_higgs_sgl.sh` already defaults them to the catalog's values: mem 0.60,
   7500 new tokens, CUDA-graph max batch = `HIGGS_MAX_NUM_SEQS`.
@@ -511,9 +512,9 @@ install.
 - **tts cuda-linux** (`higgs-v3-sgl` extra, Python 3.12): this is the working
   BookForge `sglomni` env (Owen: *"mirror it. it should be exact"*). `uv` is kept
   because it is part of that env. `flashinfer-jit-cache` comes from flashinfer's own
-  per-CUDA index. Without it the server compiles kernels on every cold start. The
-  narrator pin must be at or after bookforge `edca6c22`, which ships
-  `serve_higgs_sgl.sh`.
+  per-CUDA index. Without it the server compiles kernels on every cold start.
+  `serve_higgs_sgl.sh` ships with the worker
+  (`crucible_higgs/engine/higgs/launch/`).
 - **tts mlx-darwin**: `mlx-lm==0.31.3`, the version the batched fast path is pinned
   to. `mlx-audio==0.4.8`, because 0.5.1 raised TypeError on every generate under
   transformers 5.x. That was measured on a since-removed engine, so a re-measurement
@@ -557,7 +558,7 @@ missing file or two site-packages trees. `site-packages` is found by glob and
 deduplicated by real path. Line endings are preserved.
 
 `apply_patches` runs each distinct script once per call (one script may own several
-rows). `install_env` applies the table after a recipe install, after a narrator
+rows). `install_env` applies the table after a recipe install, after a direct-
 reference reinstall, and, when the plan is `nothing`, still repairs a row that is
 `missing` or `stale` (`envpatches.repair`), so `crucible install <type>` is always
 enough to bring a patch in.
