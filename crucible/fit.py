@@ -4,7 +4,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
-from . import asrplan, ttsplan
+from . import asrplan, ttsplan, vram
 from .audiomodels import held_need
 from .backend import CardFacts
 from .enginespec import bf16_fallback, card_needs, declared_dtype, dtype_on
@@ -59,6 +59,9 @@ class Candidate:
     # The optional package the model is in (ModelManifest.package), held only where it
     # is installed.
     package: str | None = None
+    # The block's engine: what its own process holds beyond the manifest's terms is the
+    # engine's (vram.engine_process_bytes), charged in need_bytes as a load charges it.
+    engine: str | None = None
 
     @classmethod
     def of(cls, manifest: Any, backend_kind: str, form: str | None = None) -> "Candidate":
@@ -92,6 +95,7 @@ class Candidate:
             serves_images="image" in getattr(spec, "serves", ()),
             family=getattr(manifest, "family", None),
             package=getattr(manifest, "package", None),
+            engine=getattr(spec, "engine", None),
         )
 
     @property
@@ -162,9 +166,7 @@ class Candidate:
         memory = (
             None
             if self.memory is None
-            else self.memory.max_context(
-                available_bytes=available_bytes, concurrency=concurrency
-            )
+            else self._max_context(available_bytes, concurrency)
         )
         if memory is None or self.served_context <= memory:
             ceiling, bound_by = self.served_context, "served"
@@ -180,19 +182,28 @@ class Candidate:
         )
 
     def need_bytes(self, work: "WorkingContext | None") -> int:
+        """What the card must have free for this model at `work`: vram.card_need_bytes,
+        the figure a load of it is held to. With no working context, the manifest's
+        estimate and what the engine's own process holds."""
+        engine = "" if self.engine is None else self.engine
         if work is None or self.memory is None:
-            return self.memory_bytes_estimate
-        return self.memory.bytes_for(
-            context=work.tokens, concurrency=work.concurrency
+            return self.memory_bytes_estimate + vram.engine_process_bytes(engine)
+        return vram.card_need_bytes(
+            engine, self.memory, context=work.tokens, concurrency=work.concurrency
+        )
+
+    def _max_context(self, available_bytes: int, concurrency: int) -> int:
+        assert self.memory is not None
+        engine = "" if self.engine is None else self.engine
+        return vram.card_max_context(
+            engine, self.memory, available_bytes=available_bytes, concurrency=concurrency
         )
 
     def max_context(self, available_bytes: int, work: "WorkingContext | None") -> int | None:
         if self.memory is None:
             return None
         concurrency = 1 if work is None else work.concurrency
-        return self.memory.max_context(
-            available_bytes=available_bytes, concurrency=concurrency
-        )
+        return self._max_context(available_bytes, concurrency)
 
     def to_dict(self) -> dict[str, Any]:
         return {

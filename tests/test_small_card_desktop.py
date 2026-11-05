@@ -114,3 +114,28 @@ def test_doctor_still_notes_an_unmeasured_reserve_larger_than_needed():
     section = check_desktop_reserve(_host(200 * 1024**2, basis="default", allowance=3 * GIB))
     assert section.findings == ()
     assert section.notes and section.notes[0].startswith("desktop_reserve_unmeasured")
+
+
+def test_a_choice_and_a_load_are_held_to_one_need():
+    """The fit a verb's pick and `model_does_not_fit` use (fit.Candidate.need_bytes) is
+    the free memory a load needs (KvPlan.free_needed_bytes): the card that the choice says
+    holds the model is a card the load fits, and a byte less is neither."""
+    from crucible.fit import Candidate, WorkingContext
+
+    candidate = Candidate.of(load_manifest("qwen3.5-4b-8bit"), "cuda-linux")
+    need = candidate.need_bytes(WorkingContext(tokens=8192, concurrency=1, source="test"))
+    assert need == _plan(FREE).free_needed_bytes
+    assert _plan(need).fits
+    assert not _plan(need - 1).fits
+
+
+def test_on_victorias_card_with_her_desktop_the_8bit_4b_is_not_chosen():
+    """Her card less the desktop the ladder saw (1.9 GiB) cannot hold qwen3.5-4b-8bit at
+    8192 tokens, so no verb picks it there; with the 1 GiB reserve it is still picked,
+    which is why the reserve must be what the desktop holds."""
+    from crucible.fit import Candidate, WorkingContext
+
+    candidate = Candidate.of(load_manifest("qwen3.5-4b-8bit"), "cuda-linux")
+    work = WorkingContext(tokens=8192, concurrency=1, source="test")
+    assert candidate.holds(work, TOTAL - ALLOWANCE)
+    assert not candidate.holds(work, TOTAL - 2_035_286_016)

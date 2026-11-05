@@ -188,11 +188,16 @@ def test_on_the_pc_the_card_binds_where_the_manifest_maximum_does_not(
 ) -> None:
     rows = rows_for(pc)
     nine = rows["qwen3.5-9b"]["max_context"]
-    assert (nine["tokens"], nine["limited_by"]) == (65536, "max_context")
-    assert nine["card_affords"] == 74_887
+    # vLLM's CUDA context (0.94 GiB) and each request's 1024 tokens of slack are charged
+    # here as a load charges them (vram.card_need_bytes), so the card affords less than the
+    # weights-plus-KV arithmetic once said.
+    assert (nine["tokens"], nine["limited_by"]) == (48_907, "card")
+    assert nine["card_affords"] == 48_907
     big = rows["qwen3.8-27b-4bit"]["max_context"]
-    assert (big["tokens"], big["limited_by"]) == (32768, "max_context")
-    assert big["card_affords"] == 33_945
+    assert (big["tokens"], big["limited_by"]) == (21_250, "card")
+    assert big["card_affords"] == 21_250
+    small = rows["qwen3.5-4b-8bit"]["max_context"]
+    assert (small["tokens"], small["limited_by"]) == (32768, "max_context")
     vision = rows["qwen3.5-9b-vl"]["max_context"]
     assert vision["limited_by"] == "card"
     assert vision["tokens"] == vision["card_affords"] < 16384

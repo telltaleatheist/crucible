@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from .accelerator import AcceleratorState
 from .enginespec import VLLM_ENGINE, flag_value
-from .manifests import MODELS_DIR_ENV, BackendSpec, ManifestError
+from .manifests import MODELS_DIR_ENV, BackendSpec, ManifestError, MemoryTerms
 from .memorybudget import engine_budget_bytes, gib_text
 
 MAX_NUM_SEQS_FLAG = "--max-num-seqs"
@@ -26,6 +26,50 @@ VLLM_CUDA_CONTEXT_BYTES = 960 * 1024**2
 # available KV cache memory (0.29 GiB)". One block of padding (528) and the state
 # (0.019 GiB, about 430 tokens at 46,581 B/token) fit in 1024.
 VLLM_SEQUENCE_SLACK_TOKENS = 1024
+
+
+def engine_process_bytes(engine: str) -> int:
+    """What an engine's own process holds on the card outside its manifest's terms: vLLM's
+    CUDA context. A llama-server manifest's overhead already counts its own (the bside
+    q8_0 form's 400 MB allowance), so it adds nothing here."""
+    return VLLM_CUDA_CONTEXT_BYTES if engine == VLLM_ENGINE else 0
+
+
+def card_need_bytes(engine: str, terms: MemoryTerms, *, context: int, concurrency: int) -> int:
+    """What the card must have free for `engine` to serve `concurrency` requests of
+    `context` tokens: the one figure a choice (fit.Candidate, the capability record, a
+    verb's pick, `model_does_not_fit`) and a load (plan_vllm_memory) are both held to.
+
+    For vLLM it is the manifest's weights and overhead, the engine's CUDA context and each
+    request's KV with its slack (VLLM_SEQUENCE_SLACK_TOKENS), which is what
+    plan_vllm_memory charges a load on the card it reads. A choice that left the context
+    and the slack out picked qwen3.5-4b-8bit for Victoria's 8 GiB card at 5.9 GiB, and
+    every load of it there needed 6.8 GiB free (2026-11-04: "This card affords 0
+    tokens")."""
+    if context <= 0:
+        raise ValueError(f"context must be positive, got {context}")
+    if concurrency <= 0:
+        raise ValueError(f"concurrency must be positive, got {concurrency}")
+    if engine != VLLM_ENGINE:
+        return terms.bytes_for(context=context, concurrency=concurrency)
+    return (
+        terms.fixed_bytes
+        + engine_process_bytes(engine)
+        + terms.kv_bytes_per_token * (context + VLLM_SEQUENCE_SLACK_TOKENS) * concurrency
+    )
+
+
+def card_max_context(engine: str, terms: MemoryTerms, *, available_bytes: int, concurrency: int) -> int:
+    """The most tokens per request `available_bytes` gives `concurrency` requests: the
+    inverse of card_need_bytes."""
+    if concurrency <= 0:
+        raise ValueError(f"concurrency must be positive, got {concurrency}")
+    if engine != VLLM_ENGINE:
+        return terms.max_context(available_bytes=available_bytes, concurrency=concurrency)
+    room = available_bytes - terms.fixed_bytes - engine_process_bytes(engine)
+    if room <= 0:
+        return 0
+    return max(0, room // (terms.kv_bytes_per_token * concurrency) - VLLM_SEQUENCE_SLACK_TOKENS)
 
 
 def _gib(value: int) -> str:

@@ -735,12 +735,17 @@ def test_a_ceiling_is_the_smaller_of_what_is_served_and_what_memory_affords() ->
             BY_NAME["generate"], "cuda-linux", available_bytes=budget, concurrency=1
         )
     }
+    # vLLM's CUDA context (0.94 GiB) and each request's 1024 tokens of slack are charged
+    # here as a load charges them (vram.card_need_bytes), so the card affords less than the
+    # weights-plus-KV arithmetic once said.
     nine = one["qwen3.5-9b"]
     assert nine.served_context == 65536
-    assert nine.memory_context == 74_887
-    assert (nine.tokens, nine.bound_by) == (65536, "served")
+    assert nine.memory_context == 48_907
+    assert (nine.tokens, nine.bound_by) == (48_907, "memory")
     big = one["qwen3.8-27b-4bit"]
-    assert (big.tokens, big.bound_by, big.memory_context) == (32768, "served", 33_945)
+    assert (big.tokens, big.bound_by, big.memory_context) == (21_250, "memory", 21_250)
+    small = one["qwen3.5-4b-8bit"]
+    assert (small.tokens, small.bound_by) == (32768, "served")
 
     two = {
         c.model: c
@@ -786,9 +791,9 @@ def test_every_row_echoes_its_work_and_generate_its_ceilings(make_client, auth) 
     assert rows["decide"]["work"]["from"] == "default"
     assert rows["tts"]["work"] is None
     ceilings = {c["model"]: c for c in rows["generate"]["context_ceilings"]}
-    assert ceilings["qwen3.5-9b"]["tokens"] == 65536
+    assert ceilings["qwen3.5-9b"]["tokens"] == 48_907
     assert ceilings["qwen3.5-9b"]["served_context"] == 65536
-    assert ceilings["qwen3.8-27b-4bit"]["tokens"] == 32768
+    assert ceilings["qwen3.8-27b-4bit"]["tokens"] == 21_250
     assert rows["decide"]["context_ceilings"] is None
     assert rows["tts"]["context_ceilings"] is None
 
@@ -812,7 +817,9 @@ def test_the_fit_follows_the_clients_stated_context(make_client, auth) -> None:
 
     assert wide.status_code == 200, wide.text
     row = _rows(wide)["generate"]
-    assert row["enabled"] is True and row["selected"] == "qwen3.5-9b", row
+    # Two requests of 32768 on the 9B need its CUDA context and two requests' slack too,
+    # which a 24 GiB card less 3 GiB does not have: the 4B serves them.
+    assert row["enabled"] is True and row["selected"] == "qwen3.5-4b", row
     assert (row["work"]["tokens"], row["work"]["concurrency"]) == (32768, 2)
     assert {c["concurrency"] for c in row["context_ceilings"]} == {2}
 
@@ -878,7 +885,7 @@ def test_a_chosen_model_is_the_one_whose_ceiling_governs() -> None:
         )
     assert caught.value.code == "context_over_limit"
     assert caught.value.details["ceiling"]["model"] == "qwen3.8-27b-4bit"
-    assert caught.value.details["ceiling"]["tokens"] == 32768
+    assert caught.value.details["ceiling"]["tokens"] == 21_250
 
 
 def test_a_host_that_cannot_hold_the_weights_is_not_a_length_refusal() -> None:
@@ -955,8 +962,11 @@ def test_the_pc_ceilings_are_the_computed_maxima() -> None:
             BY_NAME["generate"], "cuda-linux", available_bytes=budget, concurrency=1
         )
     }
-    assert ceilings["qwen3.8-27b-4bit"] == 32768
-    assert ceilings["qwen3.5-9b"] == 65536
+    # vLLM's CUDA context (0.94 GiB) and each request's 1024 tokens of slack are charged
+    # here as a load charges them (vram.card_need_bytes), so the card affords less than the
+    # weights-plus-KV arithmetic once said.
+    assert ceilings["qwen3.8-27b-4bit"] == 21_250
+    assert ceilings["qwen3.5-9b"] == 48_907
     assert "qwen3.8-27b-8bit" not in ceilings
 
 
@@ -972,12 +982,12 @@ def test_a_load_is_held_to_the_same_ceiling_capability_publishes() -> None:
         )
     }["qwen3.8-27b-4bit"]
     held = contextceiling.check_load_context(
-        big, "cuda-linux", available_bytes=budget, context=32768
+        big, "cuda-linux", available_bytes=budget, context=21_250
     )
     assert held == published
     with pytest.raises(ApiError) as caught:
         contextceiling.check_load_context(
-            big, "cuda-linux", available_bytes=budget, context=32769
+            big, "cuda-linux", available_bytes=budget, context=21_251
         )
     assert caught.value.code == "context_over_limit"
     assert caught.value.details["ceiling"] == published.to_dict()
