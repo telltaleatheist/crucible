@@ -159,14 +159,28 @@ def test_every_higgs_voice_takes_its_serving_width_from_the_box(home: Path) -> N
         assert serving.max_num_seqs_note == "seven, for the test"
 
 
-def test_a_box_with_no_higgs_footprint_refuses_the_engine_rows_by_name(home: Path) -> None:
+def test_a_box_with_no_higgs_footprint_lists_the_engine_rows_unsized(home: Path) -> None:
+    """Listed (the catalog and capability ask what the engine ships, which does not depend
+    on this box), with no serving width: nothing is sized from a number the box never said."""
     configure_box(home, tts_engines=())
-    assert "higgs-default" not in voicecatalog.engine_voices()
-    refused = voicecatalog.refused_engine_voices()
-    assert refused["higgs-default"].startswith("engine_footprint_unset: voice 'higgs-default'")
-    assert {"higgs-default", "zeroshot"} <= voicecatalog.declared_voice_ids(), (
-        "what the engine declares does not depend on whether this box can size it"
-    )
+    engine = voicecatalog.engine_voices()
+    assert {"higgs-default", "zeroshot"} <= set(engine)
+    assert engine["higgs-default"].serving is None
+    assert engine["zeroshot"].serving is None
+
+
+def test_an_unsized_engine_row_is_refused_at_load_by_name(home: Path) -> None:
+    from crucible.config import load_config
+    from crucible.errors import ApiError
+    from crucible.jobs.tts.common import require_loadable
+
+    from .conftest import FAKE_BACKEND
+
+    configure_box(home, enable_tts=True, tts_engines=())
+    with pytest.raises(ApiError) as caught:
+        require_loadable(load_config(home), FAKE_BACKEND, "higgs-default")
+    assert caught.value.code == "engine_footprint_unset"
+    assert "[tts.higgs-v3]" in caught.value.message
 
 
 def test_a_base_row_that_states_its_own_width_is_refused(tmp_path: Path) -> None:

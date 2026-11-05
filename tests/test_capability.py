@@ -25,6 +25,20 @@ from crucible.verdict import decide, decide_all, job_type_enabled
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
 
+
+@pytest.fixture(autouse=True)
+def _the_box_states_its_higgs_footprint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The engine's own Higgs voices take their serving width from the box's [tts.higgs-v3],
+    which every box that serves tts states (`crucible init` writes cuda-linux's). These
+    verdicts are reached without a config, so the box's footprint is the declared one."""
+    from crucible import voicecatalog
+    from crucible.narratorengines import HIGGS_V3, declared_tts_footprints
+    from crucible.voices import SERVING_KEYS
+
+    footprint = {f.engine: f for f in declared_tts_footprints("cuda-linux")}[HIGGS_V3]
+    serving = {k: v for k, v in footprint.to_dict().items() if k in SERVING_KEYS}
+    monkeypatch.setattr(voicecatalog, "machine_serving_of", lambda engine: dict(serving))
+
 GIB = 1024 ** 3
 CUDA_RESERVE = 3 * GIB
 

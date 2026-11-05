@@ -3,14 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, cast
 
-from ... import accelerator, engines, jobenv, ttsplan, weights
+from ... import accelerator, engines, jobenv, ttsplan, voicerepo, weights
 from ...backend import MLX_DARWIN
 from ...cardkinds import KIND_TTS
 from ...clock import utcnow
 from ...config import Config
 from ...engines import EngineError, NarratorEngine, find_free_port, start_engine
 from ...errors import ApiError
-from ...narratorengines import DOCUMENT_READERS
+from ...narratorengines import DOCUMENT_READERS, HIGGS_V3
 from ...narratorvoices import not_served_here, write_document
 from ...residency import (
     DEFAULT_READY_TIMEOUT_SECONDS,
@@ -299,6 +299,16 @@ def require_loadable(
             f"declares {sorted(manifest.backends)}",
             {"voice": voice_id, "backend": backend_kind,
              "declared": sorted(manifest.backends)},
+        )
+    if manifest.narrator_engine == HIGGS_V3 and manifest.serving is None:
+        raise ApiError(
+            409,
+            "engine_footprint_unset",
+            f"cannot load {voice_id!r}: this server's config states no "
+            f"[tts.{HIGGS_V3}] table, so there is no serving width for it. The engine's "
+            "own voices take it from the box, as pinned voices do. "
+            f"{voicerepo.footprint_unset(HIGGS_V3)}",
+            {"voice": voice_id, "engine": HIGGS_V3},
         )
     unserved = not_served_here(manifest, backend_kind)
     if unserved is not None:

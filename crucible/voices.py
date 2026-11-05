@@ -750,7 +750,7 @@ def _check_clips(where: str, block: dict[str, Any], kind: str) -> Any:
 
 
 def _check_serving(
-    path: Path, voice: dict[str, Any], narrator_engine: str
+    path: Path, voice: dict[str, Any], narrator_engine: str, *, unsized: bool = False
 ) -> Serving | None:
     where = f"{path.name} [voice.serving]"
     block = voice.get("serving")
@@ -762,6 +762,10 @@ def _check_serving(
                 "nothing. Delete it rather than leaving a lever that reports "
                 "success"
             )
+        return None
+    if block is None and unsized:
+        # An engine's own row on a box that states no [tts.higgs-v3]: listed, and refused
+        # at load (jobs/tts/common.require_loadable) rather than sized from nothing.
         return None
     if block is None:
         raise VoiceError(
@@ -931,7 +935,7 @@ def _check_takes(
 
 
 def parse_document(
-    document: dict[str, Any], path: Path, expected_id: str
+    document: dict[str, Any], path: Path, expected_id: str, *, unsized: bool = False
 ) -> VoiceManifest:
     voice = _voice_table(document, path)
     weights_of = _check_weights_of(path, voice)
@@ -940,7 +944,7 @@ def parse_document(
     if "pace" in voice and not isinstance(voice["pace"], dict):
         raise VoiceError(f"{path.name}: [voice.pace] must be a table")
     pace = check_pace(f"{path.name} [voice.pace]", voice.get("pace", {}))
-    serving = _check_serving(path, voice, narrator_engine)
+    serving = _check_serving(path, voice, narrator_engine, unsized=unsized)
     backends = _check_backends(path, voice, pace)
     takes = _check_takes(path, voice, narrator_engine)
     chunk_gap = _check_chunk_gap(path, voice)
@@ -1279,7 +1283,9 @@ def parse_engine_base(
             )
         if machine_serving is not None:
             block = {**block, "serving": dict(machine_serving)}
-        manifest = parse_document({"voice": block}, path, voice_id)
+        manifest = parse_document(
+            {"voice": block}, path, voice_id, unsized=machine_serving is None
+        )
         if manifest.narrator_engine != engine:
             raise VoiceError(
                 f"{path.name}: [voices.{voice_id}] names narrator_engine "
