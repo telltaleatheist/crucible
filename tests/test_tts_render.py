@@ -785,7 +785,7 @@ def test_a_width_above_the_voices_serving_width_is_refused_never_clamped(
     fake_weights(VOICE)
     error = _refuse(tts_client, auth, width=32)
     assert error["code"] == "width_over_serving"
-    assert error["details"] == {"width": 32, "max_num_seqs": 16}
+    assert error["details"] == {"width": 32, "max_num_seqs": 12}
     assert "Never clamped" in error["message"]
 
 
