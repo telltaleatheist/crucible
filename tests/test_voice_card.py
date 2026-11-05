@@ -232,7 +232,7 @@ def test_the_machine_rows_it_drops_are_returned_so_nothing_is_lost_silently(
         uncertified=False,
     )
     joined = "\n".join(dropped)
-    assert "max_num_seqs = 16" in joined
+    assert "max_num_seqs = 12" in joined
     assert "memory_bytes_estimate = 19000000000" in joined
     assert "pins.toml [mistborn]" in joined
     assert manifest.spec("cuda-linux").hf_repo in joined

@@ -748,9 +748,9 @@ def test_init_writes_this_box_s_declared_numbers(tmp_path: Path) -> None:
     from crucible.config import load_config, write_config
     from crucible.narratorengines import declared_tts_footprints
 
-    for backend_kind, estimate in (
-        ("cuda-linux", 19_000_000_000),
-        ("mlx-darwin", 12_133_000_000),
+    for backend_kind, estimate, width in (
+        ("cuda-linux", 19_000_000_000, 12),
+        ("mlx-darwin", 12_133_000_000, 16),
     ):
         home = tmp_path / backend_kind
         write_config(
@@ -777,7 +777,7 @@ def test_init_writes_this_box_s_declared_numbers(tmp_path: Path) -> None:
         assert found is not None
         assert found.memory_bytes_estimate == estimate
         assert found.estimate_basis == "declared"
-        assert found.max_num_seqs == 16
+        assert found.max_num_seqs == width
         assert "2026-09-05" in found.estimate_note
         assert "vllm-omni" in found.max_num_seqs_note
 

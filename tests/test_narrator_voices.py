@@ -21,7 +21,7 @@ from crucible.voicecatalog import load_all_voices
 from crucible.voicereference import ClipEntry, parse_reference, reference_path
 from crucible.voices import parse_voice
 
-from .conftest import wav_bytes
+from .conftest import configure_box, wav_bytes
 from .test_voices import GOOD
 
 CUDA = "cuda-linux"
@@ -328,7 +328,8 @@ def _assert_band_is_the_manifest(entry: dict, manifest) -> None:
     assert entry["minCharsPerSec"] == manifest.pace.min_chars_per_sec
 
 
-def test_the_unmeasured_voices_send_narrator_no_band_at_all(tmp_path: Path) -> None:
+def test_the_unmeasured_voices_send_narrator_no_band_at_all(tmp_path: Path, home: Path) -> None:
+    configure_box(home, enable_tts=True)
     clip = a_clip(tmp_path)
     catalog = load_all_voices()
     for voice_id in ("higgs-default", "zeroshot"):
@@ -347,8 +348,9 @@ def test_the_unmeasured_voices_send_narrator_no_band_at_all(tmp_path: Path) -> N
 
 
 def test_every_shipped_higgs_voice_writes_an_entry_on_the_arm_it_can(
-    tmp_path: Path,
+    tmp_path: Path, home: Path,
 ) -> None:
+    configure_box(home, enable_tts=True)
     refused: list[tuple[str, str]] = []
     written: list[tuple[str, str]] = []
     clip = a_clip(tmp_path)

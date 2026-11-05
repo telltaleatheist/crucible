@@ -8,10 +8,6 @@ sample_rate = 24000
 
 [voices."higgs-default".pace]
 
-[voices."higgs-default".serving]
-max_num_seqs = 16
-max_num_seqs_note = """16 is vllm-omni's OWN stage-0 value in higgs_multimodal_qwen3.yaml, and it is ALSO a measured ceiling at the shipped memory fractions: on owens-pc (RTX 3090 Ti, 2026-09-05) 16 concurrent at 0.35 + 0.10 ran 11,387-11,584 chars/min over three runs while 32 filled the card and stalled. It replaced a 2 that was never anything but a placeholder and reached nothing until 2026-09-05, so no measurement was ever taken against it. THE deathstalker CAP CERTIFICATE RAN AT 64, at the older fractions and before that stall was measured, so 16 is not the width its cap was certified at; nothing measured says whether batch width moves the safe chunk length, and if it does, that certificate is bound to 64 and this is the field that would have to change. It is also the width of narrator's own batch (v3_served.serve_concurrency), so raising it raises concurrent POSTs and VRAM pressure together. Translated from BookForge's electron/data/higgs-models.json serving._maxNumSeqsNote, where it was measured."""
-
 [voices."higgs-default".backends.cuda-linux]
 hf_repo = "bosonai/higgs-tts-3-4b"
 revision = "239f63fb7b02b1aa085f98d9efae5e35cc5523e8"
@@ -50,10 +46,6 @@ sample_rate = 24000
 
 [voices."zeroshot".pace]
 target_chars = 600
-[voices."zeroshot".serving]
-max_num_seqs = 16
-max_num_seqs_note = """16 is vllm-omni's OWN stage-0 value in higgs_multimodal_qwen3.yaml, and it is ALSO a measured ceiling at the shipped memory fractions: on owens-pc (RTX 3090 Ti, 2026-09-05) 16 concurrent at 0.35 + 0.10 ran 11,387-11,584 chars/min over three runs while 32 filled the card and stalled. It replaced a 2 that was never anything but a placeholder and reached nothing until 2026-09-05, so no measurement was ever taken against it. THE deathstalker CAP CERTIFICATE RAN AT 64, at the older fractions and before that stall was measured, so 16 is not the width its cap was certified at; nothing measured says whether batch width moves the safe chunk length, and if it does, that certificate is bound to 64 and this is the field that would have to change. It is also the width of narrator's own batch (v3_served.serve_concurrency), so raising it raises concurrent POSTs and VRAM pressure together. Translated from BookForge's electron/data/higgs-models.json serving._maxNumSeqsNote, where it was measured."""
-
 [voices."zeroshot".backends.cuda-linux]
 hf_repo = "bosonai/higgs-tts-3-4b"
 revision = "239f63fb7b02b1aa085f98d9efae5e35cc5523e8"

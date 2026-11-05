@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import tomllib
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from . import voicerefs, voicerepo
-from .config import crucible_home
-from .narratorengines import NARRATOR_ENGINE_SAMPLING
+from .config import crucible_home, tts_engine_footprints
+from .errors import ConfigError
+from .narratorengines import HIGGS_V3, NARRATOR_ENGINE_SAMPLING
 from .voices import (
     MANIFEST_OVERRIDE,
     MANIFEST_REPO,
     PINS_FILE,
+    SERVING_KEYS,
     VoiceError,
     VoiceManifest,
     engine_voices_path,
@@ -58,11 +61,24 @@ def load_voice(voice_id: str, directory: Path | None = None) -> VoiceManifest:
 def unserved_pins() -> dict[str, tuple[str, str]]:
     _, refused = voicerepo.load_pinned()
     served = load_all_voices()
-    return {
+    unserved = {
         voice_id: (pin.revision, why)
         for voice_id, (pin, why) in refused.items()
         if voice_id not in served
     }
+    if not voices_dir_is_overridden():
+        for engine in sorted(NARRATOR_ENGINE_SAMPLING):
+            rows = _engine_base_rows(engine)
+            for voice_id, why in refused_engine_voices().items():
+                if voice_id in served or voice_id not in rows:
+                    continue
+                arms = rows[voice_id].get("backends", {})
+                revisions = sorted(
+                    {str(arm["revision"]) for arm in arms.values()
+                     if isinstance(arm, dict) and "revision" in arm}
+                )
+                unserved[voice_id] = (", ".join(revisions), why)
+    return unserved
 
 
 def voice_aliases_of(base: VoiceManifest) -> tuple[VoiceManifest, ...]:
@@ -72,11 +88,15 @@ def voice_aliases_of(base: VoiceManifest) -> tuple[VoiceManifest, ...]:
 
 
 def declared_voice_ids() -> set[str]:
-    return {*voicerepo.packaged_pins(), *engine_voices(), *voices_in(voices_dir())}
+    return {*voicerepo.packaged_pins(), *_declared_engine_ids(), *voices_in(voices_dir())}
 
 
 def declared_voice_backends(voice_id: str, home: Path | None = None) -> list[str]:
-    shipped = {**engine_voices(), **voices_in(voices_dir())}
+    for engine in sorted(NARRATOR_ENGINE_SAMPLING):
+        row = _engine_base_rows(engine).get(voice_id)
+        if isinstance(row, dict):
+            return sorted(row.get("backends", {}))
+    shipped = voices_in(voices_dir())
     if voice_id in shipped:
         return sorted(shipped[voice_id].backends)
     pin = voicerepo.packaged_pins().get(voice_id)
@@ -88,18 +108,86 @@ def declared_voice_backends(voice_id: str, home: Path | None = None) -> list[str
     return sorted(voicerepo.parse_repo_manifest(text, where).arms)
 
 
+def _declared_engine_ids() -> set[str]:
+    return {
+        voice_id
+        for engine in sorted(NARRATOR_ENGINE_SAMPLING)
+        for voice_id in _engine_base_rows(engine)
+    }
+
+
 def engine_voices() -> dict[str, VoiceManifest]:
-    found: dict[str, VoiceManifest] = {}
+    return load_engine_voices()[0]
+
+
+def refused_engine_voices() -> dict[str, str]:
+    return load_engine_voices()[1]
+
+
+def _engine_base_text(engine: str) -> tuple[str, Path] | None:
+    path = engine_voices_path(engine)
+    if not path.is_file():
+        return None
+    try:
+        return path.read_text(encoding="utf-8"), path
+    except OSError as exc:
+        raise VoiceError(f"could not read {path}: {exc}") from exc
+
+
+def _engine_base_rows(engine: str) -> dict[str, Any]:
+    """The base file's rows as written: what the engine DECLARES, which does not depend on
+    whether this machine can size them."""
+    found = _engine_base_text(engine)
+    if found is None:
+        return {}
+    text, path = found
+    try:
+        rows = tomllib.loads(text).get("voices")
+    except tomllib.TOMLDecodeError as exc:
+        raise VoiceError(f"{path}: not valid TOML: {exc}") from exc
+    return rows if isinstance(rows, dict) else {}
+
+
+def load_engine_voices() -> tuple[dict[str, VoiceManifest], dict[str, str]]:
+    """The engine's own rows this machine serves, and the ones it cannot with why. A Higgs v3
+    row's serving width comes from this machine's [tts.higgs-v3] footprint, the one owner
+    every pinned voice reads too (voicerepo.voice_for_pin); a machine that states none sizes
+    none of them, and says so in the same words."""
+    served: dict[str, VoiceManifest] = {}
+    refused: dict[str, str] = {}
     for engine in sorted(NARRATOR_ENGINE_SAMPLING):
-        path = engine_voices_path(engine)
-        if not path.is_file():
+        found = _engine_base_text(engine)
+        if found is None:
             continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise VoiceError(f"could not read {path}: {exc}") from exc
-        found.update(parse_engine_base(text, path, engine))
-    return found
+        text, path = found
+        machine_serving: dict[str, Any] | None = None
+        if engine == HIGGS_V3:
+            machine_serving, why = _machine_serving(engine)
+            if machine_serving is None:
+                for voice_id in sorted(_engine_base_rows(engine)):
+                    refused[voice_id] = why.replace("{voice}", repr(voice_id))
+                continue
+        served.update(parse_engine_base(text, path, engine, machine_serving))
+    return served, refused
+
+
+def _machine_serving(engine: str) -> tuple[dict[str, Any] | None, str]:
+    try:
+        footprint = tts_engine_footprints(crucible_home()).get(engine)
+    except ConfigError as exc:
+        return None, (
+            "config_unreadable: voice {voice} cannot be sized because this "
+            f"machine's config did not read: {exc}"
+        )
+    if footprint is None:
+        return None, (
+            "engine_footprint_unset: voice {voice} is served by "
+            f"{engine!r} and this server's config states no [tts.{engine}] table, so "
+            "there is no serving width for it. The engine's own voices take it from the "
+            f"box, as pinned voices do. {voicerepo.footprint_unset(engine)}"
+        )
+    facts = footprint.to_dict()
+    return {key: value for key, value in facts.items() if key in SERVING_KEYS}, ""
 
 
 def voices_in(root: Path) -> dict[str, VoiceManifest]:

@@ -1239,7 +1239,16 @@ def parse_voice(text: str, path: Path, expected_id: str) -> VoiceManifest:
     return parse_document(document, path, expected_id)
 
 
-def parse_engine_base(text: str, path: Path, engine: str) -> dict[str, VoiceManifest]:
+def parse_engine_base(
+    text: str,
+    path: Path,
+    engine: str,
+    machine_serving: dict[str, Any] | None = None,
+) -> dict[str, VoiceManifest]:
+    """The engine's own rows. A Higgs v3 row states no [serving]: the serving width is the
+    BOX's fact (the machine's [tts.higgs-v3] footprint), as it is for every pinned voice
+    (voicerepo.merge), so `machine_serving` is put in, and a row that states its own is
+    refused as a second owner of it."""
     try:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -1261,6 +1270,15 @@ def parse_engine_base(text: str, path: Path, engine: str) -> dict[str, VoiceMani
         block = table[voice_id]
         if not isinstance(block, dict):
             raise VoiceError(f"{path.name}: [voices.{voice_id}] must be a table")
+        if "serving" in block:
+            raise VoiceError(
+                f"{path.name}: [voices.{voice_id}] states a [serving] table. A base "
+                "row's serving width is this machine's, read from its "
+                f"[tts.{engine}] table like every pinned voice's, so a width here "
+                "would be a second owner of it"
+            )
+        if machine_serving is not None:
+            block = {**block, "serving": dict(machine_serving)}
         manifest = parse_document({"voice": block}, path, voice_id)
         if manifest.narrator_engine != engine:
             raise VoiceError(
