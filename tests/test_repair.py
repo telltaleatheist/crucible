@@ -525,6 +525,23 @@ def test_a_cancel_between_subjects_stops_before_the_next(
     assert s.pulls == []
 
 
+def test_a_pin_the_hub_no_longer_has_says_so_and_deletes_nothing(
+    box: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Mac's qwen3.5-4b-bside and deathstalker, 2026-11-05: a good login, and a 404."""
+    import huggingface_hub
+
+    gone = RuntimeError("404 Client Error")
+    gone.response = SimpleNamespace(status_code=404)  # type: ignore[attr-defined]
+
+    def model_info(*_a: Any, **_k: Any) -> None:
+        raise gone
+
+    monkeypatch.setattr(huggingface_hub.HfApi, "model_info", model_info)
+    with pytest.raises(repair.HubUnreachable, match="neither checked nor fetched again"):
+        repair.hub_files(box.config, "org/repo", "abc123")
+
+
 def test_a_hub_that_cannot_be_asked_deletes_nothing(
     box: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:

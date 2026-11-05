@@ -387,6 +387,14 @@ def hub_files(config: Config, hf_repo: str, revision: str) -> dict[str, HubFile]
             hf_repo, revision=revision, files_metadata=True, timeout=60
         )
     except Exception as exc:  # noqa: BLE001 (every way of not getting an answer is the same answer)
+        if getattr(getattr(exc, "response", None), "status_code", None) == 404:
+            # With a good login this is an answer, and a serious one: this machine may hold the
+            # only copy. Nothing here can check it or fetch it again, so nothing here deletes it.
+            raise HubUnreachable(
+                f"the hub has no {hf_repo}@{revision[:12]} any more (or this login cannot see "
+                "it), so this copy can be neither checked nor fetched again; repin it to what "
+                "the hub holds, or upload it"
+            ) from exc
         raise HubUnreachable(f"could not ask the hub about {hf_repo}@{revision[:12]}: {exc}") from exc
     found: dict[str, HubFile] = {}
     for sibling in info.siblings or []:
