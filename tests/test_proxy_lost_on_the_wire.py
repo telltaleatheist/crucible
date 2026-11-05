@@ -95,7 +95,11 @@ def test_the_budget_is_stated_attempts_and_the_502_says_so(
         error = response.json()["error"]
         assert error["code"] == "engine_unreachable"
         assert f"on {WIRE_ATTEMPTS} attempts" in error["message"]
-        assert any(kind.__name__ in error["message"] for kind in LOST_ON_THE_WIRE), error
+        # The kinds are base classes; what is named is the one raised (a ReadError on a Mac).
+        named = {
+            sub.__name__ for kind in LOST_ON_THE_WIRE for sub in (kind, *kind.__subclasses__())
+        }
+        assert any(name in error["message"] for name in named), error
         assert len(engines[0]._handler.requests) == WIRE_ATTEMPTS
 
 

@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if (( BASH_VERSINFO[0] < 4 )); then
+  echo "deploy: this needs bash 4 or newer (declare -A), and this is $BASH_VERSION, the one a Mac ships. brew install bash, then run it again" >&2
+  exit 2
+fi
+
 REPO_SLUG="telltaleatheist/crucible"
 
 FLEET="pc mac"

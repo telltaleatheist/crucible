@@ -468,6 +468,7 @@ def test_a_missing_env_is_installed_on_submit(
         assert started.request["module"]["job_types"] == [{"type": "audio"}]
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="the worker reads /proc; a Mac has no OOM killer to watch")
 def test_a_song_reports_the_workers_host_memory_before_and_after(
     ready: TestClient, auth: dict[str, str]
 ) -> None:

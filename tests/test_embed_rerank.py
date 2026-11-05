@@ -437,7 +437,11 @@ def test_what_the_model_s_format_says_no_to_is_refused_by_name(body: dict, code:
     assert caught.value.code == code
 
 
-def test_the_fingerprint_names_everything_that_changes_a_float() -> None:
+def test_the_fingerprint_names_everything_that_changes_a_float(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # It names cuda-linux's pinned build, wherever these tests run.
+    monkeypatch.setattr(embed.hosttools, "host_platform", lambda: "linux-x86_64")
     resident = _resident()
     identity = embed.identity(resident, load_manifest(EMBED), "cuda-linux")
     assert identity.file == "qwen3-embedding-8b-bf16.gguf" and identity.bits == 16

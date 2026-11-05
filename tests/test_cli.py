@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import os
 from pathlib import Path
 from urllib.parse import quote
@@ -713,7 +714,8 @@ def test_every_doctor_problem_names_a_command_to_run(
     assert cli.main(["doctor", "--json"]) == 1
     report = json.loads(capsys.readouterr().out)
     absent = [p for p in report["problems"] if p.startswith("no_viable_backend")]
-    assert len(absent) == 1 and "driver" in absent[0]
+    says = "driver" if sys.platform == "linux" else "Apple silicon"
+    assert len(absent) == 1 and says in absent[0]
 
 
 def test_every_backticked_crucible_command_in_the_tree_exists() -> None:
