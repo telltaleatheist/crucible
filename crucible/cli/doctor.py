@@ -792,21 +792,48 @@ def check_job_types(host: Host) -> Section:
 
 
 def check_desktop_reserve(host: Host) -> Section:
+    """The desktop's reserve against what the ladder's card rung saw the desktop hold.
+
+    A desktop seen holding MORE than its reserve is a problem whatever the reserve's basis:
+    every model is chosen against the card less the reserve, and a load is planned against
+    what the card has free, so the difference is memory a chosen model was counted on and
+    the card does not have. Victoria's laptop, 2026-11-04: a 5-second sample at install
+    (2026-10-09) saw her desktop idle at 0.00 GiB and kept the 1 GiB floor; the ladder saw
+    it at 1.6-1.9 GiB on 2026-10-24, and qwen3.5-4b-8bit, picked against 7.0 GiB, could not
+    load ("This card affords 0 tokens"). A reserve that was never measured and is larger
+    than the ladder's sighting would keep is noted, as before."""
     config, backend = host.config, host.backend
     if config is None or backend is None:
         return Section("desktop_reserve", {})
-    if config.desktop_allowance_basis == DESKTOP_BASIS_MEASURED:
-        return Section("desktop_reserve", {})
     card_rung = ((host.ladder or {}).get("rungs") or {}).get(cardfacts.CARD)
-    seen = ((card_rung or {}).get("facts") or {}).get("desktop_bytes_max")
+    facts = (card_rung or {}).get("facts") or {}
+    seen = facts.get("desktop_bytes_max")
     if not isinstance(seen, int):
         return Section("desktop_reserve", {})
+    reserve = config.desktop_allowance_bytes
+    if seen > reserve:
+        on = str((card_rung or {}).get("measured_at") or "")[:10]
+        return Section("desktop_reserve", {}, findings=(Finding(
+            "desktop_over_reserve",
+            f"the ladder saw this desktop hold up to {gib_text(seen, 2)}"
+            + (f" on {on}" if on else "")
+            + f", {gib_text(seen - reserve, 2)} more than its "
+            f"{gib_text(reserve, 2)} reserve ({config.desktop_allowance_basis}"
+            + (f": {config.desktop_allowance_note}" if config.desktop_allowance_note else "")
+            + "). Models are chosen against the card less the reserve and loaded against "
+            "what is free, so a model chosen here can find the card short and be refused "
+            "(insufficient_kv_cache)",
+            "with the desktop in its everyday use (its usual apps open), `crucible "
+            "capability --measure-desktop`, then `crucible capability --write`",
+        ),))
+    if config.desktop_allowance_basis == DESKTOP_BASIS_MEASURED:
+        return Section("desktop_reserve", {})
     would = ladder.desktop_allowance_from(seen)
-    if would >= config.desktop_allowance_bytes:
+    if would >= reserve:
         return Section("desktop_reserve", {})
     return Section("desktop_reserve", {}, notes=(
         f"desktop_reserve_unmeasured: the reserve is "
-        f"{gib_text(config.desktop_allowance_bytes)} "
+        f"{gib_text(reserve)} "
         f"({config.desktop_allowance_basis}); the ladder saw this "
         f"desktop at up to {gib_text(seen)}, which would keep "
         f"{gib_text(would)}. `crucible capability "

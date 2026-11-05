@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- An `insufficient_kv_cache` refusal now names the term that binds. When the card's free memory sets the engine's budget, it says what the desktop and other processes hold, how far over the desktop's allowance that is, the 0.94 GiB vLLM's own CUDA context takes, and how much free memory the load needs at that context. Before, it always said "the desktop's allowance is 1.00 GiB, so the engine's budget is 5.44 GiB", which blamed the allowance for a budget that came from free memory (Victoria's RTX 3070 Laptop, 2026-11-04: qwen3.5-4b-8bit, "This card affords 0 tokens", with her desktop holding 1.63 GiB). `crucible doctor` now reports `desktop_over_reserve` when the ladder's card rung saw the desktop hold more than its reserve, whatever the reserve's basis. Her reserve was a 5-second sample of an idle desktop (0.00 GiB, kept as the 1 GiB floor), and the ladder had seen 1.6-1.9 GiB since 2026-10-24 without anything saying so.
+
 - On cuda-linux, `crucible init` now writes `[tts.higgs-v3] max_num_seqs = 12` instead of 16. On owens-pc (RTX 3090 Ti), 2026-11-02, a Higgs fine-tune at 16 in flight with narrator's fp32 vocoder held 22,290 MiB and spilled ~0.45 GiB to shared memory, the WDDM paging measured in September as 4-10x slower. 12 is chosen to fit and is not yet speed-measured. The `memory_bytes_estimate` stays 19e9, now noted as known low: the 16-wide reading (23.4e9) would refuse loads whenever the desktop holds more than ~2.4 GB. Existing machines keep their own `[tts.higgs-v3]`; owens-pc was set to 12 through `PUT /v1/settings/tts/higgs-v3`. The built-in `higgs-default` and `zeroshot` voices still carry 16 in `engines/higgs-v3/base.toml`, whose `[voice.serving]` is shared by both arms.
 
 ## 2.0.34 — 2026-10-29

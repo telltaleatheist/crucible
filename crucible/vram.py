@@ -64,27 +64,65 @@ class KvPlan:
 
     @property
     def fits(self) -> bool:
-        return self.pool_bytes >= self.kv_bytes_per_token * (
-            self.context + VLLM_SEQUENCE_SLACK_TOKENS
-        )
+        return self.pool_bytes >= self.request_kv_bytes
 
     @property
     def affordable_context(self) -> int:
         return max(0, self.pool_bytes // self.kv_bytes_per_token - VLLM_SEQUENCE_SLACK_TOKENS)
 
+    @property
+    def free_binds(self) -> bool:
+        """The card's free memory, not the desktop's allowance, set the budget: the desktop
+        and whatever else is on the card hold more than the allowance plus vLLM's context."""
+        return self.budget_bytes < self.total_bytes - self.desktop_allowance_bytes
+
+    @property
+    def request_kv_bytes(self) -> int:
+        return self.kv_bytes_per_token * (self.context + VLLM_SEQUENCE_SLACK_TOKENS)
+
+    @property
+    def free_needed_bytes(self) -> int:
+        """What the card must have free for this load at this context."""
+        return self.fixed_bytes + VLLM_CUDA_CONTEXT_BYTES + self.request_kv_bytes
+
     def sentence(self) -> str:
-        return (
+        held = self.total_bytes - self.free_bytes
+        if self.free_binds:
+            over = held - self.desktop_allowance_bytes
+            budget_words = (
+                f"the card has {_gib(self.free_bytes)} free of {_gib(self.total_bytes)}: "
+                f"the desktop and other processes hold {_gib(held)}, "
+                + (
+                    f"{_gib(over)} more than the desktop's {_gib(self.desktop_allowance_bytes)} "
+                    "allowance"
+                    if over > 0
+                    else f"within the desktop's {_gib(self.desktop_allowance_bytes)} allowance"
+                )
+                + f", and vLLM's own CUDA context takes {_gib(VLLM_CUDA_CONTEXT_BYTES)}, so "
+                f"the engine's budget is {_gib(self.budget_bytes)}"
+            )
+        else:
+            budget_words = (
+                f"the card is {_gib(self.total_bytes)} and the desktop's allowance is "
+                f"{_gib(self.desktop_allowance_bytes)}, so the engine's budget is "
+                f"{_gib(self.budget_bytes)}"
+            )
+        sentence = (
             f"cannot give {self.model_id} a KV cache at {self.context} tokens: "
-            f"the card has {_gib(self.free_bytes)} free of "
-            f"{_gib(self.total_bytes)} and the desktop's allowance is "
-            f"{_gib(self.desktop_allowance_bytes)}, so the engine's budget is "
-            f"{_gib(self.budget_bytes)}; {_gib(self.fixed_bytes)} of that is "
-            f"weights and overhead, leaving {_gib(self.pool_bytes)} for KV where "
-            f"one request of {self.context} tokens needs "
-            f"{_gib(self.kv_bytes_per_token * self.context)} at "
-            f"{self.kv_bytes_per_token:_} B/token ({self.basis}). "
-            f"This card affords {self.affordable_context:_} tokens"
+            f"{budget_words}; {_gib(self.fixed_bytes)} of that is weights and overhead, "
+            f"leaving {_gib(self.pool_bytes)} for KV where one request of {self.context} "
+            f"tokens needs {_gib(self.request_kv_bytes)} at {self.kv_bytes_per_token:_} "
+            f"B/token ({self.basis}), its {VLLM_SEQUENCE_SLACK_TOKENS} tokens of slack "
+            f"included. This card affords {self.affordable_context:_} tokens"
         )
+        if self.free_binds:
+            short = self.free_needed_bytes - self.free_bytes
+            sentence += (
+                f"; {self.model_id} needs {_gib(self.free_needed_bytes)} free at "
+                f"{self.context} tokens, {_gib(short)} more than the card has, so free "
+                "that much on the card or use a smaller model"
+            )
+        return sentence
 
     def detail(self) -> str:
         held = f" x {self.concurrency} in flight" if self.concurrency else ""
