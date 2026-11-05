@@ -176,3 +176,123 @@ def test_the_progress_line_round_trips() -> None:
 def test_an_unknown_total_stays_null_rather_than_zero() -> None:
     parsed = interpreter.parse_progress_line(interpreter.progress_line(5, None, "f"))
     assert parsed == {"bytes_done": 5, "bytes_total": None, "file": "f"}
+
+
+# ── fetch: a dropped download is continued, not restarted ─────────────────────
+
+import http.server
+import threading
+from contextlib import contextmanager
+from typing import Iterator
+
+
+class _Blob(http.server.BaseHTTPRequestHandler):
+    """Serves `blob`, honouring `Range: bytes=N-`. Each request's behaviour is the next entry
+    of `plan`: ("cut", n) cuts the connection after n body bytes, "whole" ignores the Range
+    and sends everything, ("status", code) answers with that code, None sends what was asked."""
+
+    blob = b""
+    plan: list = []
+    seen: list = []
+
+    def do_GET(self) -> None:  # noqa: N802
+        start = 0
+        ranged = self.headers.get("Range")
+        if ranged is not None:
+            start = int(ranged.removeprefix("bytes=").removesuffix("-"))
+        self.seen.append(ranged)
+        step = self.plan.pop(0) if self.plan else None
+        if isinstance(step, tuple) and step[0] == "status":
+            self.send_error(step[1])
+            return
+        if step == "whole":
+            start, ranged = 0, None
+        body = self.blob[start:]
+        self.send_response(206 if ranged is not None else 200)
+        self.send_header("Content-Length", str(len(body)))
+        if ranged is not None:
+            self.send_header("Content-Range", f"bytes {start}-{len(self.blob) - 1}/{len(self.blob)}")
+        self.end_headers()
+        if isinstance(step, tuple) and step[0] == "cut":
+            self.wfile.write(body[: step[1]])
+            self.wfile.flush()
+            self.close_connection = True
+            return
+        self.wfile.write(body)
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+@contextmanager
+def _serving(blob: bytes, plan: list) -> Iterator[tuple[str, list]]:
+    handler = type("Handler", (_Blob,), {"blob": blob, "plan": list(plan), "seen": []})
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/blob", handler.seen
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+BLOB = bytes(range(256)) * 4096  # 1 MiB, every offset distinguishable
+
+
+def test_a_dropped_download_continues_from_the_bytes_it_has(tmp_path: Path) -> None:
+    target = tmp_path / "image.tar.gz"
+    pauses: list[float] = []
+    with _serving(BLOB, [("cut", 300_000), ("cut", 200_000), None]) as (url, seen):
+        interpreter.fetch(url, target, chunk=65536, sleep=pauses.append)
+    assert target.read_bytes() == BLOB
+    assert seen == [None, "bytes=300000-", "bytes=500000-"], "each try asked only for the rest"
+    assert pauses == [interpreter.FETCH_PAUSE_S] * 2, "every drop was waited on, not hammered"
+    assert not interpreter.partial_path(target).exists()
+
+
+def test_a_killed_fetch_is_continued_by_the_next_one(tmp_path: Path) -> None:
+    target = tmp_path / "wheel.whl"
+    interpreter.partial_path(target).write_bytes(BLOB[:123_456])
+    with _serving(BLOB, [None]) as (url, seen):
+        interpreter.fetch(url, target, sleep=lambda s: None)
+    assert target.read_bytes() == BLOB
+    assert seen == ["bytes=123456-"]
+
+
+def test_a_server_that_ignores_the_range_starts_the_file_over(tmp_path: Path) -> None:
+    target = tmp_path / "x.bin"
+    interpreter.partial_path(target).write_bytes(b"stale bytes that are not a prefix")
+    with _serving(BLOB, ["whole"]) as (url, _seen):
+        interpreter.fetch(url, target, sleep=lambda s: None)
+    assert target.read_bytes() == BLOB
+
+
+def test_kept_bytes_the_server_cannot_continue_are_dropped_and_fetched_again(tmp_path: Path) -> None:
+    target = tmp_path / "x.bin"
+    interpreter.partial_path(target).write_bytes(BLOB)  # already whole: the Range is unsatisfiable
+    with _serving(BLOB, [("status", 416), None]) as (url, seen):
+        interpreter.fetch(url, target, sleep=lambda s: None)
+    assert target.read_bytes() == BLOB
+    assert seen == [f"bytes={len(BLOB)}-", None]
+
+
+def test_a_404_ends_the_fetch_at_once_and_is_not_waited_on(tmp_path: Path) -> None:
+    pauses: list[float] = []
+    with _serving(BLOB, [("status", 404)]) as (url, seen):
+        with pytest.raises(InterpreterError) as caught:
+            interpreter.fetch(url, tmp_path / "x.bin", sleep=pauses.append)
+    assert caught.value.code == "interpreter_download_failed"
+    assert "HTTP 404" in caught.value.message
+    assert pauses == [] and len(seen) == 1
+
+
+def test_a_budget_spent_keeps_the_bytes_and_says_where(tmp_path: Path) -> None:
+    target = tmp_path / "x.bin"
+    with _serving(BLOB, [("cut", 100_000)] * 3) as (url, _seen):
+        with pytest.raises(InterpreterError) as caught:
+            interpreter.fetch(url, target, attempts=3, chunk=65536, sleep=lambda s: None)
+    kept = interpreter.partial_path(target)
+    assert kept.stat().st_size == 300_000
+    assert str(kept) in caught.value.message and "continues from them" in caught.value.message
+    assert not target.exists()

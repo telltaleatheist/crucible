@@ -11,6 +11,7 @@ from typing import Callable, Mapping, Sequence
 
 import pytest
 
+from crucible import interpreter
 from crucible import wsl
 from crucible.host import app as app_module
 from crucible.host import catalog as catalog_module
@@ -699,7 +700,9 @@ def test_the_ubuntu_image_download_emits_pulls_own_byte_shape(tmp_path: Path) ->
         walk._import_distro()
     url, _destination, attempts = runner.downloads[0]
     assert url.endswith("ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz")
-    assert attempts == installer.IMAGE_DOWNLOAD_ATTEMPTS == 3, "curl's --retry 3, kept"
+    assert attempts == installer.IMAGE_DOWNLOAD_ATTEMPTS == interpreter.FETCH_ATTEMPTS, (
+        "a dropped image download is waited on and continued, on the shared budget"
+    )
     progress = [event for event in events if event.event == "progress"]
     assert progress, "the image downloaded and nothing said how far it had got"
     assert set(progress[0].data) == {"bytes_done", "bytes_total", "file"}, (

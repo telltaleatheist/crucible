@@ -1032,7 +1032,7 @@ def _build_venv(
             f"`python -m venv {directory}` returned 0 but there is no {python}"
         )
     _run(
-        [str(python), "-m", "pip", "install", "--upgrade", "pip", "wheel"],
+        [str(python), "-m", "pip", "install", "--upgrade", PIP_FLOOR, "wheel"],
         f"could not upgrade pip in the {spec.job_type} env",
         on_line,
     )
@@ -1386,6 +1386,19 @@ class PipFailure:
         return self.last_error
 
 
+# A dropped connection mid-wheel is weather (Owen, 2026-11-04: a dropped connection mid
+# multi-GB env "resumes, not restarts"). pip 25.1 is the first that continues a broken
+# download from its bytes (`--resume-retries`); the venv's bundled pip is older, so the first
+# thing a new env does is upgrade to at least it, and every pip run is told the budget through
+# its own PIP_* environment: 30 resumes of one file, 10 retries of a connection, 60 s a stall.
+PIP_FLOOR = "pip>=25.1"
+PIP_NETWORK: dict[str, str] = {
+    "PIP_RESUME_RETRIES": "30",
+    "PIP_RETRIES": "10",
+    "PIP_TIMEOUT": "60",
+}
+
+
 def _run(command: list[str], failure: str, on_line: Any) -> None:
     process = subprocess.Popen(
         command,
@@ -1393,7 +1406,7 @@ def _run(command: list[str], failure: str, on_line: Any) -> None:
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
-        env=build_environment(),
+        env={**build_environment(), **PIP_NETWORK},
     )
     tail: list[str] = []
     watch = PipFailure()

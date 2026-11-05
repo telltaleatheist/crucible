@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import errno
+import http.client
 import json
 import shutil
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -129,6 +132,24 @@ def parse_progress_line(line: str) -> dict[str, Any] | None:
     return payload
 
 
+# A dropped download is weather (Owen, 2026-11-04: "resumable downloads ... a dropped
+# connection mid multi-GB env resumes, not restarts"): it is continued from the bytes already
+# on disk, FETCH_PAUSE_S apart, up to FETCH_ATTEMPTS tries, about five minutes of no network.
+FETCH_ATTEMPTS = 30
+FETCH_PAUSE_S = 10.0
+PARTIAL_SUFFIX = ".partial"
+# Answers that are the request's fault, not the network's: a later try gets the same answer.
+_NOT_WEATHER = frozenset({400, 401, 403, 404, 405, 410})
+
+
+class _Weather(InterpreterError):
+    """A try that failed for a reason a later try may not meet."""
+
+
+def partial_path(destination: Path) -> Path:
+    return destination.with_name(destination.name + PARTIAL_SUFFIX)
+
+
 def fetch(
     url: str,
     destination: Path,
@@ -136,41 +157,66 @@ def fetch(
     on_progress: ProgressHook | None = None,
     timeout: int = 120,
     chunk: int = 1 << 20,
-    attempts: int = 1,
+    attempts: int = FETCH_ATTEMPTS,
+    pause_s: float = FETCH_PAUSE_S,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> None:
+    """Download `url` to `destination`, resuming: the bytes land in `<destination>.partial`,
+    which a failed try (and a killed process) leaves where it is, and the next try asks for
+    the rest with a Range request. Only a finished transfer is renamed to `destination`; the
+    caller's digest check says whether the bytes are right. An answer that is the request's
+    fault (a 404) ends the fetch at once; anything else is waited on."""
     if attempts < 1:
         raise InterpreterError(
             "interpreter_download_failed",
             f"attempts={attempts} is not a number of tries; a download that is "
             "not attempted has not failed either.",
         )
+    partial = partial_path(destination)
+    destination.unlink(missing_ok=True)
     last: InterpreterError | None = None
     for attempt in range(attempts):
         try:
-            _fetch_once(url, destination, on_progress=on_progress, timeout=timeout, chunk=chunk)
-            return
-        except InterpreterError as exc:
+            _fetch_once(url, partial, on_progress=on_progress, timeout=timeout, chunk=chunk)
+        except _Weather as exc:
             last = exc
             if attempt + 1 < attempts:
-                destination.unlink(missing_ok=True)
+                sleep(pause_s)
+            continue
+        partial.replace(destination)
+        return
     assert last is not None
-    raise last
+    have = partial.stat().st_size if partial.exists() else 0
+    raise InterpreterError(
+        "interpreter_download_failed",
+        f"{last.message}; after {attempts} tries {pause_s:g} s apart, {have:_} bytes are kept "
+        f"at {partial} and the next attempt continues from them",
+    )
 
 
 def _fetch_once(
     url: str,
-    destination: Path,
+    partial: Path,
     *,
     on_progress: ProgressHook | None = None,
     timeout: int = 120,
     chunk: int = 1 << 20,
 ) -> None:
+    have = partial.stat().st_size if partial.exists() else 0
+    request = urllib.request.Request(url)
+    if have > 0:
+        request.add_header("Range", f"bytes={have}-")
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
-            total_header = response.headers.get("Content-Length")
-            total = int(total_header) if total_header is not None else None
-            done = 0
-            with destination.open("wb") as handle:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            length_header = response.headers.get("Content-Length")
+            length = int(length_header) if length_header is not None else None
+            if response.status == 206 and have > 0:
+                done, mode = have, "ab"
+            else:
+                # A 200 is the whole file: the server ignored the Range, so it starts over.
+                done, mode = 0, "wb"
+            total = None if length is None else done + length
+            with partial.open(mode) as handle:
                 while True:
                     block = response.read(chunk)
                     if not block:
@@ -178,15 +224,41 @@ def _fetch_once(
                     handle.write(block)
                     done += len(block)
                     if on_progress is not None:
-                        on_progress(done, total, destination.name)
+                        on_progress(done, total, partial.name.removesuffix(PARTIAL_SUFFIX))
+            if total is not None and done < total:
+                raise _Weather(
+                    "interpreter_download_failed",
+                    f"{url} ended at {done:_} of {total:_} bytes",
+                )
     except urllib.error.HTTPError as exc:
-        raise InterpreterError(
+        if exc.code == 416 and have > 0:
+            # The kept bytes are not a prefix the server can continue: start over.
+            partial.unlink(missing_ok=True)
+            raise _Weather(
+                "interpreter_download_failed",
+                f"{url} would not continue from byte {have:_} (HTTP 416); starting it over",
+            ) from None
+        if exc.code in _NOT_WEATHER:
+            raise InterpreterError(
+                "interpreter_download_failed",
+                f"{url} answered HTTP {exc.code} {exc.reason}",
+            ) from None
+        raise _Weather(
             "interpreter_download_failed",
             f"{url} answered HTTP {exc.code} {exc.reason}",
         ) from None
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        raise InterpreterError(
+    except OSError as exc:
+        if exc.errno == errno.ENOSPC:
+            raise InterpreterError(
+                "interpreter_download_failed",
+                f"the disk filled while fetching {url} into {partial}: {exc}",
+            ) from None
+        raise _Weather(
             "interpreter_download_failed", f"could not fetch {url}: {exc}"
+        ) from None
+    except (http.client.HTTPException, ValueError) as exc:
+        raise _Weather(
+            "interpreter_download_failed", f"could not fetch {url}: {exc!r}"
         ) from None
 
 

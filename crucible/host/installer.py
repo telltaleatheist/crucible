@@ -19,6 +19,7 @@ from ..platform.paths import ENGINE_PORT, INSTALL_ONE_LINER, PROGRESS_INTERVAL_S
 from ..platform.quarantine import quarantine
 from ..platform.runner import Runner, RunResult
 from ..platform.wsl_table import WSL_CONF_MARKER
+from ..interpreter import FETCH_ATTEMPTS
 from ..wsl import CRUCIBLE_DISTRO, GUEST_CRUCIBLE, guest_argv
 from . import outcome, wslstate
 from .catalog import CatalogPort, CatalogRefusal, Subject
@@ -58,8 +59,11 @@ STEP_WORDS: dict[str, str] = {
 
 IMPORT_TIMEOUT_SECONDS = 30 * 60.0
 
-IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 3600.0
-IMAGE_DOWNLOAD_ATTEMPTS = 3
+# The image download's socket timeout: how long ONE read may stall before the try is given
+# up and continued from what arrived (interpreter.fetch). It used to be 3600, which left a
+# half-dead connection hanging an hour before anything retried.
+IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 120.0
+IMAGE_DOWNLOAD_ATTEMPTS = FETCH_ATTEMPTS
 GUEST_INSTALL_TIMEOUT_SECONDS = 120 * 60.0
 QUICK_TIMEOUT_SECONDS = 5 * 60.0
 

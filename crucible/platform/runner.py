@@ -61,7 +61,7 @@ class Runner(Protocol):
         *,
         timeout_s: float,
         on_progress: "Callable[[int, int | None, str], None] | None" = None,
-        attempts: int = 1,
+        attempts: int | None = None,
     ) -> RunResult:
         ...
 
@@ -218,7 +218,7 @@ class ProcessRunner:
         *,
         timeout_s: float,
         on_progress: Callable[[int, int | None, str], None] | None = None,
-        attempts: int = 1,
+        attempts: int | None = None,
     ) -> RunResult:
         from ..interpreter import InterpreterError, fetch
 
@@ -229,7 +229,7 @@ class ProcessRunner:
                 destination,
                 on_progress=on_progress,
                 timeout=int(timeout_s),
-                attempts=attempts,
+                **({} if attempts is None else {"attempts": attempts}),
             )
         except InterpreterError as exc:
             return RunResult(code=None, stdout="", stderr="", failure=exc.message)
