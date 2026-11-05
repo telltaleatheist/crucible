@@ -39,7 +39,7 @@ def test_install_audio_builds_every_engine_env_of_this_backend(
     monkeypatch.setattr(cli.install, "_measure_step", lambda *_a, **_k: None)
     monkeypatch.setattr(cli.install, "_capability_step", lambda _c, _b, *types: stepped.append(types) or 0)
     monkeypatch.setattr(hosttools, "ensure_ffmpeg", lambda home_dir, **_: "ffmpeg: ok")
-    monkeypatch.setattr(hosttools, "ensure_silero_vad", lambda home_dir: "speech detector: ok")
+    monkeypatch.setattr(hosttools, "ensure_silero_vad", lambda home_dir, **_: "speech detector: ok")
     assert cli.main(["install", "audio"]) == 0
     assert built == ["audio-stable-audio-3", "audio-yue2"]
     assert stepped == [("audio",)]
@@ -117,7 +117,7 @@ def test_install_audio_places_crucible_s_ffmpeg(
     monkeypatch.setattr(
         hosttools, "ensure_ffmpeg", lambda home_dir, **_: placed.append(home_dir) or "ffmpeg: placed"
     )
-    monkeypatch.setattr(hosttools, "ensure_silero_vad", lambda home_dir: "speech detector: ok")
+    monkeypatch.setattr(hosttools, "ensure_silero_vad", lambda home_dir, **_: "speech detector: ok")
     assert cli.main(["install", "audio"]) == 0
     assert placed == [home]
     assert "ffmpeg: placed" in capsys.readouterr().out

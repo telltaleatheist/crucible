@@ -160,12 +160,14 @@ def fetch(
     attempts: int = FETCH_ATTEMPTS,
     pause_s: float = FETCH_PAUSE_S,
     sleep: Callable[[float], None] = time.sleep,
+    on_wait: Callable[[str], None] | None = None,
 ) -> None:
     """Download `url` to `destination`, resuming: the bytes land in `<destination>.partial`,
     which a failed try (and a killed process) leaves where it is, and the next try asks for
     the rest with a Range request. Only a finished transfer is renamed to `destination`; the
     caller's digest check says whether the bytes are right. An answer that is the request's
-    fault (a 404) ends the fetch at once; anything else is waited on."""
+    fault (a 404) ends the fetch at once; anything else is waited on, and `on_wait` hears each
+    wait in a sentence, so someone watching can tell it from a hang."""
     if attempts < 1:
         raise InterpreterError(
             "interpreter_download_failed",
@@ -181,6 +183,11 @@ def fetch(
         except _Weather as exc:
             last = exc
             if attempt + 1 < attempts:
+                if on_wait is not None:
+                    on_wait(
+                        f"{exc.message}; waiting {pause_s:g} s and trying again "
+                        f"(try {attempt + 1} of {attempts})"
+                    )
                 sleep(pause_s)
             continue
         partial.replace(destination)
@@ -278,7 +285,7 @@ def download_interpreter(
         archive = work / pin.asset
         if on_line is not None:
             on_line(f"fetching {pin.asset} from python-build-standalone")
-        fetch(pin.url, archive, on_progress=on_progress)
+        fetch(pin.url, archive, on_progress=on_progress, on_wait=on_line)
         digest = sha256_of(archive)
         if digest != pin.sha256:
             raise InterpreterError(

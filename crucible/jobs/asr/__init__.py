@@ -813,7 +813,7 @@ class AsrJobType:
         if not hosttools.silero_vad_placed(self._config.home):
             ctx.warming("fetching the speech detector (silero-vad, 2.8 MB)")
             try:
-                hosttools.ensure_silero_vad(self._config.home)
+                hosttools.ensure_silero_vad(self._config.home, on_wait=ctx.warming)
             except hosttools.HostToolError as exc:
                 raise JobError(
                     "speech_detector_unavailable",

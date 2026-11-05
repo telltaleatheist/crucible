@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import sys
+from dataclasses import replace
+from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Iterator
 
 import pytest
@@ -24,6 +28,7 @@ from crucible.jobs.asr import loopguard, qwen
 from crucible.memorybudget import GIB
 
 from .conftest import (
+    TOOL_BYTES,
     FAKE_BACKEND,
     FAKE_MAC_BACKEND,
     installed_as_the_recipe_says,
@@ -735,6 +740,22 @@ def test_the_echo_note_names_speech_only_when_the_job_turned_it_off(
     _, events = run_job(qwen_client, auth, params={**PARAMS, "speech_only": False})
     assert events[-1]["event"] == "done", events[-1]
     assert _echo_notes(events) == [ECHO_NOTE + SPEECH_ONLY_HINT]
+
+
+def test_a_job_waiting_on_the_speech_detector_says_so_and_then_runs(
+    qwen_client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+    flaky_host: SimpleNamespace, real_tool_download: Callable[..., str],
+) -> None:
+    monkeypatch.setattr(hosttools, "silero_vad_placed", lambda home: False)
+    monkeypatch.setattr(hosttools, "SILERO_VAD", replace(
+        hosttools.SILERO_VAD, url=flaky_host.url, sha256=hashlib.sha256(TOOL_BYTES).hexdigest(),
+    ))
+    monkeypatch.setattr(hosttools, "_download", partial(real_tool_download, pause_s=0))
+    flaky_host.answers[:] = [504, 200]
+    _, events = run_job(qwen_client, auth, params=PARAMS)
+    assert events[-1]["event"] == "done", events[-1]
+    warmed = [e["data"]["message"] for e in events if e["event"] == "warming"]
+    assert any("HTTP 504" in line and "trying again" in line for line in warmed), warmed
 
 
 def test_a_resumed_job_does_not_decode_or_redecode_a_journaled_echo(

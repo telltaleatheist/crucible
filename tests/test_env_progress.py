@@ -62,7 +62,7 @@ def test_install_prints_progress_without_verbose(
     monkeypatch.setattr(cli.install, "_measure_step", lambda *_a, **_k: None)
     monkeypatch.setattr(cli.install, "_capability_step", lambda *_a: 0)
     monkeypatch.setattr(hosttools, "ensure_ffmpeg", lambda home_dir, **_: "ffmpeg: ok")
-    monkeypatch.setattr(hosttools, "ensure_silero_vad", lambda home_dir: "speech detector: ok")
+    monkeypatch.setattr(hosttools, "ensure_silero_vad", lambda home_dir, **_: "speech detector: ok")
     assert cli.main(["install", "audio"]) == 0
     out = capsys.readouterr().out
     assert "  installing 1 packages" in out

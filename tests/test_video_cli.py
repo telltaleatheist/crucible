@@ -38,7 +38,7 @@ def test_install_video_builds_the_env_and_places_ffmpeg(
     monkeypatch.setattr(jobenv, "install_env", install_env)
     monkeypatch.setattr(cli.install, "_smoke_import", lambda *_: None)
     monkeypatch.setattr(hosttools, "ensure_ffmpeg", lambda home_dir, **_: placed.append(home_dir) or "ffmpeg: ok")
-    monkeypatch.setattr(hosttools, "ensure_silero_vad", lambda home_dir: "speech detector: ok")
+    monkeypatch.setattr(hosttools, "ensure_silero_vad", lambda home_dir, **_: "speech detector: ok")
     monkeypatch.setattr(cli.install, "_measure_step", lambda *_a, **_k: None)
     monkeypatch.setattr(cli.install, "_capability_step", lambda _c, _b, *types: stepped.append(types) or 0)
     assert cli.main(["install", "video"]) == 0
@@ -63,7 +63,7 @@ def test_install_video_on_the_mac_builds_the_ltx_2_mlx_env(
     monkeypatch.setattr(jobenv, "install_env", install_env)
     monkeypatch.setattr(cli.install, "_smoke_import", lambda *_: None)
     monkeypatch.setattr(hosttools, "ensure_ffmpeg", lambda home_dir, **_: "ffmpeg: ok")
-    monkeypatch.setattr(hosttools, "ensure_silero_vad", lambda home_dir: "speech detector: ok")
+    monkeypatch.setattr(hosttools, "ensure_silero_vad", lambda home_dir, **_: "speech detector: ok")
     monkeypatch.setattr(cli.install, "_measure_step", lambda *_a, **_k: None)
     monkeypatch.setattr(cli.install, "_capability_step", lambda _c, _b, *types: 0)
     assert cli.main(["install", "video"]) == 0

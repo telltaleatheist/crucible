@@ -1,61 +1,40 @@
 from __future__ import annotations
 
 import hashlib
-import threading
-from collections.abc import Callable, Iterator
-from http.server import BaseHTTPRequestHandler
+from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from crucible import hosttools
-from tests.fake_engine import _LoopbackServer
 
-BODY = b"the tool's bytes"
-
-
-class _Host(BaseHTTPRequestHandler):
-    answers: list[int] = []
-
-    def do_GET(self) -> None:
-        code = self.answers.pop(0)
-        self.send_response(code)
-        body = BODY if code == 200 else b""
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *_args: object) -> None:
-        pass
+from .conftest import TOOL_BYTES
 
 
-@pytest.fixture
-def host() -> Iterator[str]:
-    server = _LoopbackServer(("127.0.0.1", 0), _Host)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield f"http://127.0.0.1:{server.server_address[1]}/tool"
-    server.shutdown()
-    server.server_close()
-    thread.join(5)
-
-
-def test_a_504_from_the_release_host_is_waited_on(
-    host: str, tmp_path: Path, real_tool_download: Callable[..., str]
+def test_a_504_from_the_release_host_is_waited_on_in_a_sentence(
+    flaky_host: SimpleNamespace, tmp_path: Path, real_tool_download: Callable[..., str]
 ) -> None:
-    _Host.answers = [504, 503, 200]
+    flaky_host.answers[:] = [504, 503, 200]
     target = tmp_path / "tool"
-    assert real_tool_download(host, target, pause_s=0) == hashlib.sha256(BODY).hexdigest()
-    assert target.read_bytes() == BODY
-    assert _Host.answers == []
+    said: list[str] = []
+    digest = real_tool_download(flaky_host.url, target, pause_s=0, on_wait=said.append)
+    assert digest == hashlib.sha256(TOOL_BYTES).hexdigest()
+    assert target.read_bytes() == TOOL_BYTES
+    assert flaky_host.answers == []
+    assert len(said) == 2
+    assert "HTTP 504" in said[0] and "try 1 of 30" in said[0]
+    assert "HTTP 503" in said[1] and "try 2 of 30" in said[1]
 
 
 def test_a_404_is_refused_at_once_as_the_tools_own_error(
-    host: str, tmp_path: Path, real_tool_download: Callable[..., str]
+    flaky_host: SimpleNamespace, tmp_path: Path, real_tool_download: Callable[..., str]
 ) -> None:
-    _Host.answers = [404, 200]
+    flaky_host.answers[:] = [404, 200]
+    said: list[str] = []
     with pytest.raises(hosttools.HostToolError) as refused:
-        real_tool_download(host, tmp_path / "tool", pause_s=0)
+        real_tool_download(flaky_host.url, tmp_path / "tool", pause_s=0, on_wait=said.append)
     assert refused.value.code == "tool_download_failed"
     assert "404" in refused.value.message
-    assert _Host.answers == [200], "a 404 is not weather: it is not asked twice"
+    assert flaky_host.answers == [200], "a 404 is not weather: it is not asked twice"
+    assert said == []

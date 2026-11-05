@@ -75,7 +75,7 @@ def _pinned(
 
 
 def _fetch_from(archive: bytes, calls: list[str] | None = None):
-    def fetch(url: str, destination: Path) -> str:
+    def fetch(url: str, destination: Path, **_: object) -> str:
         if calls is not None:
             calls.append(url)
         destination.write_bytes(archive)
@@ -208,7 +208,7 @@ def test_cc_is_set_only_for_an_env_with_triton_on_a_pinned_host(
 
 
 def _unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fetch(url: str, destination: Path) -> str:
+    def fetch(url: str, destination: Path, **_: object) -> str:
         raise hosttools.HostToolError("tool_fetch_failed", f"{url} could not be reached")
 
     monkeypatch.setattr(hosttools, "_download", fetch)
@@ -350,7 +350,7 @@ def test_a_worker_with_triton_and_no_compiler_is_refused_by_name(
 
 def _tools_stubbed(monkeypatch: pytest.MonkeyPatch, placed: list[Path]) -> None:
     monkeypatch.setattr(hosttools, "ensure_ffmpeg", lambda home_dir, **_: "ffmpeg: ok")
-    monkeypatch.setattr(hosttools, "ensure_silero_vad", lambda home_dir: "vad: ok")
+    monkeypatch.setattr(hosttools, "ensure_silero_vad", lambda home_dir, **_: "vad: ok")
     monkeypatch.setattr(
         hosttools, "ensure_zig", lambda home_dir, **_: placed.append(home_dir) or "cc: ok"
     )
@@ -425,7 +425,7 @@ def test_doctor_names_the_missing_compiler_with_the_fix(
 def test_the_real_cc_builds_a_shared_object_with_zigs_own_crt(tmp_path: Path) -> None:
     archive = Path(os.environ[REAL_ARCHIVE_ENV])
 
-    def fetch(url: str, destination: Path) -> str:
+    def fetch(url: str, destination: Path, **_: object) -> str:
         shutil.copyfile(archive, destination)
         return hashlib.sha256(destination.read_bytes()).hexdigest()
 
@@ -453,7 +453,7 @@ def test_the_real_cc_is_quiet_about_pyconfigs_posix_level_and_nothing_else(
     _POSIX_C_SOURCE as 202405L and pyconfig.h defines it again as 200809L."""
     archive = Path(os.environ[REAL_ARCHIVE_ENV])
 
-    def fetch(url: str, destination: Path) -> str:
+    def fetch(url: str, destination: Path, **_: object) -> str:
         shutil.copyfile(archive, destination)
         return hashlib.sha256(destination.read_bytes()).hexdigest()
 

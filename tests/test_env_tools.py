@@ -43,7 +43,7 @@ def _pin(monkeypatch: pytest.MonkeyPatch, archive: bytes, fetched: list[str]) ->
     )
     monkeypatch.setattr(hosttools, "llama_server_build", lambda platform_key=None: build)
 
-    def download(url: str, destination: Path) -> str:
+    def download(url: str, destination: Path, **_: object) -> str:
         fetched.append(url)
         destination.write_bytes(archive)
         return hashlib.sha256(archive).hexdigest()
@@ -63,7 +63,7 @@ def box(home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixtu
         hosttools, "ensure_ffmpeg", lambda home_dir, **_: said.append("ffmpeg") or "ffmpeg: ok"
     )
     monkeypatch.setattr(
-        hosttools, "ensure_silero_vad", lambda home_dir: said.append("vad") or "vad: ok"
+        hosttools, "ensure_silero_vad", lambda home_dir, **_: said.append("vad") or "vad: ok"
     )
     capsys.readouterr()
     return said
@@ -134,7 +134,7 @@ def test_a_llama_server_that_cannot_be_placed_fails_the_step_by_name(
     _installed(home, jobenv.llm_env(FAKE_BACKEND.kind))
     _pin(monkeypatch, _archive(b"the server"), [])
 
-    def offline(url: str, destination: Path) -> str:
+    def offline(url: str, destination: Path, **_: object) -> str:
         raise hosttools.HostToolError("tool_download_failed", f"{url} could not be fetched")
 
     monkeypatch.setattr(hosttools, "_download", offline)

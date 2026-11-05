@@ -273,6 +273,7 @@ def _place_llama_server(config: Config, args: argparse.Namespace) -> str | None:
             hosttools.ensure_llama_server(
                 config.home,
                 on_line=(lambda line: print(f"  {line}")) if args.verbose else None,
+                on_wait=print,
             )
         )
     except hosttools.HostToolError as exc:
@@ -380,6 +381,7 @@ def _ensure_tools(config: Config, args: argparse.Namespace) -> str | None:
             hosttools.ensure_ffmpeg(
                 config.home,
                 on_line=(lambda line: print(f"  {line}")) if args.verbose else None,
+                on_wait=print,
             )
         )
     except hosttools.HostToolError as exc:
@@ -393,6 +395,7 @@ def _ensure_tools(config: Config, args: argparse.Namespace) -> str | None:
                 hosttools.ensure_zig(
                     config.home,
                     on_line=(lambda line: print(f"  {line}")) if args.verbose else None,
+                    on_wait=print,
                 )
             )
         except hosttools.HostToolError as exc:
@@ -403,7 +406,7 @@ def _ensure_tools(config: Config, args: argparse.Namespace) -> str | None:
                 "retries only the compiler"
             )
     try:
-        print(hosttools.ensure_silero_vad(config.home))
+        print(hosttools.ensure_silero_vad(config.home, on_wait=print))
     except hosttools.HostToolError as exc:
         print(
             f"speech detector: not placed ({exc}); an asr job that asks for "

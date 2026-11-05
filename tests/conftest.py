@@ -5,6 +5,8 @@ import io
 import json
 import threading
 import wave
+from types import SimpleNamespace
+from http.server import BaseHTTPRequestHandler
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -633,7 +635,7 @@ def cached_as_of_the_fixtures(home: Path, hf_repo: str, ref: str) -> Any:
 _REAL_TOOL_DOWNLOAD = hosttools._download
 
 
-def _no_tool_downloads(url: str, destination: Path) -> str:
+def _no_tool_downloads(url: str, destination: Path, **_: object) -> str:
     raise AssertionError(f"a test tried to download {url}; stub the tool or pass fetch=")
 
 
@@ -647,6 +649,37 @@ def _no_test_downloads_a_tool(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def real_tool_download() -> Callable[..., str]:
     return _REAL_TOOL_DOWNLOAD
+
+
+TOOL_BYTES = b"the tool's bytes"
+
+
+@pytest.fixture
+def flaky_host() -> Iterator[SimpleNamespace]:
+    """A release host: `answers` is the status of each GET, in turn; a 200 sends TOOL_BYTES."""
+    from .fake_engine import _LoopbackServer
+
+    answers: list[int] = []
+
+    class Host(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            code = answers.pop(0)
+            self.send_response(code)
+            body = TOOL_BYTES if code == 200 else b""
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    server = _LoopbackServer(("127.0.0.1", 0), Host)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield SimpleNamespace(url=f"http://127.0.0.1:{server.server_address[1]}/tool", answers=answers)
+    server.shutdown()
+    server.server_close()
+    thread.join(5)
 
 
 @pytest.fixture(autouse=True)

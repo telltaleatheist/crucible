@@ -279,20 +279,37 @@ def ffmpeg_report(home: Path) -> dict[str, object]:
     }
 
 
-def _download(url: str, destination: Path, *, pause_s: float = interpreter.FETCH_PAUSE_S) -> str:
-    """Fetch through `interpreter.fetch`, so a 504 from the release host is waited on and not a
-    failed job; what it could not get within its budget, or a 404, is `tool_download_failed`."""
+def _download(
+    url: str,
+    destination: Path,
+    *,
+    pause_s: float = interpreter.FETCH_PAUSE_S,
+    on_wait: Callable[[str], None] | None = None,
+) -> str:
+    """Fetch through `interpreter.fetch`, so a 504 from the release host is waited on, in a
+    sentence, and not a failed job; what it could not get within its budget, or a 404, is
+    `tool_download_failed`."""
     try:
-        interpreter.fetch(url, destination, pause_s=pause_s)
+        interpreter.fetch(url, destination, pause_s=pause_s, on_wait=on_wait)
     except interpreter.InterpreterError as exc:
         raise HostToolError("tool_download_failed", exc.message) from None
     return sha256_of(destination)
+
+
+def _fetcher(
+    fetch: Callable[[str, Path], str] | None,
+    on_wait: Callable[[str], None] | None,
+) -> Callable[[str, Path], str]:
+    if fetch is not None:
+        return fetch
+    return lambda url, destination: _download(url, destination, on_wait=on_wait)
 
 
 def ensure_ffmpeg(
     home: Path,
     *,
     on_line: Callable[[str], None] | None = None,
+    on_wait: Callable[[str], None] | None = None,
     fetch: Callable[[str, Path], str] | None = None,
 ) -> str:
     build = ffmpeg_build()
@@ -314,7 +331,7 @@ def ensure_ffmpeg(
         archive = staging / build.url.rsplit("/", 1)[-1]
         if on_line is not None:
             on_line(f"fetching {archive.name} ({build.bytes / 1e6:.0f} MB)")
-        measured = (_download if fetch is None else fetch)(build.url, archive)
+        measured = _fetcher(fetch, on_wait)(build.url, archive)
         if measured != build.sha256:
             raise HostToolError(
                 "tool_sha_mismatch",
@@ -447,6 +464,7 @@ def _unpack_zig(
     build: CompilerBuild,
     on_line: Callable[[str], None] | None,
     fetch: Callable[[str, Path], str] | None,
+    on_wait: Callable[[str], None] | None = None,
 ) -> None:
     final = zig_dir(home, build)
     final.parent.mkdir(parents=True, exist_ok=True)
@@ -456,7 +474,7 @@ def _unpack_zig(
         archive = staging / build.url.rsplit("/", 1)[-1]
         if on_line is not None:
             on_line(f"fetching {archive.name} ({build.bytes / 1e6:.0f} MB)")
-        measured = (_download if fetch is None else fetch)(build.url, archive)
+        measured = _fetcher(fetch, on_wait)(build.url, archive)
         if measured != build.sha256:
             raise HostToolError(
                 "tool_sha_mismatch",
@@ -513,6 +531,7 @@ def ensure_zig(
     home: Path,
     *,
     on_line: Callable[[str], None] | None = None,
+    on_wait: Callable[[str], None] | None = None,
     fetch: Callable[[str, Path], str] | None = None,
 ) -> str:
     """Place Crucible's C compiler: the pinned Zig, and the ``cc`` that runs it.
@@ -532,7 +551,7 @@ def ensure_zig(
     if _zig_unpacked(home, build):
         how = "was unpacked; its cc is rewritten"
     else:
-        _unpack_zig(home, build, on_line, fetch)
+        _unpack_zig(home, build, on_line, fetch, on_wait)
         how = f"placed in {zig_dir(home, build)} (sha256 {build.sha256[:12]}...)"
     _write_wrapper(home, build)
     return f"c compiler: zig {build.version} {how}; {wrapper} runs it for {build.target}"
@@ -646,6 +665,7 @@ def ensure_silero_vad(
     home: Path,
     *,
     fetch: Callable[[str, Path], str] | None = None,
+    on_wait: Callable[[str], None] | None = None,
 ) -> str:
     path = silero_vad_path(home)
     if silero_vad_placed(home):
@@ -653,7 +673,7 @@ def ensure_silero_vad(
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(f".{path.name}.partial")
     try:
-        measured = (_download if fetch is None else fetch)(SILERO_VAD.url, partial)
+        measured = _fetcher(fetch, on_wait)(SILERO_VAD.url, partial)
         if measured != SILERO_VAD.sha256:
             raise HostToolError(
                 "tool_sha_mismatch",
@@ -736,6 +756,7 @@ def ensure_llama_server(
     home: Path,
     *,
     on_line: Callable[[str], None] | None = None,
+    on_wait: Callable[[str], None] | None = None,
     fetch: Callable[[str, Path], str] | None = None,
 ) -> str:
     build = llama_server_build()
@@ -759,7 +780,7 @@ def ensure_llama_server(
         archive = staging / build.url.rsplit("/", 1)[-1]
         if on_line is not None:
             on_line(f"fetching {archive.name} ({build.bytes / 1e6:.0f} MB to download)")
-        measured = (_download if fetch is None else fetch)(build.url, archive)
+        measured = _fetcher(fetch, on_wait)(build.url, archive)
         if measured != build.sha256:
             raise HostToolError(
                 "tool_sha_mismatch",
