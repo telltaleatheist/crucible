@@ -4,6 +4,7 @@ import json
 import math
 import select
 import socket
+import socketserver
 import struct
 import threading
 import time
@@ -425,6 +426,15 @@ def _common_prefix(a: str, b: str) -> int:
     return n
 
 
+class _LoopbackServer(ThreadingHTTPServer):
+    """No reverse lookup of the address it binds: http.server's `socket.getfqdn` stalled past a
+    test's whole wait on GitHub's Mac runners, where 127.0.0.1 has no answer."""
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 class FakeEngine:
 
     name = "fake"
@@ -458,7 +468,7 @@ class FakeEngine:
         self._stream_forever = stream_forever
         self._delay_for = delay_for
         self.aborted = threading.Event()
-        self._server: ThreadingHTTPServer | None = None
+        self._server: _LoopbackServer | None = None
         self._thread: threading.Thread | None = None
         self._port: int | None = None
         self._warmings = warmings
@@ -534,7 +544,7 @@ class FakeEngine:
         self._handler = handler
         self.args = list(args)
         self._port = port if port else find_free_port()
-        self._server = ThreadingHTTPServer(("127.0.0.1", self._port), handler)
+        self._server = _LoopbackServer(("127.0.0.1", self._port), handler)
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="fake-engine", daemon=True
         )

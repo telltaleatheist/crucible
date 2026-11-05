@@ -106,7 +106,8 @@ def _kill_the_worker_mid_job(
             "the job ends",
             lambda: (s := _state(base, auth, job_id))["status"] in ("failed", "done", "cancelled") and s,
         )
-        time.sleep(1.0)
+        # Long enough that a slow runner still counts more than a handful of answers.
+        time.sleep(2.0)
     return state, pinger
 
 
