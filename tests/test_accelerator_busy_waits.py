@@ -271,9 +271,17 @@ def test_a_session_opening_on_a_held_card_waits_then_opens(
         assert engines == [], "nothing was started on a held card"
 
         let_go(monkeypatch)
-        due_now(app.state.line, session_id)
-        _wait_for(lambda: _session_state(base, auth, session_id)["status"] == "open",
-                  "the session to open once the card was free")
+
+        def opened() -> bool:
+            # Nudged each time: a check already under way when the card went free comes back
+            # "held" after a single nudge, and the patched recheck is an hour off.
+            if _session_state(base, auth, session_id)["status"] == "open":
+                return True
+            if (_queue(base, auth)["items"] or [{}])[0].get("waiting_for") is not None:
+                due_now(app.state.line, session_id)
+            return False
+
+        _wait_for(opened, "the session to open once the card was free")
         said = [event["event"] for event in app.state.sessions.get(session_id).events]
         assert said[:3] == ["queued", "waiting", "opened"]
         httpx.delete(f"{base}/v1/queue/sessions/{session_id}",

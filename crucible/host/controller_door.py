@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import io
 import json
 import queue
 import threading
@@ -305,7 +306,21 @@ class DoorRequest(BaseHTTPRequestHandler):
         self._dispatch(GET_ROUTES)
 
     def do_POST(self) -> None:
+        self._take_the_body()
         self._dispatch(POST_ROUTES)
+
+    def _take_the_body(self) -> None:
+        """Read a POST's body whether or not its route wants it. Most do not (/restart, /quit,
+        /local/*), and a socket closed with bytes unread sends a reset, which can destroy the
+        answer before the client reads it (a Mac: ConnectionResetError on /restart one time in
+        three; Windows, where this door runs, resets the same way). One too big to take stays
+        for /install's 413."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return
+        if 0 < length <= MAX_BODY_BYTES:
+            self.rfile = io.BytesIO(self.rfile.read(length))
 
     def _dispatch(self, routes: dict[str, "Route"]) -> None:
         route = routes.get(self.route_path())

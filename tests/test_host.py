@@ -2501,6 +2501,30 @@ def test_the_door_answers_ping_WITHOUT_a_bearer_and_info_WITH_one(
         server.shutdown()
 
 
+def test_a_door_route_that_ignores_its_body_still_gets_its_answer_read(
+    host_log: log.HostLog,
+) -> None:
+    """Closed with the body unread, the socket sends a reset that can destroy the answer. It
+    took a Mac about one /restart in three."""
+    import urllib.request
+
+    fake = FakeOrchestrator()
+    door = a_door(host_log, token="tok", orchestrator=fake)
+    server = door_module.serve(door, host="127.0.0.1", port=0)
+    url = f"http://127.0.0.1:{server.server_address[1]}/restart"
+    try:
+        for _ in range(25):
+            request = urllib.request.Request(
+                url, data=b"{}", headers={"Authorization": "Bearer tok"}, method="POST"
+            )
+            with urllib.request.urlopen(request, timeout=20) as answer:
+                lines = [json.loads(l) for l in answer.read().decode().splitlines() if l]
+            assert lines[-1]["event"] == "done"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_the_door_streams_a_restart_and_refuses_a_found_engine_with_a_STATUS(
     host_log: log.HostLog,
 ) -> None:
