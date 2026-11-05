@@ -949,6 +949,8 @@ class CopyingRunner(Runner):
 def wsl_guest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(service, "in_wsl", lambda: True)
     monkeypatch.setattr(service.os, "geteuid", lambda: 1000, raising=False)
+    # A runner or a machine with passwordless sudo goes through it instead of this door.
+    monkeypatch.setattr(service, "_passwordless_sudo", lambda: False)
     monkeypatch.setenv(service.WSL_DISTRO_ENV, "Ubuntu")
     etc = tmp_path / "etc-systemd-system"
     monkeypatch.setattr(service, "SYSTEM_UNIT_DIR", etc)
@@ -969,6 +971,7 @@ def test_root_prefix_refuses_when_the_distro_cannot_be_named(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(service.os, "geteuid", lambda: 1000, raising=False)
+    monkeypatch.setattr(service, "_passwordless_sudo", lambda: False)
     with pytest.raises(service.ServiceError) as caught:
         service.root_prefix({})
     assert "WSL_DISTRO_NAME" in str(caught.value)

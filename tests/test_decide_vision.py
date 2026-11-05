@@ -42,6 +42,10 @@ STUDIO = (
     "apple",
 )
 MAC_16 = (MLX_DARWIN, 16 * GIB, default_desktop_allowance_bytes(MLX_DARWIN, 16 * GIB, "apple"), "apple")
+# The cards whose pick is under 4B, which is what the api-key advice is about: on cuda-linux
+# qwen3.5-4b-8bit is generate's pick from 7 GiB up, and decide's from 8.
+CUDA_6 = (CUDA_LINUX, 6 * GIB, default_desktop_allowance_bytes(CUDA_LINUX, 6 * GIB, "nvidia"), "nvidia")
+CUDA_7 = (CUDA_LINUX, 7 * GIB, default_desktop_allowance_bytes(CUDA_LINUX, 7 * GIB, "nvidia"), "nvidia")
 CUDA_8 = (CUDA_LINUX, 8 * GIB, default_desktop_allowance_bytes(CUDA_LINUX, 8 * GIB, "nvidia"), "nvidia")
 CUDA_12 = (CUDA_LINUX, 12 * GIB, default_desktop_allowance_bytes(CUDA_LINUX, 12 * GIB, "nvidia"), "nvidia")
 CUDA_16 = (CUDA_LINUX, 16 * GIB, default_desktop_allowance_bytes(CUDA_LINUX, 16 * GIB, "nvidia"), "nvidia")
@@ -117,7 +121,7 @@ def test_a_roomy_cuda_card_decides_images_on_the_9b_vision_form() -> None:
 
 
 def test_a_model_that_reads_images_itself_is_its_own_image_pick() -> None:
-    verdict = on(CUDA_8, "decide")
+    verdict = on(CUDA_7, "decide")
     assert verdict.selected == "qwen3.5-0.8b"
     assert verdict.with_images.selected == "qwen3.5-0.8b"
     assert "qwen3.5-0.8b itself, which reads images on cuda-linux" in verdict.with_images.reason
@@ -341,8 +345,8 @@ def test_the_threshold_is_4b() -> None:
 
 @pytest.mark.parametrize("name", ["generate"])
 def test_a_pick_under_4b_recommends_an_api_key_and_names_where(name: str) -> None:
-    verdict = on(CUDA_12, name)
-    assert verdict.selected == "qwen3.5-2b"
+    verdict = on(CUDA_6, name)
+    assert verdict.selected == "qwen3.5-0.8b"
     assert _advised(verdict)
     assert (
         f"Models under 4B give weaker results, so for better ones add an API key for "
@@ -359,7 +363,7 @@ def test_a_pick_at_4b_or_above_recommends_nothing(card: tuple, model: str) -> No
 
 
 def test_decide_is_never_advised_an_api_key() -> None:
-    verdict = on(CUDA_8, "decide")
+    verdict = on(CUDA_7, "decide")
     assert verdict.selected == "qwen3.5-0.8b"
     assert not _advised(verdict)
 
@@ -371,13 +375,13 @@ def test_a_settings_choice_under_4b_is_not_advised() -> None:
 
 
 def test_the_advice_changes_neither_the_pick_nor_whether_it_runs() -> None:
-    verdict = on(CUDA_8, "generate")
+    verdict = on(CUDA_6, "generate")
     assert verdict.enabled and verdict.selected == "qwen3.5-0.8b"
     assert verdict.shortfall_bytes == 0
 
 
 def test_the_install_plan_line_carries_the_advice() -> None:
-    kind, total, allowance, vendor = CUDA_12
+    kind, total, allowance, vendor = CUDA_6
     decisions = decide_all(
         kind, total_bytes=total, desktop_allowance_bytes=allowance, gpu_vendor=vendor,
         chosen={}, audio_low_vram=False,
@@ -391,10 +395,11 @@ def test_the_install_plan_line_carries_the_advice() -> None:
 def test_the_doctor_line_is_the_recorded_reason_with_the_advice() -> None:
     from crucible.cli.doctor import lines_capability
 
-    record = record_for(CUDA_12)
+    record = record_for(CUDA_6)
     report = {
         "capability": {**record.to_dict(), "could_enable": []},
         "audio_low_vram": None,
+        "audio_host_memory": None,
     }
     lines = [line for line in lines_capability(report) if line.startswith("capability generate")]
     assert len(lines) == 1 and UPSTREAM_SETTINGS_BLOCK in lines[0]

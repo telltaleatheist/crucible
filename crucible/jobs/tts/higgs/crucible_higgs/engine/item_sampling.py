@@ -1,7 +1,7 @@
 """THE PER-ITEM TAKE CHANNEL - one spelling, one validator, one set of refusal
 names. A rung is TWO facts, `sampling` and `take`, and they travel together.
 
-WHY THIS MODULE EXISTS (Owen, 2026-09-14, docs/EXTENSION-TO-CRUCIBLE-PLAN.md
+WHY THIS MODULE EXISTS (Owen, 2026-09-14, docs/history/EXTENSION-TO-CRUCIBLE-PLAN.md
 section 2): *a retake must not reuse the settings that produced the problem;
 the spread IS the take ladder.* Crucible's take ladder
 (crucible/docs/PHASE3-TTS.md section 3) is a per-VOICE list of rungs, take 0

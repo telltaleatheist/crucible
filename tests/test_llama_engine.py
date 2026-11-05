@@ -696,6 +696,9 @@ def test_a_loads_context_is_llama_servers_c(tmp_path: Path) -> None:
 def test_mlx_lm_is_handed_no_context_flag(tmp_path: Path) -> None:
     manifest = load_manifest("qwen3.8-27b-8bit")
     spec = manifest.spec("mlx-darwin")
+    (tmp_path / "config.json").write_text(
+        '{"num_hidden_layers": 2, "num_attention_heads": 2, "hidden_size": 64}', encoding="utf-8"
+    )
     args = engine_load_args(manifest, spec, tmp_path, None, context=131072)
     assert "131072" not in args
     assert "--max-model-len" not in args and "-c" not in args

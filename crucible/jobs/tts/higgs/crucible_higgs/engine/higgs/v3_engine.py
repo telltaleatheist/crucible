@@ -1215,7 +1215,7 @@ class HiggsV3Engine:
         `convert_many` describes - that docstring is the rationale for every
         decision made below, and this is the same code it has described since
         2026-09-08, moved out from under `_write_sentence` so that a caller with
-        no `sentences_dir` can have the guard too (PHASE6-REMOTE-RENDER.md
+        no `sentences_dir` can have the guard too (docs/history/PHASE6-REMOTE-RENDER.md
         section 2). The audiobook world consumes it into files; the serve world
         consumes it into `batch_item` frames with `guard` attached.
 

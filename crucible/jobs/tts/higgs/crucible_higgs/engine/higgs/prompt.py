@@ -4,7 +4,7 @@ Ported from the measured harness
 `E:\\training\\_campaigns\\2026-09-01-cod-full-rebuild\\higgs\\render_v2.py`
 (`build_conv`, 2026-09-04) - the run that produced the deathstalker audition,
 not the model card. The template it renders is recorded verbatim in that
-campaign's HIGGS_NOTES.md section A and is reproduced in this module's
+campaign's narrator's Higgs notes section A and is reproduced in this module's
 constants so a test can pin it without the model.
 
 WHAT THE CONVERSATION LOOKS LIKE (2 reference clips, one target chunk):
@@ -41,7 +41,7 @@ from ..protocol import ClipsVoice
 DEFAULT_SYSTEM_PROMPT = 'Generate audio following instruction.'
 DEFAULT_SCENE = 'Audio is recorded from a quiet room.'
 
-# Special ids, measured from the v2 tokenizer (HIGGS_NOTES.md section A). Kept
+# Special ids, measured from the v2 tokenizer (narrator's Higgs notes section A). Kept
 # here so a prompt test can assert the framing without loading a tokenizer.
 SPECIAL_TOKEN_IDS = {
     '<|begin_of_text|>': 128000,

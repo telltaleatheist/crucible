@@ -1,6 +1,6 @@
 """The engine seam: what narrator needs of ANY LLM-codec TTS engine.
 
-Designed in `docs/NARRATOR_PLAN.md` ("Engine interface"), shaped by two MEASURED
+Designed in `docs/history/NARRATOR_PLAN.md` ("Engine interface"), shaped by two MEASURED
 engines - Orpheus (SNAC: 7 tokens per ~11.72 Hz frame, 24 kHz, an audio-token cap,
 EOS boost/floor levers, silence baked into every chunk) and Higgs v2 (8 codebooks
 at 25 Hz with a delay pattern, 24 kHz, an 8,192-token context, EOS that fires

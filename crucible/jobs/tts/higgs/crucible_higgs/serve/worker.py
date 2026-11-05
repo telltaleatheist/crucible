@@ -86,7 +86,7 @@ A RENDER row carries NO `gapSec`: an assembler follows that door and realizes
 `gaps.json`, and two statements of one silence is two owners of it.
 
 THE PER-ITEM SAMPLING CHANNEL (Owen, 2026-09-14, the retake spread ruling in
-docs/EXTENSION-TO-CRUCIBLE-PLAN.md section 2: *a retake must not reuse the
+docs/history/EXTENSION-TO-CRUCIBLE-PLAN.md section 2: *a retake must not reuse the
 settings that produced the problem; the spread IS the take ladder*). Crucible
 resolves a job's `take: N` against the voice's `[[voice.takes]]` ladder and
 sends the NUMBERS on the item. Until this existed there was no channel for
@@ -1436,7 +1436,7 @@ class StreamServer:
         `row_gap_sec`), and a row whose gap LEADS is refused there by name.
 
         `guard` is `GuardPlan.verdict()`'s object, verbatim, for a row an engine
-        rendered through its own retake ladder - PHASE6-REMOTE-RENDER.md section 3.
+        rendered through its own retake ladder - docs/history/PHASE6-REMOTE-RENDER.md section 3.
         STRICTLY ADDITIVE AND OPTIONAL: a row with no verdict carries no `guard`
         key at all, so electron/orpheus-worker-pool.ts and the browser extension
         read exactly the field set they read today and need no change on the day

@@ -13,7 +13,7 @@ EVERY FACT BELOW IS MEASURED, from the campaign
 (the launch), `work/render_final.py` + `work/confirm.py` (the request),
 `work/patch_vllm.py` + `work/patch_sentinel_filter.py` (the two required
 patches),
-`HIGGS_V3_LEVERS.md` (the lever sweep, the delivered render, the control-token
+narrator's Higgs v3 lever notes (the lever sweep, the delivered render, the control-token
 vocabulary), `work/refs/manifest.json` (the reference clips) and
 `work/serve_v3c.log` (the route table).
 
@@ -349,7 +349,7 @@ SENTINEL_REPORT_VERSION = 3
 
 #: Total reference audio the server accepts. 42 s returns HTTP 400.
 MAX_REFERENCE_SECONDS = 30.0
-#: Silence between concatenated reference clips, per HIGGS_V3_LEVERS.md 5.
+#: Silence between concatenated reference clips, per narrator's Higgs v3 lever notes 5.
 REFERENCE_JOIN_SECONDS = 0.35
 
 #: Chunk size. <= 600 chars is the measured safe zone; 900 drops the tail
@@ -717,7 +717,7 @@ def reference_for(voice: ClipsVoice) -> dict:
 #: The only way vllm-omni serves a fine-tuned Higgs voice.
 #:
 #: **THERE IS NO RUNTIME LoRA.** Measured by the training side, 2026-09-04
-#: (HIGGS_FIELD_NOTES.md): vllm-omni exposes no adapter flags at all, and its
+#: (docs/history/HIGGS_FIELD_NOTES.md): vllm-omni exposes no adapter flags at all, and its
 #: higgs_audio_v3 talker class does not implement `SupportsLoRA`. So a voice
 #: cannot be attached to a running server, and there is no per-request adapter
 #: either. Every fine-tuned voice ships as a MERGED CHECKPOINT DIRECTORY
@@ -825,7 +825,7 @@ def require_base_weights_dir(base_dir: str, voice_name: str) -> str:
     manifest's pinned revision and names that directory in the voices document
     so a clone renders on the bytes the pin names, instead of on whatever
     snapshot the HuggingFace cache happens to hold
-    (`crucible/narratorvoices.py`, PHASE3-TTS.md section 4b). Before
+    (`crucible/narratorvoices.py`, docs/history/PHASE3-TTS.md section 4b). Before
     2026-09-15 the only field for it was `checkpointDir`, which means a MERGE,
     and the first zero-shot load Crucible ever made was refused by name for a
     file base weights never had.

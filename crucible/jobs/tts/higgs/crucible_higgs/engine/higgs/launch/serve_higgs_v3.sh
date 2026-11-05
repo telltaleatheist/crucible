@@ -14,7 +14,7 @@
 #
 # electron/scripts/higgs/serve_higgs_v3.sh is kept BYTE-IDENTICAL to this file
 # by tools/test-higgs-engine.js. That copy belongs to BookForge's LEGACY local
-# render path (docs/CRUCIBLE_ROLLOUT_PLAN.md item 2.4: the local narrator spawn
+# render path (docs/history/CRUCIBLE_ROLLOUT_PLAN.md item 2.4: the local narrator spawn
 # is a dated stopgap, deleted after Owen's in-app pass) and dies with it; THIS
 # one is canonical.
 #
@@ -80,7 +80,7 @@
 #      rejects its bundled CCCL headers), so the global flag alone is not enough
 #      to keep it out. Passing it in the stage override says it at the level the
 #      profile says it at.
-# The levers are documented in the campaign's HIGGS_V3_LEVERS.md.
+# The levers are documented in the campaign's narrator's Higgs v3 lever notes.
 #
 # BookForge's installer copies its own (byte-identical) copy into
 # <env>/bin/serve_higgs_v3.sh and chmod +x's it;

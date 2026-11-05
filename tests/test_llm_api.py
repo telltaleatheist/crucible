@@ -763,6 +763,9 @@ def test_the_4bit_27b_actually_loads_on_a_free_24_gib_card(
         *STRUCTURED_OUTPUTS_ARGS,
         "--kv-cache-memory-bytes", str(pool),
         "--gpu-memory-utilization", f"{budget / total:.4f}",
+        "--enable-auto-tool-choice",
+        "--tool-call-parser", "qwen3_coder",
+        "--reasoning-parser", "qwen3",
     ]
     assert pool > terms.kv_bytes_per_token * 16384
 

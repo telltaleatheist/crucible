@@ -6,6 +6,7 @@ failed while GET /v1/jobs/{id}/events answered 200 and then sent nothing, foreve
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -13,6 +14,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from .conftest import configure_box, parse_sse
+
+# Recent, and it has to be: a job finished longer ago than [jobs] retention_days is reaped at
+# startup, and its stream answers 404. A fixed date here passed until 2026-10-11, then failed.
+FINISHED = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
 
 
 def _ended_job(home: Path, job_id: str, **fields: object) -> None:
@@ -31,9 +36,9 @@ def _ended_job(home: Path, job_id: str, **fields: object) -> None:
 @pytest.mark.parametrize(
     ("fields", "events"),
     [
-        ({"status": "failed", "finished": "2026-10-04T17:18:00+00:00",
+        ({"status": "failed", "finished": FINISHED,
           "error": {"code": "worker_failed", "message": "the worker exited -15"}}, ["failed"]),
-        ({"status": "done", "finished": "2026-10-04T17:18:00+00:00", "artifacts": ["out.txt"]}, ["done"]),
+        ({"status": "done", "finished": FINISHED, "artifacts": ["out.txt"]}, ["done"]),
         ({}, ["note"]),  # left running: it comes back interrupted
     ],
 )

@@ -1,6 +1,6 @@
 """The Higgs audio codec: 8 codebooks at 25 fps, a delay pattern, 24 kHz.
 
-Geometry, measured 2026-09-04 (`HIGGS_NOTES.md` section A, campaign
+Geometry, measured 2026-09-04 (narrator's Higgs notes section A, campaign
 `2026-09-01-cod-full-rebuild/higgs`) and IDENTICAL in v2 and v3:
 
     8 codebooks, codebook_size 1024, audio vocab 1026 (1024 codes + stream
@@ -10,7 +10,7 @@ Geometry, measured 2026-09-04 (`HIGGS_NOTES.md` section A, campaign
 FROM THE MODEL'S OUTPUT TO A WAVEFORM. `model.generate` returns the WHOLE audio
 stream as a (batch, seq, 8) matrix - the reference clips' frames and the newly
 generated ones together. The steps below reproduce transformers'
-`processing_higgs_audio_v2.batch_decode`, enumerated in HIGGS_NOTES.md, with one
+`processing_higgs_audio_v2.batch_decode`, enumerated in narrator's Higgs notes, with one
 addition marked (BF):
 
   1. find the LAST row whose 8 entries all equal 1024 (stream BOS): that is where

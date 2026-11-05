@@ -156,6 +156,7 @@ def test_each_settings_section_has_one_resolver_in_patch_order():
         "advertise",
         "cors_origins",
         "open_pairing",
+        "auth",
         "install_on_submit",
         "retention_days",
         "max_session_hold_s",

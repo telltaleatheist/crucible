@@ -43,6 +43,7 @@ async def lifespan(app):
         worker.wait(timeout=5)
         (root / 'cleaned').write_text('worker exited')
 app = FastAPI(lifespan=lifespan)
+app.state.restart_asked = False
 from crucible.events import EventHub
 app.state.events = EventHub()
 from types import SimpleNamespace

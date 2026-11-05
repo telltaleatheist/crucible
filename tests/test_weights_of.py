@@ -362,7 +362,7 @@ def test_decide_lists_the_aliases_and_the_text_classes_do_not() -> None:
     expected_decide = {
         CUDA_LINUX: [
             "qwen3.8-27b-4bit-vl", "qwen3.5-9b-vl", "qwen3.8-27b-4bit",
-            "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b",
+            "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-4b-8bit", "qwen3.5-0.8b",
         ],
         MLX_DARWIN: [
             "qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b-vl", "qwen3.5-9b",

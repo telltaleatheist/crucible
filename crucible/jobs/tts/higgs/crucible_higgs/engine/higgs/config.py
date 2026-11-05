@@ -3,8 +3,8 @@
 Sources (all read-only): the campaign
 `E:\\training\\_campaigns\\2026-09-01-cod-full-rebuild\\higgs\\` - `render_v2.py`
 (the measured render path), `smoke_v2.py` (the processor probe),
-`v2_pokemon_para_log.json` (the nine-chunk audition), `HIGGS_NOTES.md` (the
-template, the token ids, the licence) and `HIGGS_V3_LEVERS.md` (the v3 lever
+`v2_pokemon_para_log.json` (the nine-chunk audition), narrator's Higgs notes (the
+template, the token ids, the licence) and narrator's Higgs v3 lever notes (the v3 lever
 sweep, which is DESIGN input here - v3 is not built).
 
 THE VOICE IS CLIPS, AND CLIPS COME FROM A FILE. Orpheus's voice is a token that

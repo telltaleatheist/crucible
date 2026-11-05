@@ -1,7 +1,7 @@
 """Higgs TTS 3 served by **SGLang-Omni 0.1.4** - the second serving stack.
 
 WHY THERE IS A SECOND STACK AT ALL. Measured by the training side on the night of
-2026-09-05 (HIGGS_FIELD_NOTES.md 4n, `night3/sgl/`): the same 50 packed chunks of
+2026-09-05 (docs/history/HIGGS_FIELD_NOTES.md 4n, `night3/sgl/`): the same 50 packed chunks of
 *Working Towards the Fuhrer*, the same merged checkpoint (ckpt-1080), the same
 sampling, one seed, scored by `higgs_ladder.py score` (whisper coverage,
 max_skip_words, insert_rate, early-stop) plus 3 s ECAPA windows for voice

@@ -119,6 +119,7 @@ CASES: list[tuple[str, str, str, type[BaseModel], dict[str, str]]] = [
     }),
     ("method", "job", "body", responses.JobStatus, {
         "sampling": "a tts job's done_extra key; the SDK reads it off the done event",
+        "message": "what the job is doing in words; the SDK reads it off the events",
     }),
     ("function", "readVoiceInfo", "entry", responses.VoiceInfo, {
         "source": "provenance of the manifest; the SDK does not surface it",

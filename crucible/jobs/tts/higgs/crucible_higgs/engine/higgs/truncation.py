@@ -905,7 +905,7 @@ class GuardPlan:
 
     def _build_verdict(self, task) -> dict:
         """What the guard decided about one chunk, for a driver to ship beside
-        the audio. PHASE6-REMOTE-RENDER.md section 3.
+        the audio. docs/history/PHASE6-REMOTE-RENDER.md section 3.
 
         `takes` is the event records VERBATIM - the evidence, unsummarised,
         because a client that wants to know why can read it and a client that

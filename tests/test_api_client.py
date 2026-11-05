@@ -837,6 +837,8 @@ EXCLUDED: dict[str, str] = {
     "POST /v1/openai/rerank": "Cohere's shape of POST /v1/rerank; `api rerank` sends the native route",
     "POST /openai/v1/rerank": "Cohere's shape of POST /v1/rerank; `api rerank` sends the native route",
     "GET /v1/docs.md": "the reference itself, for an app or an agent; `/docs` serves the page",
+    "GET /v1/prompting": "the prompting guides' index, documentation for an app or an agent to read",
+    "GET /v1/prompting/{name}.md": "one prompting guide, documentation for an app or an agent to read",
 }
 
 

@@ -61,6 +61,14 @@ def fake_repo(tmp_path: Path) -> Path:
         'echo "deploy: timing mac 4"\n',
     )
     (work / "scripts/promote_release.py").write_text("", encoding="utf-8")
+    # ship.sh refuses a release the changelog says nothing about.
+    (work / "scripts/changelog.py").write_text(
+        (REPO / "scripts/changelog.py").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (work / "docs").mkdir()
+    (work / "docs/CHANGELOG.md").write_text(
+        "# Changelog\n\n## Unreleased\n\n- A change.\n", encoding="utf-8"
+    )
 
     git(work, "init", "--quiet", "-b", "main")
     git(work, "config", "user.email", "keeper@example.invalid")
@@ -115,7 +123,7 @@ def test_a_dry_run_prints_a_row_for_every_step_it_ran(tmp_path: Path) -> None:
     assert "ship: where v1.0.3 went" in done.stdout, done.stdout
     rows = re.findall(r"^  (\S.*?)\s\s+(\d+m\d\ds|\d+s)$", done.stdout, re.MULTILINE)
     named = [name for name, _ in rows]
-    assert len(named) == 2, done.stdout
+    assert len(named) == 3, done.stdout
     assert any("tree" in name for name in named), named
     assert any("version" in name for name in named), named
     banners = [line.strip("= ") for line in done.stdout.splitlines() if line.startswith("=== ")]
