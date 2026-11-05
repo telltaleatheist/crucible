@@ -1,106 +1,50 @@
-"""`crucible_higgs.serve.worker`'s environment knobs: the refusals, and the OWNER.
+"""`crucible_higgs.serve.worker`'s environment: the knobs that went, the reader that
+stayed, and the warmup that replaced them.
 
-TWO DEFECTS, ONE FILE, because they are two halves of the same rule
-(crucible/docs/ARCHITECTURE.md R1: one fact, one owner, and where a copy must
-exist it is CHECKED rather than authored twice).
+Moved from narrator@dc05e7e7 `tests/test_serve_stream_env.py`. narrator's file was
+about the ORPHEUS_STREAM_* knobs - the streaming width, the ramp and the warm max,
+read through `env.env_number` and held equal to BookForge's Orpheus pool, which
+owned them. Those knobs sized Orpheus's MLX grouping and its warmup, and they went
+with Orpheus; their tests went with them. What stays:
 
-**1. GARBAGE WAS COERCED TO A DEFAULT.** Four reads in `serve/worker.py` - the
-stream gap (since deleted, see below), the warm-up's `n` and `ramp`, and the
-grouping `cap` - sat behind
-`except (TypeError, ValueError): <the default>` and `if x < 1: x = 1`.
-`ORPHEUS_STREAM_BATCH='1 6'` (a stray space) therefore rendered every Listen
-batch 16 wide on a box tuned for 4, and nothing said so. The same package
-already had the opposite policy written down and enforced, in
-`engine/higgs/mlx_backend.py`'s `_env_number`, whose docstring is the ruling:
-"Garbage is never coerced and never defaulted past... 'it fell back to the
-default' is exactly the sentence nobody can debug." One policy, two answers,
-nothing comparing them. That function is now `narrator/env.py:env_number` and
-both sides call it.
-
-**2. TWO OF THE DEFAULTS ARE NOT NARRATOR'S TO CHOOSE.**
-`electron/orpheus-worker-pool.ts` owns the streaming width and the ramp
-(`STREAM_BATCH_CEILING_DEFAULT`, `STREAM_RAMP_WIDTH`) and sets both on every
-serve spawn it makes, so narrator's numbers are a SECOND COPY - live only for a
-worker started without that spawn (`python -m crucible_higgs.serve`, the CLI, these
-tests), and free to drift silently otherwise. They are read out of the
-TypeScript here and asserted equal, the way
-`test_engine_protocol.test_the_engines_agree_with_the_assemblers_own_table`
-holds the assembler's copy of `pads`/`edge_fade` to the engines'.
-
-**THE THIRD KNOB IS GONE (2026-09-18).** `ORPHEUS_STREAM_GAP` used to be here as
-the one default that WAS narrator's own - 0.3 s of silence appended to every
-streamed row. It is deleted with the padding: the gap between two Listen rows is
-`text/gaps.classify_gap`'s answer for the row, stated on the wire as `gapSec` and
-inserted by the PLAYER, so the number has one owner and it is the same one the
-book uses. What is pinned about it lives in
-`test_engine_serve_protocol.py` (the field, per row) rather than here, because
-there is no longer an environment variable to have an opinion about.
+  * the gap has no environment of its own on this worker - it is
+    `text/gaps.classify_gap`'s answer, stated as `gapSec`;
+  * `env_number` is the one numeric reader, and the MLX backend calls it;
+  * no `ORPHEUS_*` variable is read by the worker at all;
+  * THE WARMUP SHAPES. Every Crucible load is `warm: true`, and narrator warmed
+    at the knobs' unset defaults - 1, ramp 8, full 16 - because Crucible never set
+    them. The constants that replaced the knobs must keep exactly that warmup,
+    and `WarmupShapesTest` pins it through a real worker and the fake's render log.
 """
+import json
 import os
-import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PYTHON_ROOT = os.path.join(os.path.dirname(os.path.dirname(_HERE)), "crucible", "jobs", "tts", "higgs")   # holds crucible_higgs
-_REPO_ROOT = os.path.dirname(_PYTHON_ROOT)                  # .../bookforge
 if _PYTHON_ROOT not in sys.path:
     sys.path.insert(0, _PYTHON_ROOT)
 
-from crucible_higgs.env import env_number                                   # noqa: E402
-from crucible_higgs.serve import worker as W                                # noqa: E402
-
-#: electron/orpheus-worker-pool.ts - the OWNER of the width and the ramp.
-POOL_TS = os.path.join(_REPO_ROOT, 'electron', 'orpheus-worker-pool.ts')
+from crucible_higgs.env import env_number  # noqa: E402
+from crucible_higgs.serve import worker as W  # noqa: E402
 
 
-def _ts_const(name: str) -> int:
-    """`const <name> = <int>;` out of the pool module, or an AssertionError.
+class TheKnobsAreGoneTest(unittest.TestCase):
 
-    Read as TEXT rather than executed: this interpreter has no TypeScript, and
-    the point is only to compare two literals. A rename on that side lands here
-    as a named failure instead of a silent divergence.
-    """
-    if not os.path.isfile(POOL_TS):
-        raise AssertionError(
-            f'the owner of the streaming width is missing: {POOL_TS}. '
-            'narrator keeps a copy of two of its numbers and this test is the '
-            'only thing keeping them equal.')
-    with open(POOL_TS, encoding='utf-8') as handle:
-        source = handle.read()
-    found = re.search(rf'^(?:export )?const {name}\s*=\s*(\d+);',
-                      source, re.MULTILINE)
-    if found is None:
-        raise AssertionError(
-            f'{name} is no longer a plain integer constant in '
-            f'{os.path.basename(POOL_TS)}. It is the owner of a number narrator '
-            'also holds; if it moved, narrator\'s copy has to move with it.')
-    return int(found.group(1))
-
-
-class TheOwnerOfEachDefaultTest(unittest.TestCase):
-
-    def test_the_batch_width_default_is_the_pools(self):
-        self.assertEqual(W.STREAM_BATCH_DEFAULT,
-                         _ts_const('STREAM_BATCH_CEILING_DEFAULT'),
-                         'electron/orpheus-worker-pool.ts owns the streaming '
-                         'width; narrator holds a copy for spawns that are not '
-                         'its, and the two just drifted')
-
-    def test_the_ramp_default_is_the_pools(self):
-        self.assertEqual(W.STREAM_RAMP_DEFAULT, _ts_const('STREAM_RAMP_WIDTH'))
+    def test_the_orpheus_stream_knobs_are_gone(self):
+        for gone in ('STREAM_BATCH_ENV', 'STREAM_RAMP_ENV', 'STREAM_WARM_MAX_ENV',
+                     'STREAM_BATCH_DEFAULT', 'STREAM_RAMP_DEFAULT',
+                     'stream_batch_cap', 'stream_ramp_width', 'stream_warm_max'):
+            self.assertFalse(hasattr(W, gone), f'{gone} is back')
 
     def test_the_stream_gap_knob_is_gone(self):
-        """THE GAP IS NOT AN ENVIRONMENT ANY MORE, and a reappearing constant is
-        a second owner of a number the book already has.
-
-        It was 0.3 s appended to every streamed row here while `gaps.json` asked
-        the assembler for 0.6 s - so Listen paced at half the book and ignored
-        the voice's inject entirely. The rule moved to the one function that has
-        always held it (`text/gaps.classify_gap`) and the number now travels as
-        `gapSec` for the player to realize.
-        """
+        """THE GAP IS NOT AN ENVIRONMENT, and a reappearing constant is a second
+        owner of a number the book already has (`text/gaps.classify_gap`)."""
         for gone in ('STREAM_GAP_SEC', 'STREAM_GAP_DEFAULT_SEC', 'STREAM_GAP_ENV'):
             self.assertFalse(hasattr(W, gone),
                              f'{gone} is back; the gap has one owner and it is '
@@ -108,95 +52,30 @@ class TheOwnerOfEachDefaultTest(unittest.TestCase):
         self.assertIn('gapSec', open(W.__file__, encoding='utf-8').read(),
                       'the worker no longer states the gap it classified')
 
+    def test_the_worker_reads_no_orpheus_variable(self):
+        """AST over `serve/worker.py`: no `os.environ.get('ORPHEUS_...')` and no
+        `os.environ['ORPHEUS_...']` anywhere in it."""
+        import ast
+        source = open(W.__file__, encoding='utf-8').read()
+        offenders = []
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                    and node.value.startswith('ORPHEUS_'):
+                offenders.append((node.lineno, node.value))
+        self.assertEqual(offenders, [])
 
-class UnsetMeansTheDefaultTest(unittest.TestCase):
-
-    def test_unset(self):
-        with mock.patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(W.stream_batch_cap(), 16)
-            self.assertEqual(W.stream_ramp_width(), 8)
-            self.assertEqual(W.stream_warm_max(), 16)
-
-    def test_exported_empty_means_unset(self):
-        """What a shell hands over when a setting was cleared. It means "no
-        answer", not "zero rows"."""
-        with mock.patch.dict(os.environ, {W.STREAM_BATCH_ENV: '   ',
-                                          W.STREAM_RAMP_ENV: ''}, clear=True):
-            self.assertEqual(W.stream_batch_cap(), 16)
-            self.assertEqual(W.stream_ramp_width(), 8)
-
-    def test_a_value_is_read(self):
-        with mock.patch.dict(os.environ, {W.STREAM_BATCH_ENV: '4',
-                                          W.STREAM_RAMP_ENV: '2'}, clear=True):
-            self.assertEqual(W.stream_batch_cap(), 4)
-            self.assertEqual(W.stream_ramp_width(), 2)
-
-    def test_the_warm_max_LAYERS_onto_the_grouping_cap(self):
-        """Unset means "warm whatever the grouping cap is" - a layered default,
-        not a fallback: the answer still comes from a variable somebody set."""
-        with mock.patch.dict(os.environ, {W.STREAM_BATCH_ENV: '4'}, clear=True):
-            self.assertEqual(W.stream_warm_max(), 4)
-        with mock.patch.dict(os.environ, {W.STREAM_BATCH_ENV: '4',
-                                          W.STREAM_WARM_MAX_ENV: '12'},
-                             clear=True):
-            self.assertEqual(W.stream_warm_max(), 12)
-
-
-class GarbageIsRefusedByNameTest(unittest.TestCase):
-    """THE DEFECT, in the form it shipped in."""
-
-    def test_the_stray_space_that_started_this(self):
-        # `ORPHEUS_STREAM_BATCH='1 6'`. It used to become 16 - the default - on a
-        # box tuned for 4, with nothing in any log to trace it by.
-        with mock.patch.dict(os.environ, {W.STREAM_BATCH_ENV: '1 6'}, clear=True):
-            with self.assertRaises(ValueError) as caught:
-                W.stream_batch_cap()
-            message = str(caught.exception)
-            self.assertIn(W.STREAM_BATCH_ENV, message)
-            self.assertIn("'1 6'", message)
-
-    def test_every_streaming_knob_refuses_garbage_by_name(self):
-        for name, read in ((W.STREAM_BATCH_ENV, W.stream_batch_cap),
-                           (W.STREAM_RAMP_ENV, W.stream_ramp_width),
-                           (W.STREAM_WARM_MAX_ENV, W.stream_warm_max)):
-            for value in ('banana', '8 rows', '1.5', '0', '-1'):
-                with self.subTest(variable=name, value=value):
-                    with mock.patch.dict(os.environ, {name: value}, clear=True):
-                        with self.assertRaises(ValueError) as caught:
-                            read()
-                        self.assertIn(name, str(caught.exception))
-
-    def test_a_garbage_grouping_cap_is_not_survivable_by_asking_for_the_warm_max(self):
-        """The layered default must not become an escape hatch: if the variable
-        it layers onto is garbage, the refusal is still the answer."""
-        with mock.patch.dict(os.environ, {W.STREAM_BATCH_ENV: 'four'},
-                             clear=True):
-            with self.assertRaises(ValueError) as caught:
-                W.stream_warm_max()
-            self.assertIn(W.STREAM_BATCH_ENV, str(caught.exception))
-
-    def test_zero_is_a_real_answer_for_a_gap_and_not_for_a_width(self):
-        """Same reader, two minima, and that difference is the whole reason
-        `minimum` is a parameter: a gap of 0 means "let the chunks butt together
-        on the model's own pauses", while a width of 0 is not a narrower batch,
-        it is a typo.
-
-        The gap half is read through `text/gaps.classify_gap`'s
-        `NARRATOR_SENTENCE_GAP` now - this worker has no gap variable of its own
-        (see the module docstring) - so what is asserted here is the FLOOR
-        behaviour it still has to keep."""
+    def test_zero_is_a_real_answer_for_a_gap(self):
+        """A gap of 0 means "let the chunks butt together on the model's own
+        pauses", and `classify_gap` keeps it - it is not a typo the way a width
+        of 0 would be."""
         from crucible_higgs.text.gaps import classify_gap_seconds
         with mock.patch.dict(os.environ, {'NARRATOR_SENTENCE_GAP': '0'},
                              clear=True):
             self.assertEqual(classify_gap_seconds('A sentence.'), (0.0, 0.0))
-        with mock.patch.dict(os.environ, {W.STREAM_BATCH_ENV: '0'}, clear=True):
-            with self.assertRaises(ValueError):
-                W.stream_batch_cap()
 
 
 class OnePolicyOneImplementationTest(unittest.TestCase):
-    """R1, asserted as code rather than left as prose: the module that WROTE the
-    rule and the module that was breaking it now call the same function."""
+    """R1, asserted as code: the one numeric env reader is `env.env_number`."""
 
     def test_the_mlx_backend_reads_through_the_same_function(self):
         from crucible_higgs.engine.higgs import mlx_backend
@@ -204,32 +83,76 @@ class OnePolicyOneImplementationTest(unittest.TestCase):
         self.assertFalse(hasattr(mlx_backend, '_env_number'),
                          'the private copy is back; there is one reader')
 
-    def test_no_streaming_knob_is_read_with_a_bare_os_environ_get(self):
-        """AST over `serve/worker.py`: an `os.environ.get('ORPHEUS_STREAM_*')`
-        anywhere in it is a read that has escaped the policy again.
+    def test_garbage_is_refused_by_name(self):
+        with mock.patch.dict(os.environ, {'NARRATOR_TEST_WIDTH': '1 6'},
+                             clear=True):
+            with self.assertRaises(ValueError) as caught:
+                env_number('NARRATOR_TEST_WIDTH', 16, int, 1, 'a width')
+            self.assertIn('NARRATOR_TEST_WIDTH', str(caught.exception))
+            self.assertIn("'1 6'", str(caught.exception))
 
-        `ORPHEUS_SKIP_WARMUP` is deliberately NOT in scope - it is a flag
-        compared to '1', not a number, and there is nothing for a numeric
-        reader to say about it.
-        """
-        import ast
-        source = open(W.__file__, encoding='utf-8').read()
-        offenders = []
-        for node in ast.walk(ast.parse(source)):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            if not (isinstance(func, ast.Attribute) and func.attr == 'get'):
-                continue
-            value = func.value
-            if not (isinstance(value, ast.Attribute) and value.attr == 'environ'):
-                continue
-            for arg in node.args:
-                if (isinstance(arg, ast.Constant)
-                        and isinstance(arg.value, str)
-                        and arg.value.startswith('ORPHEUS_STREAM')):
-                    offenders.append((node.lineno, arg.value))
-        self.assertEqual(offenders, [])
+    def test_unset_or_exported_empty_is_the_default(self):
+        with mock.patch.dict(os.environ, {'NARRATOR_TEST_WIDTH': '  '},
+                             clear=True):
+            self.assertEqual(env_number('NARRATOR_TEST_WIDTH', 16, int, 1, 'w'), 16)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(env_number('NARRATOR_TEST_WIDTH', 16, int, 1, 'w'), 16)
+
+
+class WarmupShapesTest(unittest.TestCase):
+    """A `warm: true` load renders exactly what narrator rendered for every
+    Crucible load: three single chunks, then a batch of 8 and a batch of 16 of
+    the same sentence - 3 + 8 + 16 renders - and says so on a status line."""
+
+    def test_a_warm_load_renders_widths_1_8_and_16(self):
+        self.assertEqual((W.WARMUP_RAMP_WIDTH, W.WARMUP_FULL_WIDTH), (8, 16))
+        root = tempfile.mkdtemp(prefix='narrator-warmup-')
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        log = os.path.join(root, 'renders.jsonl')
+        env = dict(os.environ)
+        env.update({'NARRATOR_ENGINE': 'higgs-v3', 'NARRATOR_FAKE_RENDER_LOG': log,
+                    'PYTHONUNBUFFERED': '1', 'PYTHONIOENCODING': 'utf-8'})
+        requests = (json.dumps({'action': 'load', 'voice': 'deathstalker',
+                                'warm': True}) + '\n'
+                    + json.dumps({'action': 'quit'}) + '\n')
+        done = subprocess.run(
+            [sys.executable, '-m', 'crucible_higgs.serve', '--fake-engine'],
+            cwd=_PYTHON_ROOT, input=requests, capture_output=True, text=True,
+            encoding='utf-8', env=env, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        messages = [json.loads(line) for line in done.stdout.splitlines() if line]
+        statuses = [m['message'] for m in messages if m['type'] == 'status']
+        self.assertIn('Warming up voice (widths 1, 8, 16)...', statuses)
+        self.assertIn('Warmup complete', statuses)
+        self.assertEqual(messages[-1]['type'], 'loaded', messages)
+        with open(log, encoding='utf-8') as handle:
+            renders = [json.loads(line) for line in handle if line.strip()]
+        self.assertEqual(len(renders), 3 + 8 + 16)
+        self.assertEqual([r['text'] for r in renders[:3]],
+                         ['Hello.', 'This is a brief warmup.',
+                          'Here is a slightly longer warmup sentence to prepare '
+                          'smooth playback.'])
+        self.assertEqual({r['text'] for r in renders[3:]},
+                         {'This is a brief warmup.'})
+        # The batch warmups seed by POSITION (no caller index): 0..7, then 0..15.
+        self.assertEqual([r['index'] for r in renders[3:]],
+                         list(range(8)) + list(range(16)))
+
+    def test_a_cold_load_renders_nothing(self):
+        root = tempfile.mkdtemp(prefix='narrator-warmup-')
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        log = os.path.join(root, 'renders.jsonl')
+        env = dict(os.environ)
+        env.update({'NARRATOR_ENGINE': 'higgs-v3', 'NARRATOR_FAKE_RENDER_LOG': log})
+        requests = (json.dumps({'action': 'load', 'voice': 'deathstalker',
+                                'warm': False}) + '\n'
+                    + json.dumps({'action': 'quit'}) + '\n')
+        done = subprocess.run(
+            [sys.executable, '-m', 'crucible_higgs.serve', '--fake-engine'],
+            cwd=_PYTHON_ROOT, input=requests, capture_output=True, text=True,
+            encoding='utf-8', env=env, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse(os.path.exists(log))
 
 
 if __name__ == '__main__':

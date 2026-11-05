@@ -695,8 +695,8 @@ def _loaded_server(engine):
     setting them here is what makes `_row_voice` answer instead of raising
     'Model not loaded'.
     """
-    from crucible_higgs.serve.worker import OrpheusStreamServer
-    server = OrpheusStreamServer()
+    from crucible_higgs.serve.worker import StreamServer
+    server = StreamServer()
     server.orph = engine
     server.current_voice = engine.voice
     server.engine_voices = {engine.voice: None}
@@ -719,18 +719,8 @@ class WorkerRenderRoutingTest(unittest.TestCase):
     into Orpheus's MLX ladder and failed on the first sentence.
     """
 
-    def test_the_predicate_names_orpheus_and_nothing_else(self):
-        from crucible_higgs.serve.worker import _uses_orpheus_token_pipeline
-        self.assertTrue(_uses_orpheus_token_pipeline(
-            _StubEngine('orpheus', 'mlx')))
-        for engine_id in ('higgs-v3', 'higgs-v2-scaffold', 'higgs'):
-            for backend in ('mlx', 'vllm-omni', 'transformers'):
-                with self.subTest(engine=engine_id, backend=backend):
-                    self.assertFalse(_uses_orpheus_token_pipeline(
-                        _StubEngine(engine_id, backend)))
-
     def test_higgs_on_mlx_renders_through_render_audio(self):
-        from crucible_higgs.serve.worker import OrpheusStreamServer
+        from crucible_higgs.serve.worker import StreamServer
         server = _loaded_server(_StubEngine('higgs-v3', 'mlx'))
         engine = server.orph
         audio, _m = server._generate_audio('Hello there.', index=4,
@@ -741,15 +731,15 @@ class WorkerRenderRoutingTest(unittest.TestCase):
     def test_the_row_index_seeds_the_row_and_is_not_dropped(self):
         """chunk i renders with seed + i. A worker that passed 0 for every row
         would make a whole book of identical draws for identical text."""
-        from crucible_higgs.serve.worker import OrpheusStreamServer
+        from crucible_higgs.serve.worker import StreamServer
         server = _loaded_server(_StubEngine('higgs-v3', 'mlx'))
         engine = server.orph
         for i in (0, 1, 17):
             server._generate_audio('A line.', index=i, door=W_FOR_STREAM)
         self.assertEqual([index for _text, index in engine.calls], [0, 1, 17])
 
-    def test_an_engine_that_is_neither_orpheus_nor_renderable_is_a_named_error(self):
-        from crucible_higgs.serve.worker import OrpheusStreamServer
+    def test_an_engine_that_cannot_render_is_a_named_error(self):
+        from crucible_higgs.serve.worker import StreamServer
         class _NoRender(_StubEngine):
             render_audio = None
 
@@ -763,15 +753,14 @@ class WorkerRenderRoutingTest(unittest.TestCase):
             server._generate_audio('Hello.', door=W_FOR_STREAM)
         self.assertIn('render_audio', str(caught.exception))
 
-    def test_the_batch_dispatcher_does_not_send_higgs_down_orpheuss_mlx_path(self):
-        """`_generate_batch_mlx_ordered` calls `_generate_mlx_batch_audio`,
-        which is Orpheus's. The stub has no such method, so a mis-route would
-        raise here rather than render."""
+    def test_a_batch_on_an_engine_with_no_render_many_renders_row_by_row(self):
+        """narrator's version of this asserted Higgs never took Orpheus's MLX
+        grouping (`_generate_batch_mlx_ordered`), which is gone with Orpheus.
+        What remains true: an engine without `render_many` is rendered one row
+        at a time through `render_audio`, every row answered, batch_done last."""
         import crucible_higgs.serve.worker as W
         server = _loaded_server(_StubEngine('higgs-v3', 'mlx'))
         engine = server.orph
-        taken = []
-        server._generate_batch_mlx_ordered = lambda *a, **k: taken.append('orpheus-mlx')
         sent = []
         original = W.send_response
         W.send_response = lambda kind, payload=None: sent.append((kind, payload))
@@ -779,7 +768,6 @@ class WorkerRenderRoutingTest(unittest.TestCase):
             server.generate_batch([{'i': 0, 'text': 'One line.'}], 'en')
         finally:
             W.send_response = original
-        self.assertEqual(taken, [], 'Higgs must not take Orpheus\'s MLX path')
         self.assertEqual(engine.calls, [('One line.', 0)])
         self.assertEqual(sent[-1][0], 'batch_done')
 
@@ -800,7 +788,8 @@ class LazyImportTest(unittest.TestCase):
 
     def test_importing_the_mlx_backend_pulls_in_no_mlx(self):
         import subprocess
-        root = os.path.dirname(os.path.dirname(_HERE))
+        root = os.path.join(os.path.dirname(os.path.dirname(_HERE)), 'crucible',
+                            'jobs', 'tts', 'higgs')
         probe = ('import sys\n'
                  'import crucible_higgs.engine.higgs.mlx_backend\n'
                  "bad = sorted(m for m in ('mlx', 'mlx_lm', 'mlx_audio', 'torch') "

@@ -66,7 +66,9 @@ max_chars = 800
 sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }
 """
 
-RECIPE_PINS = {"narrator": "0.1.0", "torch": "2.13.0"}
+# A tts env as the worker needs it: the serving stack (the headline) and torch. No
+# narrator: the worker is Crucible's own (crucible/jobs/tts/higgs/).
+RECIPE_PINS = {"sglang-omni": "0.1.4", "torch": "2.13.0"}
 
 
 @pytest.fixture

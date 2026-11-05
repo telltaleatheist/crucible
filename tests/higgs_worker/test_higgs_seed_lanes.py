@@ -25,8 +25,7 @@ if _PYTHON_ROOT not in sys.path:
     sys.path.insert(0, _PYTHON_ROOT)
 
 from crucible_higgs.engine.higgs import truncation  # noqa: E402
-from crucible_higgs.serve.fake_engine import (  # noqa: E402
-    fake_engine_class, fake_engine_config)
+from crucible_higgs.serve.fake_engine import fake_engine_class, fake_engine_config  # noqa: E402
 
 BASE_SEED = 1234
 TAKES = (0, 1, 2, 3)

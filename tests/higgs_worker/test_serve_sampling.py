@@ -53,10 +53,13 @@ _PYTHON_ROOT = os.path.join(os.path.dirname(os.path.dirname(_HERE)), "crucible",
 if _PYTHON_ROOT not in sys.path:
     sys.path.insert(0, _PYTHON_ROOT)
 
-from crucible_higgs.engine import item_sampling as S                       # noqa: E402
-from tests.higgs_worker.test_engine_serve_protocol import (         # noqa: E402
-    Worker, _WorkerCase, fake_higgs_band)
+from crucible_higgs.engine import item_sampling as S  # noqa: E402
 
+from tests.higgs_worker.test_engine_serve_protocol import (  # noqa: E402
+    Worker,
+    _WorkerCase,
+    fake_higgs_band,
+)
 
 # ---------------------------------------------------------------------------
 # The parser, on its own
@@ -420,57 +423,6 @@ class SingleGenerateSamplingTest(_SamplingWorkerCase):
         self.assertEqual(self.rendered(), [])
 
 
-class OrpheusRefusesTheChannelTest(_WorkerCase):
-    """ORPHEUS IS DEPRECATED AND HAS NO CHANNEL, so it refuses BY NAME rather
-    than rendering at its voice caps and calling that the rung.
-
-    Owen, 2026-09-14: *"orpheus is deprecated too but hasnt been removed yet.
-    higgs is the frontier"*. It is not a Crucible engine and dies with the
-    legacy layer; a rung silently ignored here would be a retake rendered at
-    the very settings the retake exists to avoid.
-    """
-
-    WORKER_ENV = None       # the Orpheus fake, which is the default
-
-    def test_a_batch_row_with_a_rung_is_refused_and_its_neighbours_render(self):
-        self._ready()
-        self._load('leah')
-        self.w.send(action='generate_batch', items=[
-            {'i': 0, 'text': 'An ordinary sentence.'},
-            {'i': 1, 'text': 'A sentence asking for a rung.',
-             'sampling': {'temperature': 0.7}},
-        ])
-        msgs = self.w.read_until('batch_done')
-        by_i = self._assert_batch_closed(msgs, [0, 1])
-        self.assertIn('data', by_i[0], by_i[0])
-        self.assertNotIn('data', by_i[1])
-        self.assertTrue(by_i[1]['message'].startswith(S.NOT_SUPPORTED), by_i[1])
-        self.assertIn('Orpheus', by_i[1]['message'])
-
-    def test_a_row_with_NO_rung_is_untouched(self):
-        """The channel is additive: Orpheus's existing wire is unchanged."""
-        self._ready()
-        self._load('leah')
-        self.w.send(action='generate_batch',
-                    items=[{'i': 0, 'text': 'An ordinary sentence.'}])
-        by_i = self._assert_batch_closed(self.w.read_until('batch_done'), [0])
-        self.assertIn('data', by_i[0], by_i[0])
-
-    def test_the_single_generate_door_refuses_it_too(self):
-        self._ready()
-        self._load('leah')
-        self.w.send(action='generate', text='A sentence.',
-                    sampling={'temperature': 0.7})
-        msg = self.w.read_until('audio', 'error')[-1]
-        self.assertEqual(msg['type'], 'error', msg)
-        self.assertIn(S.NOT_SUPPORTED, msg['message'])
-
-
-# ---------------------------------------------------------------------------
-# THE RUNG'S OTHER HALF: the take, and the seed lane it moves the render into
-# ---------------------------------------------------------------------------
-
-
 class TakeParserTest(unittest.TestCase):
     """`parse_item_take`, on its own. A SEED IS A SETTING (Owen, 2026-09-14)."""
 
@@ -695,6 +647,33 @@ class TakeOnTheWireTest(_SamplingWorkerCase):
             self.assertGreaterEqual(seed, lane, 'a take fell out of its lane')
             self.assertNotIn(seed, take0)
 
+    def test_a_rerolled_take_draws_exactly_its_lanes_seeds(self):
+        """THE RE-ROLL AT TAKE > 0, seed for seed. Take 2 of chunk 1 draws
+        `seed + index + 2 * TAKE_SEED_STRIDE`; its first take comes back far
+        too short, so the guard re-rolls it at `reroll_seed(seed, index, 1)`
+        moved into the SAME lane - and the re-roll lands, so there are exactly
+        two renders. The neighbour, at take 0, is one render at `seed + 0`."""
+        from crucible_higgs.engine.higgs import truncation
+        self.w.close()
+        env = dict(self.WORKER_ENV)
+        env['NARRATOR_FAKE_HIGGS_RATE'] = json.dumps({'1': 0.4})
+        self.w = Worker(extra_env=env)
+        by_i = self.batch([
+            {'i': 0, 'text': 'An ordinary opening chunk of the chapter.'},
+            {'i': 1, 'text': 'The chunk whose first take comes back far too '
+                             'short for its text, so the guard re-rolls it.',
+             'take': 2},
+        ], retake=True, band=fake_higgs_band())
+        self.assertEqual(by_i[1]['guard']['verdict'], 'rerolled', by_i[1])
+        lane = 2 * truncation.TAKE_SEED_STRIDE
+        self.assertEqual([r['seed'] for r in self.rendered() if r['index'] == 1],
+                         [1234 + 1 + lane,
+                          truncation.reroll_seed(1234, 1, 1) + lane])
+        self.assertEqual([r['seed'] for r in self.rendered() if r['index'] == 0],
+                         [1234])
+        self.assertEqual({r['take'] for r in self.rendered() if r['index'] == 1},
+                         {2})
+
     def test_a_malformed_take_fails_ONLY_that_row_and_names_the_refusal(self):
         by_i = self.batch([
             {'i': 0, 'text': 'A perfectly ordinary neighbouring sentence.'},
@@ -723,48 +702,6 @@ class TakeOnTheWireTest(_SamplingWorkerCase):
         # `generate` is index 0 - "the whole batch it is".
         self.assertEqual([r['seed'] for r in self.rendered()],
                          [1234 + truncation.TAKE_SEED_STRIDE])
-
-
-class OrpheusRefusesTheTakeTest(_WorkerCase):
-    """Orpheus has no seed lane, so a take above 0 is refused BY NAME rather
-    than drawn exactly as take 0 was drawn and reported as the take."""
-
-    WORKER_ENV = None       # the Orpheus fake, which is the default
-
-    def test_a_batch_row_with_a_take_is_refused_and_its_neighbours_render(self):
-        self._ready()
-        self._load('leah')
-        self.w.send(action='generate_batch', items=[
-            {'i': 0, 'text': 'An ordinary sentence.'},
-            {'i': 1, 'text': 'A sentence asking for a retake.', 'take': 1},
-        ])
-        by_i = self._assert_batch_closed(self.w.read_until('batch_done'), [0, 1])
-        self.assertIn('data', by_i[0], by_i[0])
-        self.assertNotIn('data', by_i[1])
-        self.assertTrue(by_i[1]['message'].startswith(S.TAKE_NOT_SUPPORTED),
-                        by_i[1])
-        self.assertIn('Orpheus', by_i[1]['message'])
-
-    def test_take_zero_is_untouched_on_both_spellings(self):
-        """The channel is additive: Orpheus's existing wire is unchanged, and
-        an explicit 0 is the same statement as no key at all."""
-        self._ready()
-        self._load('leah')
-        self.w.send(action='generate_batch', items=[
-            {'i': 0, 'text': 'An ordinary sentence.'},
-            {'i': 1, 'text': 'Another, explicitly at take zero.', 'take': 0},
-        ])
-        by_i = self._assert_batch_closed(self.w.read_until('batch_done'), [0, 1])
-        self.assertIn('data', by_i[0], by_i[0])
-        self.assertIn('data', by_i[1], by_i[1])
-
-    def test_the_single_generate_door_refuses_it_too(self):
-        self._ready()
-        self._load('leah')
-        self.w.send(action='generate', text='A sentence.', take=2)
-        msg = self.w.read_until('audio', 'error')[-1]
-        self.assertEqual(msg['type'], 'error', msg)
-        self.assertIn(S.TAKE_NOT_SUPPORTED, msg['message'])
 
 
 if __name__ == '__main__':

@@ -16,9 +16,8 @@ separately with the same message is N refusals for one cause.
 """
 import unittest
 
-from crucible_higgs.serve.worker import (check_language, normalize_for_tts,
-                                   resolve_language)
 import crucible_higgs.serve.worker as worker
+from crucible_higgs.serve.worker import check_language, normalize_for_tts, resolve_language
 
 
 class ResolveLanguageTest(unittest.TestCase):

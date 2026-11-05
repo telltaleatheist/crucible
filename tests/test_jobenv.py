@@ -484,7 +484,7 @@ def test_a_moved_environment_half_pips_into_the_venv_that_is_there(
     monkeypatch.setattr(
         jobenv,
         "installed_packages",
-        lambda _h, _s: {"torch": "2.13.1", "narrator": "0.1.0"},
+        lambda _h, _s: {"torch": "2.13.1", spec.headline: "0.1.0"},
     )
     ran = _record_runs(monkeypatch)
     monkeypatch.setattr(jobenv.envpatches, "apply", lambda *a, **k: None)

@@ -7,12 +7,13 @@ THE BUG THIS EXISTS FOR (found 2026-09-05, driving Higgs v3 through
 
 `narrator.serve`'s **stdout IS the JSON-lines protocol**. Any bare `print` from
 the engine layer lands between two protocol messages and breaks the client's
-parse. The engine has 148 of them (111 under `orpheus/`, 37 under
-`higgs/`) - counted by AST in
-`tests/test_engine_log_stream.py::LogCallCountTest`, which is where that
-number lives so it cannot drift apart across four docstrings again. It was 126
-at the migration below, and the count moving when the engine gains a log line is
-the test working.
+parse. The engine has 33 of them, all under `higgs/` - counted by AST in
+Crucible's `tests/higgs_worker/test_engine_log_stream.py::LogCallCountTest`,
+which is where that number lives so it cannot drift apart across docstrings
+again. narrator@dc05e7e7 counted 148 (111 under `orpheus/`, 37 under `higgs/`);
+the Higgs four that did not move are the v2 scaffold's transformers backend (2)
+and BookForge's prep-budget helper (2). The count moving when the engine gains a
+log line is the test working.
 
 THIS SENTENCE IS ITSELF UNDER TEST since 2026-09-13
 (`test_the_prose_agrees_with_the_count`), because it drifted: it said 136/25
@@ -35,12 +36,11 @@ Every one of those strings is printed by `engine/orpheus/`. Moving them to
 stderr unconditionally would fix the serve protocol and silently break the
 audiobook progress UI - a different bug, in a place nobody would look.
 
-SO THE STREAM IS THE HOST'S TO SET, and the two hosts differ:
-
-    narrator.serve            stdout is JSON. Engine logs -> STDERR (the default).
-    narrator.compat.worker    stdout is what parallel-tts-bridge.ts PARSES, so
-    (and render.worker)       it calls `set_log_stream(sys.stdout)` and today's
-                              behaviour is preserved byte for byte.
+SO THE STREAM IS THE HOST'S TO SET. In narrator the two hosts differed:
+`narrator.serve` kept stdout JSON and engine logs on STDERR (the default), and
+`narrator.compat.worker` pointed them at stdout for parallel-tts-bridge.ts to
+parse. In Crucible there is one host, `crucible_higgs.serve`, and it sets
+STDERR explicitly (`serve/worker.py:main`).
 
 **NO STRING CHANGES.** The bridge's regexes match these lines exactly as they
 are; this module only decides which file descriptor they are written to.

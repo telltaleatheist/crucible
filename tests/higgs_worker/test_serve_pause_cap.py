@@ -12,7 +12,6 @@ import os
 import unittest
 
 import numpy as np
-
 from crucible_higgs.serve import pause_cap as P
 
 RATE = 24000
@@ -125,7 +124,7 @@ class EmitterTest(unittest.TestCase):
         original = W.send_response
         W.send_response = lambda kind, payload=None: sent.append((kind, payload))
         try:
-            W.OrpheusStreamServer._emit_batch_item({'i': 7, 'text': 'A line.'}, audio, door)
+            W.StreamServer._emit_batch_item({'i': 7, 'text': 'A line.'}, audio, door)
         finally:
             W.send_response = original
         self.assertEqual(len(sent), 1)
@@ -149,6 +148,86 @@ class EmitterTest(unittest.TestCase):
         row = self.emit(audio, W.FOR_STREAM)
         self.assertNotIn('pauseCuts', row)
         self.assertAlmostEqual(row['duration'], 12.0, places=2)
+
+
+class RenderDoorThroughTheWorkerTest(unittest.TestCase):
+    """THE CAP THROUGH `generate_batch`, in-process: a real StreamServer, the
+    Higgs fake, and the fake's audio for one row replaced by a chunk with a
+    10 s interior stall - the fake's own sine has no silence to cut. The render
+    door (no `stream`) cuts and reports on BOTH arms, unjudged and judged; the
+    stream door cuts nothing and reports nothing."""
+
+    STALLED = 'The row whose render stalls for ten seconds in the middle.'
+
+    def setUp(self):
+        from unittest import mock
+
+        import crucible_higgs.serve.worker as W
+        from crucible_higgs.serve.fake_engine import FakeHiggsEngine
+        self.W = W
+        saved_flag = W._FAKE_ENGINE
+        W._FAKE_ENGINE = True
+        self.addCleanup(setattr, W, '_FAKE_ENGINE', saved_flag)
+        for patcher in (
+                mock.patch.dict(os.environ, {'NARRATOR_ENGINE': 'higgs-v3'}),
+                mock.patch.object(W, 'send_response',
+                                  lambda kind, data=None: self.sent.append((kind, data))),
+                mock.patch.object(FakeHiggsEngine, 'audio_for', classmethod(
+                    lambda cls, text: chunk(speech(1.0), quiet(10.0), speech(1.0))
+                    if text == self.STALLED
+                    else np.full(int(RATE * 0.02 * max(1, len(text))), 0.3,
+                                 dtype=np.float32)))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.sent = []
+        self.server = W.StreamServer()
+        self.assertTrue(self.server.load_voice('deathstalker', warm=False))
+        self.sent.clear()
+
+    def rows(self, **extra):
+        self.server.generate_batch(
+            [{'i': 0, 'text': 'An ordinary neighbour.', **extra.pop('item', {})},
+             {'i': 1, 'text': self.STALLED, **extra.pop('item1', {})}], **extra)
+        self.assertEqual(self.sent[-1][0], 'batch_done')
+        return {d['i']: d for kind, d in self.sent if kind == 'batch_item'}
+
+    def test_an_unjudged_render_row_is_cut_and_reports_it(self):
+        by_i = self.rows()
+        self.assertEqual(by_i[0]['pauseCuts'], [])
+        self.assertEqual([c['fromS'] for c in by_i[1]['pauseCuts']], [10.0])
+        self.assertEqual(by_i[1]['pauseCuts'][0]['toS'], 1.5)
+        self.assertAlmostEqual(by_i[1]['pauseCuts'][0]['atS'], 1.0, places=2)
+        self.assertAlmostEqual(by_i[1]['duration'], 3.5, places=2)
+        self.assertNotIn('guard', by_i[1])
+        self.assertIn('capped', by_i[1])
+
+    def test_a_judged_render_row_is_cut_after_the_ladder_and_reports_it(self):
+        """The guard judges the take AS RENDERED - a 10 s hole is over its
+        5 s `max_hole_seconds`, so it re-rolls, and this fake re-renders the
+        same stall, and the ladder (a one-sentence text cannot be split) ships it
+        `accepted-off-length` on side 'hole'. THEN the cap cuts what ships and
+        reports it: the verdict is about the render, the cap about the audio."""
+        # ONE row: the tracker re-centres on the chunks a batch has already
+        # shipped, so a neighbour at another pace would move the band under it.
+        pace = len(self.STALLED) / 12.0
+        self.server.generate_batch(
+            [{'i': 1, 'text': self.STALLED}], retake=True,
+            band={'paceCharsPerSec': pace, 'maxCharsPerSec': pace * 2,
+                  'minCharsPerSec': pace / 2})
+        self.assertEqual(self.sent[-1][0], 'batch_done')
+        row = [d for kind, d in self.sent if kind == 'batch_item'][0]
+        self.assertEqual(row['guard']['verdict'], 'accepted-off-length', row)
+        self.assertEqual([t['side'] for t in row['guard']['takes']], ['hole', 'hole'])
+        self.assertEqual([c['fromS'] for c in row['pauseCuts']], [10.0])
+        self.assertAlmostEqual(row['duration'], 3.5, places=2)
+        self.assertIn('capped', row)
+
+    def test_the_stream_door_cuts_nothing_and_reports_nothing(self):
+        by_i = self.rows(item1={'stream': True})
+        self.assertTrue(by_i[1]['streamed'])
+        self.assertAlmostEqual(by_i[1]['duration'], 12.0, places=2)
+        for row in by_i.values():
+            self.assertNotIn('pauseCuts', row)
 
 
 if __name__ == '__main__':

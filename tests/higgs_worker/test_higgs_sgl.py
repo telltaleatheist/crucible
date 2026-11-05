@@ -967,8 +967,18 @@ class SglEntryModuleTest(unittest.TestCase):
 
     def test_a_missing_builder_is_a_hard_error(self):
         """Starting the server anyway would serve 4096 under a request for
-        something else - the exact silence this entry exists to end."""
+        something else - the exact silence this entry exists to end.
+
+        The builder is made MISSING here, not assumed missing: narrator ran
+        this test where sglang_omni was not installed, and the tts env this
+        suite runs in has it. A `None` in sys.modules makes the import fail."""
+        import sys as _sys
         module = self._module()
+        name = 'sglang_omni.models.higgs_tts.engine_builder'
+        saved = _sys.modules.get(name, False)
+        _sys.modules[name] = None
+        self.addCleanup(lambda: _sys.modules.pop(name, None) if saved is False
+                        else _sys.modules.__setitem__(name, saved))
         with self.assertRaises(SystemExit) as caught:
             module.apply_context_length(8192)
         self.assertIn('engine_builder', str(caught.exception))

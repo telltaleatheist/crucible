@@ -1,6 +1,13 @@
-"""The serve worker's JSON-lines protocol is a CONTRACT with the Node pool.
+"""The serve worker's JSON-lines protocol is a CONTRACT with its client.
 
-electron/orpheus-worker-pool.ts (BookForge@3b4d0b17) resolves a whole batch by
+Moved from narrator@dc05e7e7 with the worker; the client is now Crucible
+(`crucible/engines/narrator.py`), and the only engine - real or fake - is Higgs
+v3. narrator's Orpheus-fake tests that pinned ENGINE-INDEPENDENT wire behaviour
+(one answer per row, batch_done last, cancel sweeps, bad JSON, unknown action,
+the Listen gap) now run against the Higgs fake; the Orpheus-only ones (its
+stock-voice allowlist, its caps registry, its unguarded batch) are gone with it.
+
+BookForge's orpheus-worker-pool.ts (BookForge@3b4d0b17) resolved a whole batch by
 reading `type`, `i`, `seq`, `format`, `data`, `duration`, `sampleRate`,
 `streamed`, `chunks`, `message` and `batch_done` off these lines. A missing
 `batch_done` hangs the batch until a 180 s timeout TAINTS the worker; a second
@@ -9,7 +16,7 @@ message for one `i` is dropped as stale, so a row answered twice loses audio; a
 thrown away.
 
 None of that could be tested before without a 6 GB model on a GPU. This drives
-narrator/serve/worker.py AS A SUBPROCESS with NARRATOR_FAKE_ENGINE=1, over real
+crucible_higgs/serve/worker.py AS A SUBPROCESS with --fake-engine, over real
 stdin/stdout pipes, so the reader thread, the stdout lock, the per-item
 bookkeeping and the one-answer-per-row guarantees are the real ones.
 
@@ -32,7 +39,7 @@ WHAT IS ASSERTED, against the pool's own reads:
      still emits 'batch_done';
  10. 'quit' ends the process.
 
-Run: python -m unittest discover -s python/narrator/tests -t python -p "test_engine_*.py"
+Run: <tts env python> -m pytest --noconftest tests/higgs_worker
 """
 import array
 import base64
@@ -98,11 +105,11 @@ class Worker:
         env = dict(os.environ)
         env['PYTHONUNBUFFERED'] = '1'
         env['PYTHONIOENCODING'] = 'utf-8'
-        # The warmup would render three sentences plus two batches through the
-        # fake before 'loaded'. Cheap, but it makes the status stream noisy and
-        # it is not what this test is about; the pool's own spawn sets this the
-        # same way when it wants a cold ready.
-        env['ORPHEUS_SKIP_WARMUP'] = '1'
+        # NARRATOR_ENGINE is REQUIRED (an unset one used to mean Orpheus); every
+        # worker here serves the one engine there is. Loads send `warm: false`
+        # (`_load`), which is how a test skips the warmup now that the
+        # ORPHEUS_SKIP_WARMUP knob is gone.
+        env['NARRATOR_ENGINE'] = 'higgs-v3'
         env.pop('NARRATOR_GOLDEN_LOCAL', None)
         if extra_env:
             env.update(extra_env)
@@ -191,8 +198,7 @@ class _WorkerCase(unittest.TestCase):
     drive the same real worker with a different NARRATOR_ENGINE - the invariants
     the pool depends on are the same ones whichever engine rendered the rows."""
 
-    #: Extra environment for this class's worker. None = the Orpheus fake, which
-    #: is what every test in ServeProtocolTest was written against.
+    #: Extra environment for this class's worker, on top of NARRATOR_ENGINE.
     WORKER_ENV = None
 
     def _assert_batch_closed(self, msgs, expected_i):
@@ -233,7 +239,7 @@ class _WorkerCase(unittest.TestCase):
         """Restart this test's worker with `extra` on top of WORKER_ENV.
 
         Several of the variables these tests steer with - the fake's rate table,
-        `ORPHEUS_STREAM_GAP` - are read ONCE at import or per render inside the
+        `NARRATOR_SENTENCE_GAP` - are read ONCE at import or per render inside the
         worker, so changing one means a new subprocess. One owner for that
         restart, because every caller must also keep WORKER_ENV. `None` is
         WORKER_ENV's declared value for "this class adds nothing", not a
@@ -258,7 +264,7 @@ class _WorkerCase(unittest.TestCase):
         self.assertEqual(msg['type'], 'ready')
         return msg
 
-    def _load(self, voice='leah', **kwargs):
+    def _load(self, voice='deathstalker', **kwargs):
         self.w.send(action='load', voice=voice, warm=False, **kwargs)
         msgs = self.w.read_until('loaded', 'error')
         return msgs
@@ -275,9 +281,9 @@ class ServeProtocolTest(_WorkerCase):
         # reads as NOT per-request capable. The fake always knows it.
         self.assertEqual(ready.get('backend'), 'transformers')
 
-        msgs = self._load('leah')
+        msgs = self._load('deathstalker')
         self.assertEqual(msgs[-1]['type'], 'loaded', msgs)
-        self.assertEqual(msgs[-1]['voice'], 'leah')
+        self.assertEqual(msgs[-1]['voice'], 'deathstalker')
         self.assertEqual(msgs[-1]['backend'], 'transformers')
         self.assertTrue(all(m['type'] == 'status' for m in msgs[:-1]), msgs)
 
@@ -305,21 +311,28 @@ class ServeProtocolTest(_WorkerCase):
         # for one build fact would be the two-owners shape the rename removed.
         self.assertNotIn('itemSampling', ready)
 
-    def test_unknown_stock_voice_is_refused_not_substituted(self):
+    def test_a_load_with_no_voice_is_refused_not_substituted(self):
+        """narrator's `load` defaulted an absent voice to Orpheus's 'leah'. There
+        is no default now: the engine refuses a voiceless load by name and the
+        worker stays up for the next one."""
         self._ready()
-        self.w.send(action='load', voice='nosuchvoice', warm=False)
+        self.w.send(action='load', warm=False)
         msgs = self.w.read_until('loaded', 'error')
         self.assertEqual(msgs[-1]['type'], 'error', msgs)
-        self.assertIn('nosuchvoice', msgs[-1]['message'])
-        self.assertIn('Refusing to substitute', msgs[-1]['message'])
+        self.assertIn('no voice name', msgs[-1]['message'])
+        self.assertEqual(self._load()[-1]['type'], 'loaded')
 
-    def test_caps_cross_the_wire(self):
-        """The catalog payload reaches the engine's registry verbatim, and a key
-        that is neither a cap nor an explicitly-ignored one fails the LOAD."""
+    def test_a_load_carrying_modelDir_or_baseDir_is_refused_by_name(self):
+        """narrator's worker refused these pairs itself, in Orpheus's words; the
+        engine's `resolve_load_voice` refuses each field now, by name."""
         self._ready()
-        msgs = self._load('leah', caps={'maxCharsPerSec': 23.5, 'eosBoost': 8,
-                                        'maxChars': 450, 'sentenceGap': 0.0})
-        self.assertEqual(msgs[-1]['type'], 'loaded', msgs)
+        for field in ('modelDir', 'baseDir'):
+            with self.subTest(field=field):
+                self.w.send(action='load', voice='deathstalker', warm=False,
+                            **{field: '/some/dir'})
+                msgs = self.w.read_until('loaded', 'error')
+                self.assertEqual(msgs[-1]['type'], 'error', msgs)
+                self.assertIn(field, msgs[-1]['message'])
 
     # ---- 3, 4 --------------------------------------------------------------
 
@@ -388,25 +401,22 @@ class ServeProtocolTest(_WorkerCase):
         self.assertNotIn('message', by_i[12])
         self.assertLess(by_i[12]['duration'], 0.2)
 
-    def test_an_unguarded_engine_sends_no_guard_key(self):
-        """`guard` is ADDITIVE AND OPTIONAL (PHASE6-REMOTE-RENDER.md section 3).
-
-        Orpheus offers no `render_many` - its guard is the older
-        `_guard_truncation`, which reaches no verdict object - so its rows must
-        carry exactly the field set orpheus-worker-pool.ts and the browser
-        extension read today. A key appearing here would mean the new arm was
-        selected by something other than the capability."""
+    def test_a_batch_that_asks_for_no_judging_sends_no_guard_key(self):
+        """`guard` is ADDITIVE AND OPTIONAL (PHASE6-REMOTE-RENDER.md section 3):
+        a batch with no `retake` is rendered bare, and a row nobody judged
+        carries no verdict at all. narrator pinned this on its Orpheus fake (no
+        `render_many`); the Higgs fake's bare arm is the same promise."""
         self._ready()
         self._load()
         self.w.send(action='generate_batch',
-                    items=[{'i': 0, 'text': 'An ordinary Orpheus sentence.'}])
+                    items=[{'i': 0, 'text': 'An ordinary sentence.'}])
         by_i = self._assert_batch_closed(self.w.read_until('batch_done'), [0])
         self.assertIn('data', by_i[0])
         self.assertNotIn('guard', by_i[0])
 
     def test_unloaded_voice_fails_only_its_own_item(self):
         self._ready()
-        self._load('leah')
+        self._load('deathstalker')
         items = [{'i': 0, 'text': 'Ordinary sentence.'},
                  {'i': 1, 'text': 'Wrong voice.', 'voice': 'zoe'},
                  {'i': 2, 'text': 'Another ordinary one.'}]
@@ -441,7 +451,6 @@ class ServeProtocolTest(_WorkerCase):
         by_i = self._assert_batch_closed(msgs, [100, 101])
 
         chunks = [m for m in msgs if m['type'] == 'batch_chunk']
-        item_msgs = [m for m in msgs if m['type'] == 'batch_item']
         self.assertEqual({m['i'] for m in chunks}, {100},
                          'only the row marked stream:true may emit batch_chunk')
         self.assertEqual([m['seq'] for m in chunks], list(range(len(chunks))),
@@ -523,8 +532,11 @@ class ServeProtocolTest(_WorkerCase):
         same env the worker runs with - a number typed in here would be a second
         copy of the rule.
 
-        The classic arm on purpose: no item streams, so this is the batch path
-        the extension's "buffer before playing" default takes.
+        THE STREAMING ARM, which is where a Higgs Listen row gets its gap: a
+        Higgs batch with no `stream` anywhere is the RENDER door (an assembler
+        follows it and it carries no `gapSec` - see GuardedBatchTest). narrator
+        pinned this on the Orpheus fake's buffered arm, which has no Higgs
+        counterpart.
         """
         from crucible_higgs.text.gaps import classify_gap_seconds
         gap_seconds = 0.42
@@ -539,7 +551,8 @@ class ServeProtocolTest(_WorkerCase):
         self._ready()
         self._load()
         self.w.send(action='generate_batch',
-                    items=[{'i': i, 'text': t} for i, t in sorted(texts.items())])
+                    items=[{'i': i, 'text': t, 'stream': True}
+                           for i, t in sorted(texts.items())])
         by_i = self._assert_batch_closed(self.w.read_until('batch_done'), [1, 2])
         for i in texts:
             self.assertAlmostEqual(by_i[i]['gapSec'], expected[i], places=6,
@@ -558,15 +571,18 @@ class ServeProtocolTest(_WorkerCase):
         """
         self._ready()
         self._load()
-        items = [{'i': 0, 'text': '[pause:3.0] After a long beat.'},
-                 {'i': 1, 'text': 'Its neighbour is untouched.'}]
+        # STREAMED: the lead check is the Listen door's (`row_gap_sec`), and a
+        # Higgs batch with no `stream` is the render door, where `gaps.json`
+        # owns the lead and nothing is refused.
+        items = [{'i': 0, 'text': '[pause:3.0] After a long beat.', 'stream': True},
+                 {'i': 1, 'text': 'Its neighbour is untouched.', 'stream': True}]
         self.w.send(action='generate_batch', items=items)
         by_i = self._assert_batch_closed(self.w.read_until('batch_done'), [0, 1])
-        self.assertTrue('data' not in by_i[0],
+        self.assertTrue('streamed' not in by_i[0],
                         'the leading-pause row rendered instead of being refused')
         self.assertIn('lead', by_i[0].get('message', ''))
         self.assertIn('[pause:', by_i[0].get('message', ''))
-        self.assertTrue('data' in by_i[1], 'the neighbour must render normally')
+        self.assertTrue(by_i[1].get('streamed'), 'the neighbour must render normally')
 
     # ---- 9, 10 --------------------------------------------------------------
 
@@ -669,6 +685,65 @@ class ServeProtocolTest(_WorkerCase):
         err = self.w.proc.stderr.read()
         self.assertIn('exiting: stopping the loaded engine', err)
         self.assertIn('engine stopped', err)
+
+
+class StreamPathTest(_WorkerCase):
+    """THE STREAM PATH STAYS EXACTLY AS IT WAS (Owen, 2026-11-04): a batch with
+    any `stream: true` item goes through `_generate_batch_streaming`, which
+    renders each row once through the engine's `generate_batch_stream` - NO
+    guard, NO retake, NO frame-cap report, NO interior-pause cap - and states
+    the Listen gap on each row's terminal record. Pinned here so the move can
+    neither add nor drop any of it."""
+
+    ITEMS = [{'i': 0, 'text': 'The row the listener is on, which streams.',
+              'stream': True},
+             {'i': 1, 'text': 'Read-ahead behind it, in the same batch.'}]
+
+    def test_a_stream_row_carries_no_guard_no_cap_and_no_pause_cuts(self):
+        self._ready()
+        self._load()
+        self.w.send(action='generate_batch', items=self.ITEMS)
+        msgs = self.w.read_until('batch_done')
+        by_i = self._assert_batch_closed(msgs, [0, 1])
+        for i in (0, 1):
+            for absent in ('guard', 'capped', 'tokens', 'pauseCuts'):
+                self.assertNotIn(absent, by_i[i], (absent, by_i[i]))
+            self.assertIn('gapSec', by_i[i], by_i[i])
+        self.assertTrue(by_i[0]['streamed'])
+        self.assertIn('data', by_i[1], 'a non-streamed row of a stream batch is '
+                                       'emitted whole, on the Listen door')
+        for chunk in (m for m in msgs if m['type'] == 'batch_chunk'):
+            for absent in ('guard', 'capped', 'tokens', 'pauseCuts', 'gapSec'):
+                self.assertNotIn(absent, chunk, (absent, chunk))
+
+    def test_a_stream_batch_with_retake_is_refused_BY_NAME(self):
+        self._ready()
+        self._load()
+        self.w.send(action='generate_batch', items=self.ITEMS,
+                    retake=True, band=fake_higgs_band())
+        by_i = self._assert_batch_closed(self.w.read_until('batch_done'), [0, 1])
+        for i in (0, 1):
+            self.assertTrue(by_i[i]['message'].startswith('retake_with_stream'),
+                            by_i[i])
+
+    def test_a_bent_stream_row_ships_as_rendered_and_is_never_rerolled(self):
+        """No ladder on the stream: a take far too short for its text ships as
+        it came back, rendered exactly once."""
+        import shutil
+        import tempfile
+        root = tempfile.mkdtemp(prefix='narrator-stream-')
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        log = os.path.join(root, 'renders.jsonl')
+        self._worker_with_env({'NARRATOR_FAKE_HIGGS_RATE': '{"0": 0.4}',
+                               'NARRATOR_FAKE_RENDER_LOG': log})
+        self._ready()
+        self._load()
+        self.w.send(action='generate_batch', items=self.ITEMS)
+        self._assert_batch_closed(self.w.read_until('batch_done'), [0, 1])
+        with open(log, encoding='utf-8') as handle:
+            rows = [json.loads(line) for line in handle if line.strip()]
+        self.assertEqual(sorted(r['index'] for r in rows), [0, 1],
+                         'every stream row is rendered exactly once')
 
 
 class GuardedBatchTest(_WorkerCase):
@@ -1099,6 +1174,11 @@ class RetakeFlagTest(_WorkerCase):
                 for i in (0, 1):
                     self.assertIn('capped', by_i[i], by_i[i])
                     self.assertIs(by_i[i]['capped'], False, by_i[i])
+                    # `tokens` rides beside it whenever the count is COUNTED,
+                    # which an in-process render's is (FrameMeasure.tokens):
+                    # the frames of the take that shipped.
+                    self.assertIsInstance(by_i[i]['tokens'], int, by_i[i])
+                    self.assertGreater(by_i[i]['tokens'], 0, by_i[i])
 
     def test_a_run_to_the_CEILING_is_reported_as_capped(self):
         """`cap_frames` is 2x the expected duration plus 150 frames of slack,
@@ -1111,20 +1191,14 @@ class RetakeFlagTest(_WorkerCase):
         self.assertIs(by_i[1]['capped'], True, by_i[1])
 
     def test_an_engine_with_no_ladder_refuses_a_retake_BY_NAME(self):
-        """Orpheus has no `render_many`. Rendering the batch unguarded would be
-        a render that silently skipped the retake it was asked for and reported
-        success."""
-        self.w.close()
-        self.w = Worker()                     # the Orpheus fake, the default
-        self._prepared = True                 # this test does its own handshake
-        self._ready()
-        self._load('leah')
-        self.w.send(action='generate_batch',
-                    items=[{'i': 0, 'text': 'An ordinary sentence.'}],
-                    retake=True, band=fake_higgs_band())
-        by_i = self._assert_batch_closed(self.w.read_until('batch_done'), [0])
-        self.assertTrue(by_i[0]['message'].startswith('retake_unsupported'),
-                        by_i[0])
+        """An engine with no `render_many` cannot judge, so a batch asking to be
+        judged is refused rather than rendered unjudged and reported a success.
+        narrator drove this through its Orpheus fake; no engine here lacks the
+        driver now, so the refusal is asked of `batch_tracker` directly."""
+        from crucible_higgs.serve import worker as W
+        with self.assertRaises(W.BatchRefused) as caught:
+            W.batch_tracker(True, fake_higgs_band(), object())
+        self.assertEqual(caught.exception.name, 'retake_unsupported')
 
     def test_a_STREAMING_batch_cannot_ask_to_be_judged(self):
         """A streamed row leaves as it generates, so there is nothing left to
@@ -1181,71 +1255,53 @@ class BatchWidthTest(_WorkerCase):
                 self.assertTrue(
                     by_i[0]['message'].startswith('width_malformed'), by_i[0])
 
-class VoiceCapsResetTest(unittest.TestCase):
-    """A reload with an EMPTY caps payload must CLEAR the previous one.
+class SecondLoadTest(unittest.TestCase):
+    """A SECOND LOAD ON A LIVE WORKER, driven in-process.
 
-    Driven IN-PROCESS rather than over the pipe, because what is being asserted
-    is the state of a CLASS-LEVEL registry that outlives the engine - something
-    the protocol deliberately never exposes. The worker object, its load path and
-    its teardown are the real ones; only the engine is the fake.
-
-    THE BUG THIS GUARDS (adversarial review, 2026-09-04). e2a's worker called
-    `register_voice_caps(v, caps or {})` unconditionally; the first port
-    registered only `if config.caps`. `_voice_caps` is class-level and survives
-    `_teardown_engine`, and orpheus-worker-pool.ts sends `caps: {}` whenever a
-    voice resolves to no catalog model - so: load a voice WITH catalog tuning,
-    change modelDir (teardown + rebuild), reload the SAME voice with {}, and the
-    first payload's eosFloor/eosBoost would still be attached to it. A whole
-    session in the wrong tuning, reported as success.
+    narrator's version of this class pinned Orpheus's class-level caps registry
+    across reloads; Higgs has no such registry. What a second load does now is
+    the engine's own rule on both arms: the SAME voice is a no-op, any other is
+    refused by name, and a non-empty `caps` is refused by name and tears the
+    engine down. narrator called Orpheus's `register_voice_caps` here, which no
+    Higgs engine has, so a same-voice re-load died on an AttributeError; the
+    worker now asks the engine's `_apply_voice_caps`.
     """
 
     def setUp(self):
         from crucible_higgs.serve import worker as W
-        from crucible_higgs.serve.fake_engine import FakeEngine
-        self.W, self.FakeEngine = W, FakeEngine
+        self.W = W
         self._saved_flag = W._FAKE_ENGINE
         W._FAKE_ENGINE = True          # the module global main() writes
-        FakeEngine._voice_caps = {}
-        self.addCleanup(self._restore)
-        self.server = W.OrpheusStreamServer()
+        patcher = mock.patch.dict(os.environ, {'NARRATOR_ENGINE': 'higgs-v3'})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.sent = []
+        original = W.send_response
+        W.send_response = lambda kind, data=None: self.sent.append((kind, data))
+        self.addCleanup(setattr, W, 'send_response', original)
+        self.addCleanup(setattr, W, '_FAKE_ENGINE', self._saved_flag)
+        self.server = W.StreamServer()
 
-    def _restore(self):
-        self.W._FAKE_ENGINE = self._saved_flag
-        self.FakeEngine._voice_caps = {}
+    def test_the_same_voice_again_is_a_no_op_on_the_same_engine(self):
+        self.assertTrue(self.server.load_voice('deathstalker', warm=False))
+        engine = self.server.orph
+        self.assertTrue(self.server.load_voice('deathstalker', caps={}, warm=False))
+        self.assertIs(self.server.orph, engine)
+        self.assertEqual(self.server.current_voice, 'deathstalker')
 
-    def test_reload_with_empty_caps_clears_the_previous_payload(self):
-        tuned = {'maxCharsPerSec': 22.6, 'eosBoost': 8, 'eosBoostStart': 2}
-        self.assertTrue(self.server.load_voice('leah', caps=tuned, warm=False))
-        self.assertEqual(self.FakeEngine._voice_caps['leah'],
-                         {'maxCharsPerSec': 22.6, 'eosBoost': 8.0, 'eosBoostStart': 2.0})
+    def test_another_voice_is_refused_and_the_engine_stays(self):
+        self.assertTrue(self.server.load_voice('deathstalker', warm=False))
+        engine = self.server.orph
+        self.assertFalse(self.server.load_voice('mistborn', warm=False))
+        self.assertIs(self.server.orph, engine)
+        self.assertIn('cannot switch voice', self.sent[-1][1]['message'])
 
-        # A modelDir change is what forces the teardown; the pool then re-loads
-        # the same token with whatever the catalog now says, which for an
-        # unmodelled voice is {}.
-        self.server._teardown_engine()
-        self.assertEqual(self.FakeEngine._voice_caps['leah'],
-                         {'maxCharsPerSec': 22.6, 'eosBoost': 8.0, 'eosBoostStart': 2.0},
-                         'teardown does not (and must not) touch the class registry - '
-                         'which is exactly why the reload has to clear it')
-
-        self.assertTrue(self.server.load_voice('leah', caps={}, warm=False))
-        self.assertEqual(self.FakeEngine._voice_caps['leah'], {},
-                         'a reload with no catalog tuning must reset the voice to '
-                         'env/class defaults, not inherit the previous payload')
-
-    def test_a_warm_switch_back_also_clears(self):
-        """The other branch: same weights, so no teardown - `set_voice` plus
-        `_apply_voice_caps`. e2a always passed `caps or {}` there too."""
-        self.assertTrue(self.server.load_voice('leah', caps={'eosBoost': 8}, warm=False))
-        self.assertEqual(self.FakeEngine._voice_caps['leah'], {'eosBoost': 8.0})
-        self.assertTrue(self.server.load_voice('leah', caps=None, warm=False))
-        self.assertEqual(self.FakeEngine._voice_caps['leah'], {})
-
-    def test_an_unknown_cap_key_fails_the_load(self):
-        """Silently dropping it would mean a mis-tuned voice renders a whole book
-        with no sign anything was wrong."""
-        self.assertFalse(self.server.load_voice('leah', caps={'nonsense': 1},
-                                                warm=False))
+    def test_caps_on_a_second_load_are_refused_and_tear_the_engine_down(self):
+        self.assertTrue(self.server.load_voice('deathstalker', warm=False))
+        self.assertFalse(self.server.load_voice('deathstalker',
+                                                caps={'eosBoost': 8}, warm=False))
+        self.assertIsNone(self.server.orph)
+        self.assertIn('caps', self.sent[-1][1]['message'])
 
 
 if __name__ == '__main__':

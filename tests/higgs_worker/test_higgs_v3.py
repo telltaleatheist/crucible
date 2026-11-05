@@ -1604,10 +1604,14 @@ class RegistrySelectionTest(unittest.TestCase):
                     else HiggsV3Engine)
         self.assertIs(registry.engine_class('higgs-v3'), expected)
 
-    def test_v2_is_scaffolding_and_says_so(self):
-        self.assertIn('higgs-v2-scaffold', registry.ids())
-        self.assertNotIn('higgs-v2', registry.ids())
-        self.assertIn('NOT SHIPPED', registry.__doc__)
+    def test_higgs_v3_is_the_only_engine(self):
+        # narrator's registry also carried 'orpheus' and 'higgs-v2-scaffold';
+        # neither moved to Crucible.
+        self.assertEqual(registry.ids(), ['higgs-v3'])
+        for gone in ('orpheus', 'higgs-v2-scaffold'):
+            with self.assertRaises(ValueError) as caught:
+                registry.engine_class(gone)
+            self.assertIn(gone, str(caught.exception))
 
     def test_the_defaults_carry_the_measured_numbers(self):
         self.assertEqual(HiggsV3Defaults.MAX_CHARS, 600)
@@ -1646,7 +1650,6 @@ class ServeProtocolTest(V3TestCase):
         env.update({
             'PYTHONUNBUFFERED': '1',
             'PYTHONIOENCODING': 'utf-8',
-            'ORPHEUS_SKIP_WARMUP': '1',
             'NARRATOR_ENGINE': 'higgs-v3',
             'NARRATOR_HIGGS_VOICES': self.voices_path,
             'NARRATOR_HIGGS3_URL': self.server.base_url,
@@ -2055,117 +2058,6 @@ class SentinelProofTest(V3TestCase):
         # matters: the load did not raise, and the backend it built has no proof
         # records to read.
         self.assertIsNone(engine.server.proof_report())
-
-
-class SentinelRecordShapeTest(unittest.TestCase):
-    """THE PRODUCER AND THE CONSUMER OF THE RECORDS, COMPARED.
-
-    `verify_sentinel_filter` reads fields out of a file written by
-    `electron/scripts/higgs/patch_sentinel_filter.py`, which is spliced into a
-    third-party module inside a conda env inside WSL. Nothing about that seam
-    is type-checked, imported or exercised by either side's tests, and the only
-    place the two shapes meet at runtime is a box with a 24 GB card on it.
-
-    That is the exact shape of the defect this whole change is repairing - a
-    fact with two owners and nothing comparing them - so it is compared HERE,
-    statically, by reading the patch's own literals. A field renamed on one side
-    would otherwise surface as `int(record.get('outside', 0))` quietly reading 0
-    for ever: a proof that passes on every render because it is looking at a key
-    nobody writes.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        """Read the patch's constants by PARSING it, never by importing it.
-
-        An `importlib` load would run the module and leave a `__pycache__/`
-        beside it - which is not a theoretical tidiness point: it broke
-        `tools/test-higgs-engine.js`'s "the WSL scripts are LF" keeper the first
-        time this test ran, because that check `readdirSync`s this directory and
-        reads every entry as a file (EISDIR on the new directory). A test must
-        not write into the tree it inspects, and `ast` answers the question
-        without executing anything.
-        """
-        import ast
-        repo = os.path.dirname(_PYTHON_ROOT)
-        cls.path = os.path.join(repo, 'electron', 'scripts', 'higgs',
-                                'patch_sentinel_filter.py')
-        cls.ast = ast
-        tree = ast.parse(open(cls.path, encoding='utf-8').read())
-        cls.constants = {}
-        for node in tree.body:
-            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
-                continue
-            target = node.targets[0]
-            if isinstance(target, ast.Name) and isinstance(node.value, ast.Constant):
-                cls.constants[target.id] = node.value.value
-        for name in ('HELPER', 'ASYNC_NEW', 'V3_MARKER'):
-            if name not in cls.constants:
-                raise AssertionError(
-                    f'patch_sentinel_filter.py no longer declares {name} as a '
-                    'module-level string literal, so this comparison cannot be made')
-
-    def records_in(self, source, node=None):
-        """Every `_sentinel_report({...})` literal in a fragment, as dicts."""
-        found = []
-        for call in self.ast.walk(node or self.ast.parse(source)):
-            if not isinstance(call, self.ast.Call):
-                continue
-            if getattr(call.func, 'id', None) != '_sentinel_report':
-                continue
-            literal = call.args[0]
-            self.assertIsInstance(
-                literal, self.ast.Dict,
-                'a record built anywhere but at the call site cannot be compared here')
-            found.append({k.value: getattr(v, 'value', None)
-                          for k, v in zip(literal.keys, literal.values)})
-        return found
-
-    def test_the_block_the_patch_splices_in_is_VALID_PYTHON(self):
-        """It is spliced into somebody else's module and compiled there. A
-        syntax error would be found on a box with a GPU, after a ~19 GB load."""
-        self.ast.parse(self.constants['HELPER'])
-
-    def test_the_MARKER_the_doctor_greps_is_narrator_s_OWN_variable_name(self):
-        self.assertEqual(self.constants['V3_MARKER'], v3_served.SENTINEL_REPORT_ENV)
-        self.assertIn(v3_served.SENTINEL_REPORT_ENV, self.constants['HELPER'],
-                      'the spliced block does not read the variable narrator exports')
-
-    def test_every_record_the_patch_writes_carries_THIS_version(self):
-        records = self.records_in(self.constants['HELPER'])
-        records += self.records_in('if True:\n' + self.constants['ASYNC_NEW'])
-        self.assertTrue(records, 'the patch writes no records at all')
-        for record in records:
-            self.assertEqual(record.get('v'), v3_served.SENTINEL_REPORT_VERSION,
-                             f'a record is written at v={record.get("v")!r} while '
-                             f'narrator refuses anything but '
-                             f'v={v3_served.SENTINEL_REPORT_VERSION}: {record}')
-
-    def test_the_FIELDS_the_proof_reads_are_the_fields_the_patch_writes(self):
-        """Key by key, both directions. A field the proof reads and the patch
-        does not write reads as 0 for ever (a proof that always passes); a field
-        the patch writes and the proof does not read is a defect nobody is
-        looking at."""
-        sync = [r for r in self.records_in(self.constants['HELPER'])
-                if r.get('path') == 'sync']
-        asynchronous = [r for r in self.records_in('if True:\n' + self.constants['ASYNC_NEW'])
-                        if r.get('path') == 'async']
-        self.assertTrue(sync and asynchronous)
-        for record in sync:
-            self.assertEqual(set(record), {'v', 'path', 'total', 'kept', 'interior'},
-                             f'the sync record shape moved: {sorted(record)}')
-        for record in asynchronous:
-            self.assertEqual(set(record),
-                             {'v', 'path', 'final', 'window', 'trimmed', 'outside'},
-                             f'the async record shape moved: {sorted(record)}')
-
-    def test_the_patch_REFUSES_TO_EMIT_a_file_with_the_records_missing(self):
-        """Its own pre-write invariant, so a re-cut that drops a call site fails
-        at apply time rather than producing an env that renders fine and proves
-        nothing."""
-        source = open(self.path, encoding='utf-8').read()
-        self.assertIn('REPORT_CALLS_MISSING', source)
-        self.assertIn('V3_MARKER_MISSING', source)
 
 
 class SentinelReportChannelTest(V3TestCase):
@@ -2882,6 +2774,20 @@ class WorkerRefusalTest(unittest.TestCase):
         self.assertIn('scaffold', out.stderr)
         self.assertIn('higgs-v3', out.stderr)
 
+    def test_an_unset_engine_is_refused_without_a_handshake(self):
+        # narrator defaulted an unset NARRATOR_ENGINE to 'orpheus'; the worker
+        # serves Higgs v3 only and has no default.
+        env = {k: v for k, v in os.environ.items() if k != 'NARRATOR_ENGINE'}
+        import subprocess
+        env.update({'PYTHONUNBUFFERED': '1', 'PYTHONIOENCODING': 'utf-8'})
+        out = subprocess.run(
+            [sys.executable, '-m', 'crucible_higgs.serve', '--fake-engine'],
+            cwd=_PYTHON_ROOT, input='{"action": "quit"}\n', capture_output=True,
+            text=True, encoding='utf-8', env=env, timeout=180)
+        self.assertEqual(out.returncode, 3)
+        self.assertNotIn('"type": "ready"', out.stdout)
+        self.assertIn('NARRATOR_ENGINE is not set', out.stderr)
+
     def test_an_unknown_engine_is_refused_without_a_handshake(self):
         out = self._run({'NARRATOR_ENGINE': 'llasa'}, argv=('--fake-engine',))
         self.assertNotEqual(out.returncode, 0)
@@ -2966,7 +2872,6 @@ class LoadedMessageTest(V3TestCase):
         env = dict(os.environ)
         env.update({
             'PYTHONUNBUFFERED': '1', 'PYTHONIOENCODING': 'utf-8',
-            'ORPHEUS_SKIP_WARMUP': '1',
             'NARRATOR_ENGINE': 'higgs-v3',
             'NARRATOR_HIGGS_VOICES': self.voices_path,
             'NARRATOR_HIGGS3_URL': self.server.base_url,
