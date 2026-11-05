@@ -572,13 +572,15 @@ class FakeEngine:
 
     def stop(self) -> None:
         self.stopped = True
-        if self._server is not None:
-            self._server.shutdown()
-            self._server.server_close()
-            self._server = None
-        if self._thread is not None:
-            self._thread.join(timeout=10)
-            self._thread = None
+        # Taken first, as the real engine takes its process: a session's idle close and the
+        # server's shutdown can both be stopping it.
+        server, self._server = self._server, None
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.join(timeout=10)
         self._port = None
 
     @property
