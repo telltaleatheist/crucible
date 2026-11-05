@@ -15,6 +15,7 @@ TASK_TYPES: tuple[str, ...] = (
     "module",
     "engine",
     "engine-restart",
+    "repair",
 )
 
 HISTORY = 50
@@ -45,6 +46,8 @@ class Task:
     # True when no more events will come (see Job.events_final); a task's stream then ends.
     events_final: bool = False
     unmet: list[dict[str, str]] = field(default_factory=list)
+    # What a repair found and did (crucible/repair.py Report); None for every other type.
+    result: dict[str, Any] | None = None
     cancel_requested: bool = False
     reason: str | None = None
     describe: Callable[["Task"], str | None] | None = None
@@ -61,6 +64,7 @@ class Task:
             "started": self.started,
             "finished": self.finished,
             "unmet": self.unmet,
+            "result": self.result,
             "message": None if self.describe is None else self.describe(self),
         }
 

@@ -270,6 +270,7 @@ def _services(
         backend,
         take_up=keeper.take_up_installed,
         in_use=lambda subject: catalog_routes.held_on_card(residency, subject),
+        env_in_use=lambda spec: catalog_routes.env_holder(residency, store, spec),
     )
     for owner in (store, residency, inflight, task_store, settings_history):
         owner.events = events

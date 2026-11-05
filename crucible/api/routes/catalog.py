@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import Request, Response
 
-from ... import catalog, weights
+from ... import catalog, jobenv, weights
 from ...cardkinds import KIND_NOUNS
 from ...errors import ApiError, CrucibleError
 from ...inflight import read_act
@@ -74,6 +74,27 @@ def _task_holder(ctx: AppContext, subject: catalog.Subject, readers: Any) -> dic
 
 def held_on_card(residency: Any, subject: catalog.Subject) -> dict | None:
     return _resident_holder(residency, subject, catalog.ids_reading(subject))
+
+
+# The job types whose job loads an env's engine rather than naming the env's own type.
+_LOADS_ENV_OF = {"load-model": "llm", "load-voice": "tts"}
+
+
+def env_holder(residency: Any, jobs: Any, spec: jobenv.EnvSpec) -> str | None:
+    """Who is running out of this env, in words, or None. An env is rebuilt only when nothing
+    is: the resident engine (its kind names its env, the separator's being `rvc`'s) or a job."""
+
+    def env_of(job_type: str) -> str:
+        job_type = _LOADS_ENV_OF.get(job_type, job_type)
+        return jobenv.INSTALLER_FOR.get(job_type, job_type)
+
+    resident = residency.resident
+    if resident is not None and env_of(resident.kind) == spec.job_type:
+        return f"{resident.id!r}, the {KIND_NOUNS[resident.kind]} on the card, runs from it"
+    running = jobs.running
+    if running is not None and env_of(running.type) == spec.job_type:
+        return f"job {running.id} ({running.type}) is running from it"
+    return None
 
 
 def _subject_holder(ctx: AppContext, subject: catalog.Subject) -> dict | None:

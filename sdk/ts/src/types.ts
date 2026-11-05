@@ -3103,12 +3103,84 @@ export interface EngineRestartTaskRequest {
   readonly type: 'engine-restart';
 }
 
+/** What a repair looks at. Left out: every installed env and subject, repaired. */
+export interface RepairScope {
+  /** `'all'`, or the job types whose envs to look at; `[]` is none. */
+  readonly envs?: 'all' | readonly string[];
+  /** `'none'` leaves weights alone. */
+  readonly weights?: 'all' | 'none';
+  /** Report what is broken and change nothing. */
+  readonly verifyOnly?: boolean;
+}
+
+/** Verify what this server has installed by hash, and put back what is broken. */
+export interface RepairTaskRequest {
+  readonly type: 'repair';
+  readonly scope?: RepairScope;
+}
+
 export type TaskRequest =
   | PullTaskRequest
   | InstallTaskRequest
   | ModuleTaskRequest
   | EngineTaskRequest
-  | EngineRestartTaskRequest;
+  | EngineRestartTaskRequest
+  | RepairTaskRequest;
+
+/** One thing a repair looked at. `kind` is `env`, or a catalog subject's kind. */
+export interface RepairSubject {
+  readonly kind: string;
+  readonly id: string;
+}
+
+/** What was found wrong, and (in `repaired`) has been put back and verified again. */
+export interface RepairFinding {
+  readonly subject: RepairSubject;
+  readonly was: string;
+}
+
+/**
+ * Could not be put back. `code` is `env_build_failed`, `pull_failed`, `weights_sha_mismatch`, or
+ * `subject_in_use`, where it was in use for the whole of the repair's wait and another repair
+ * finishes the job.
+ */
+export interface RepairFailure {
+  readonly subject: RepairSubject;
+  readonly code: string;
+  readonly message: string;
+}
+
+/** Could not be judged (no hub pin, or the hub could not be asked). Nothing was changed for it. */
+export interface RepairUnverified {
+  readonly subject: RepairSubject;
+  readonly why: string;
+}
+
+/** `TaskStatus.result` of a `repair` task, and what `crucible doctor --repair --json` prints. */
+export interface RepairResult {
+  /** No `failed`, and, in a verify-only run, nothing `broken`. Judged after the repair. */
+  readonly healthy: boolean;
+  readonly verifyOnly: boolean;
+  readonly checked: readonly RepairSubject[];
+  readonly broken: readonly RepairFinding[];
+  readonly repaired: readonly RepairFinding[];
+  readonly failed: readonly RepairFailure[];
+  readonly unverified: readonly RepairUnverified[];
+  readonly bytesHashed: number;
+  /** Not hashed again: unchanged since a repair last vouched for them. */
+  readonly bytesSkippedVerified: number;
+}
+
+/** One `repair` frame of a repair task's events. */
+export interface TaskRepairData {
+  /** `plan` comes first, then `verify`, `wait`, `rebuild` (an env) and `repull` (weights). */
+  readonly step: 'plan' | 'verify' | 'wait' | 'rebuild' | 'repull';
+  readonly state: 'running' | 'ok' | 'broken' | 'repaired' | 'failed' | 'unverified';
+  readonly subject: RepairSubject | null;
+  readonly detail: string | null;
+  /** On `plan`: how many bytes this repair will read, for `progress` to count against. */
+  readonly bytesToCheck: number | null;
+}
 
 /** A task's state; there is no `queued`, because a second task is refused rather than parked. */
 export type TaskState = 'running' | 'done' | 'failed' | 'cancelled';
@@ -3132,6 +3204,8 @@ export interface TaskStatus {
    * entries this card cannot run, job types it would not turn on. The module is still `done`.
    */
   readonly unmet: readonly UnmetNeed[];
+  /** What a `repair` found and did, once it is `done`; `null` for every other task. */
+  readonly result: RepairResult | null;
   /**
    * What a task started by `POST /v1/jobs` is doing, in words; `null` for every other task and once
    * it ends.
@@ -3209,6 +3283,7 @@ export type TaskEvent =
   | { readonly id: number; readonly event: 'step'; readonly data: TaskStepData }
   | { readonly id: number; readonly event: 'progress'; readonly data: TaskProgressData }
   | { readonly id: number; readonly event: 'skipped'; readonly data: TaskSkippedData }
+  | { readonly id: number; readonly event: 'repair'; readonly data: TaskRepairData }
   | { readonly id: number; readonly event: 'done'; readonly data: Readonly<Record<string, unknown>> }
   | { readonly id: number; readonly event: 'failed'; readonly data: JobFailure }
   | { readonly id: number; readonly event: 'cancelled'; readonly data: Readonly<Record<string, unknown>> }

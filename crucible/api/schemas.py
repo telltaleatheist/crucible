@@ -111,6 +111,7 @@ class TaskCreate(BaseModel):
     narrator_engine: str | None = None
     module: dict[str, Any] | None = None
     target: str | None = None
+    scope: dict[str, Any] | None = None
 
     FIELDS: ClassVar[dict[str, tuple[str, ...]]] = {
         "pull": ("kind", "id"),
@@ -118,6 +119,7 @@ class TaskCreate(BaseModel):
         "module": ("module",),
         "engine": ("target",),
         "engine-restart": (),
+        "repair": ("scope",),
     }
     REQUIRED: ClassVar[dict[str, tuple[str, ...]]] = {
         "pull": ("kind", "id"),
@@ -125,6 +127,7 @@ class TaskCreate(BaseModel):
         "module": ("module",),
         "engine": ("target",),
         "engine-restart": (),
+        "repair": (),
     }
 
     @model_validator(mode="after")

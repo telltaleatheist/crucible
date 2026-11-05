@@ -327,7 +327,54 @@ test('task reads the record and keeps the echoed request verbatim', async () => 
     started: '2026-09-14T03:00:00+00:00',
     finished: '2026-09-14T03:04:00+00:00',
     unmet: [],
+    result: null,
     message: null,
+  });
+});
+
+test('a repair task sends its scope in the server\'s spelling', async () => {
+  answer(202, { task_id: 't9' });
+  await client().submitTask({ type: 'repair' });
+  assert.deepEqual(JSON.parse(lastBody), { type: 'repair' });
+  answer(202, { task_id: 't9' });
+  await client().submitTask({
+    type: 'repair',
+    scope: { envs: ['rvc'], weights: 'none', verifyOnly: true },
+  });
+  assert.deepEqual(JSON.parse(lastBody), {
+    type: 'repair',
+    scope: { envs: ['rvc'], weights: 'none', verify_only: true },
+  });
+});
+
+test('a repair task reads back what it found and did', async () => {
+  const subject = { kind: 'env', id: 'rvc' };
+  answer(200, {
+    ...TASK,
+    type: 'repair',
+    result: {
+      healthy: false,
+      verify_only: false,
+      checked: [subject, { kind: 'model', id: 'm' }],
+      broken: [{ subject, was: '1 file(s) changed' }],
+      repaired: [{ subject, was: '1 file(s) changed' }],
+      failed: [{ subject: { kind: 'model', id: 'm' }, code: 'subject_in_use', message: 'it is on the card' }],
+      unverified: [{ subject: { kind: 'voice', id: 'v' }, why: 'no network' }],
+      bytes_hashed: 10,
+      bytes_skipped_verified: 90,
+    },
+  });
+  const task = await client().task('t1');
+  assert.deepEqual(task.result, {
+    healthy: false,
+    verifyOnly: false,
+    checked: [subject, { kind: 'model', id: 'm' }],
+    broken: [{ subject, was: '1 file(s) changed' }],
+    repaired: [{ subject, was: '1 file(s) changed' }],
+    failed: [{ subject: { kind: 'model', id: 'm' }, code: 'subject_in_use', message: 'it is on the card' }],
+    unverified: [{ subject: { kind: 'voice', id: 'v' }, why: 'no network' }],
+    bytesHashed: 10,
+    bytesSkippedVerified: 90,
   });
 });
 
@@ -454,6 +501,31 @@ test('a step that made nothing new reachable has no jobTypes, and that is not a 
   if (step.event !== 'step') throw new Error('unreachable');
   assert.equal(step.data.jobTypes, undefined);
   assert.equal(seen.at(-1)!.event, 'cancelled');
+});
+
+test('a repair says what it will read, and what it is doing to what', async () => {
+  sse([
+    { id: 1, event: 'repair', data: { step: 'plan', state: 'running', envs: ['rvc'], subjects: [], bytes_to_check: 2048 } },
+    { id: 2, event: 'repair', data: { step: 'verify', subject: { kind: 'env', id: 'rvc' }, state: 'broken', detail: '1 file(s) changed' } },
+    { id: 3, event: 'done', data: {} },
+  ]);
+  const seen = await collect('t9');
+  assert.deepEqual(seen[0], {
+    id: 1,
+    event: 'repair',
+    data: { step: 'plan', state: 'running', subject: null, detail: null, bytesToCheck: 2048 },
+  });
+  assert.deepEqual(seen[1], {
+    id: 2,
+    event: 'repair',
+    data: {
+      step: 'verify',
+      state: 'broken',
+      subject: { kind: 'env', id: 'rvc' },
+      detail: '1 file(s) changed',
+      bytesToCheck: null,
+    },
+  });
 });
 
 test("a module's skipped entries say why", async () => {

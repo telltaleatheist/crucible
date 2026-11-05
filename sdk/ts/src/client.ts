@@ -201,7 +201,9 @@ import {
   type Stopping,
   type SubjectKind,
   type TaskCancelResult,
+  type RepairResult,
   type TaskEvent,
+  type TaskRepairData,
   type TaskProgressData,
   type TaskRequest,
   type TaskState,
@@ -6406,6 +6408,7 @@ const TASK_EVENT_NAMES = [
   'step',
   'progress',
   'skipped',
+  'repair',
   'done',
   'failed',
   'cancelled',
@@ -6442,7 +6445,75 @@ function readTaskStatus(row: Json, where: string): TaskStatus {
     started: str(row, 'started', where),
     finished: nullableStr(row, 'finished', where),
     unmet: readUnmet(row, where),
+    result: row['result'] === undefined || row['result'] === null
+      ? null
+      : readRepairResult(asObject(row['result'], `${where}.result`), `${where}.result`),
     message: nullableStr(row, 'message', where),
+  };
+}
+
+function repairPayload(scope: unknown): Record<string, unknown> {
+  if (scope === undefined) return { type: 'repair' };
+  const given = scope as { envs?: unknown; weights?: unknown; verifyOnly?: unknown };
+  const wire: Record<string, unknown> = {};
+  if (given.envs !== undefined) wire['envs'] = given.envs;
+  if (given.weights !== undefined) wire['weights'] = given.weights;
+  if (given.verifyOnly !== undefined) wire['verify_only'] = given.verifyOnly;
+  return { type: 'repair', scope: wire };
+}
+
+function readRepairSubject(raw: unknown, where: string): { kind: string; id: string } {
+  const row = asObject(raw, where);
+  return { kind: str(row, 'kind', where), id: str(row, 'id', where) };
+}
+
+function readRepairResult(body: Json, where: string): RepairResult {
+  const rows = (key: string): { at: string; row: Json }[] =>
+    arrayField(body, key, where).map((entry, index) => {
+      const at = `${where}.${key}[${index}]`;
+      return { at, row: asObject(entry, at) };
+    });
+  const finding = (key: string) =>
+    rows(key).map(({ at, row }) => ({
+      subject: readRepairSubject(row['subject'], `${at}.subject`),
+      was: str(row, 'was', at),
+    }));
+  const healthy = body['healthy'];
+  const verifyOnly = body['verify_only'];
+  if (typeof healthy !== 'boolean' || typeof verifyOnly !== 'boolean') {
+    throw new CrucibleProtocolError(`${where} has no boolean healthy and verify_only`);
+  }
+  return {
+    healthy,
+    verifyOnly,
+    checked: arrayField(body, 'checked', where).map((entry, index) =>
+      readRepairSubject(entry, `${where}.checked[${index}]`)),
+    broken: finding('broken'),
+    repaired: finding('repaired'),
+    failed: rows('failed').map(({ at, row }) => ({
+      subject: readRepairSubject(row['subject'], `${at}.subject`),
+      code: str(row, 'code', at),
+      message: str(row, 'message', at),
+    })),
+    unverified: rows('unverified').map(({ at, row }) => ({
+      subject: readRepairSubject(row['subject'], `${at}.subject`),
+      why: str(row, 'why', at),
+    })),
+    bytesHashed: num(body, 'bytes_hashed', where),
+    bytesSkippedVerified: num(body, 'bytes_skipped_verified', where),
+  };
+}
+
+function readTaskRepair(data: Json, where: string): TaskRepairData {
+  const subject = data['subject'];
+  return {
+    step: str(data, 'step', where) as TaskRepairData['step'],
+    state: str(data, 'state', where) as TaskRepairData['state'],
+    subject: subject === undefined || subject === null
+      ? null
+      : readRepairSubject(subject, `${where}.subject`),
+    detail: typeof data['detail'] === 'string' ? data['detail'] : null,
+    bytesToCheck: typeof data['bytes_to_check'] === 'number' ? data['bytes_to_check'] : null,
   };
 }
 
@@ -6455,8 +6526,10 @@ function taskPayload(request: TaskRequest): Record<string, unknown> {
     narratorEngine?: unknown;
     module?: unknown;
     target?: unknown;
+    scope?: unknown;
   };
   const type = requireText(given.type, 'type');
+  if (type === 'repair') return repairPayload(given.scope);
   if (type === 'pull') {
     return {
       type,
@@ -6488,7 +6561,7 @@ function taskPayload(request: TaskRequest): Record<string, unknown> {
   }
   throw new CrucibleConfigError(
     'type',
-    `must be 'pull', 'install', 'module' or 'engine', got ${JSON.stringify(type)}`,
+    `must be 'pull', 'install', 'module', 'engine' or 'repair', got ${JSON.stringify(type)}`,
   );
 }
 
@@ -6531,6 +6604,8 @@ function readTaskEvent(rawId: string | null, rawName: string | null, rawData: st
       return { id, event: 'progress', data: readTaskProgress(data, where) };
     case 'skipped':
       return { id, event: 'skipped', data: { reason: str(data, 'reason', where) } };
+    case 'repair':
+      return { id, event: 'repair', data: readTaskRepair(data, where) };
     case 'done':
       return { id, event: 'done', data };
     case 'failed':

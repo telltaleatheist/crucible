@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from .. import catalog, jobflags, pagecache, tasks, voicecatalog
+from .. import catalog, jobenv, jobflags, pagecache, repair, tasks, voicecatalog
 from ..backend import Backend
 from ..clock import utcnow
 from ..config import Config, load_config
@@ -34,7 +34,7 @@ from .validate import (
 )
 
 # Task types whose work writes files (an env, weights) a WSL guest then holds in cache.
-WRITES_FILES = frozenset({"pull", "install", "module"})
+WRITES_FILES = frozenset({"pull", "install", "module", "repair"})
 
 ALREADY_TRUE = (
     "A module or an install says what must be true, so what is already true is "
@@ -62,11 +62,13 @@ class TaskStore:
         *,
         take_up: Callable[[], list[str]],
         in_use: Callable[[catalog.Subject], dict[str, Any] | None] | None = None,
+        env_in_use: Callable[[jobenv.EnvSpec], str | None] | None = None,
     ) -> None:
         self._config = config
         self._backend = backend
         self._take_up = take_up
         self._in_use = in_use
+        self._env_in_use = env_in_use
         self._tasks: dict[str, Task] = {}
         self._order: list[str] = []
         self._running_id: str | None = None
@@ -244,6 +246,7 @@ class TaskStore:
             "engine": self._run_engine,
             "engine-restart": self._run_engine_restart,
             "module": self._run_module,
+            "repair": self._run_repair,
         }
 
     async def _run(self, task: Task) -> None:
@@ -445,6 +448,35 @@ class TaskStore:
 
     def _reload_step(self, task: Task, *, index: int, total: int) -> None:
         self._step(task, "reload", index, total, job_types=self._take_up())
+
+    async def _run_repair(self, task: Task) -> None:
+        """Verify what is installed and put back what is broken (crucible/repair.py). It reads
+        anything and replaces only what nothing is using: a broken env or subject in use waits
+        its turn and never evicts, so a repair changes nothing on the card."""
+
+        def subject_holder(subject: catalog.Subject) -> str | None:
+            held = None if self._in_use is None else self._in_use(subject)
+            return None if held is None else held["who"]
+
+        doors = repair.Doors(
+            env_in_use=self._env_in_use or repair.in_use_by_nothing,
+            subject_in_use=subject_holder,
+        )
+        scope = repair.Scope.from_request(task.request.get("scope"))
+        try:
+            report = await asyncio.to_thread(
+                repair.run,
+                self._config,
+                self._backend,
+                scope,
+                doors,
+                emit=self._emitter(task),
+                cancelled=lambda: task.cancel_requested,
+                on_line=lambda line: print(f"crucible: task {task.id}: {line}", file=sys.stderr),
+            )
+        except repair.RepairCancelled:
+            raise TaskCancelled(f"task {task.id} was cancelled") from None
+        task.result = report.to_dict()
 
     async def _run_module(self, task: Task) -> None:
         entries = validate_module(self._config, self._backend, task.request["module"])

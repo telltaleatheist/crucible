@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
-from .. import capabilityclasses, catalog, classnames, jobenv
+from .. import capabilityclasses, catalog, classnames, jobenv, repair
 from ..backend import Backend
 from ..config import Config
 from ..errors import ApiError
@@ -155,12 +155,19 @@ def validate_engine_restart(config: Config, backend: Backend, request: dict[str,
 
 RequestValidator = Callable[[Config, Backend, dict[str, Any]], None]
 
+def validate_repair(config: Config, backend: Backend, request: dict[str, Any]) -> None:
+    problems = repair.scope_problems(request.get("scope"))
+    if problems:
+        raise ApiError(400, "invalid_request", "; ".join(problems))
+
+
 VALIDATORS: dict[str, RequestValidator] = {
     "pull": validate_pull,
     "install": validate_install,
     "module": validate_module_request,
     "engine": validate_engine,
     "engine-restart": validate_engine_restart,
+    "repair": validate_repair,
 }
 
 

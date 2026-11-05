@@ -19,8 +19,10 @@ from .. import (
     jobenv,
     ladder,
     llamacpp,
+    local,
     lowvram,
     manifests,
+    repair,
     service,
     verdict,
     weights,
@@ -1214,7 +1216,76 @@ def render(report: dict[str, Any], as_json: bool) -> None:
     print("healthy" if report["healthy"] else "unhealthy")
 
 
+def _say_repair(kind: str, data: dict[str, Any]) -> None:
+    if kind == "progress":
+        done, total = data["bytes_done"], data["bytes_total"]
+        print(f"checked {gib_text(done)} of {gib_text(total or done)}", flush=True)
+        return
+    subject = data.get("subject")
+    who = f"{subject['kind']} {subject['id']}" if isinstance(subject, dict) else (subject or "")
+    detail = f": {data['detail']}" if data.get("detail") else ""
+    print(f"{data['step']} {who} {data['state']}{detail}".replace("  ", " "), flush=True)
+
+
+def _server_answering() -> str | None:
+    """Who a repair would be going behind: the running server knows what is on the card and
+    this command does not, so replacing files is the server's own `repair` task while it is up."""
+    try:
+        state = local.status()["state"]
+    except (ConfigError, local.LocalError, OSError):
+        return None
+    return None if state == "unreachable" else state
+
+
+def cmd_repair(args: argparse.Namespace) -> int:
+    config, backend = common.here()
+    if not args.verify_only:
+        state = _server_answering()
+        if state is not None:
+            return _fail(
+                f"server_running: this machine's Crucible server is up ({state}), and it is "
+                "what knows which model is on the card, so it does the replacing: POST "
+                '/v1/tasks {"type": "repair"}. `crucible doctor --repair --verify-only` only '
+                "reads, and runs beside it"
+            )
+    scope = repair.Scope(
+        envs=None,
+        weights=args.only != "envs",
+        verify_only=args.verify_only,
+    )
+    if args.only == "weights":
+        scope = repair.Scope(envs=(), weights=True, verify_only=args.verify_only)
+    say = (lambda _kind, _data: None) if args.json else _say_repair
+    report = repair.run(config, backend, scope, repair.NOBODY, emit=say, on_line=print)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        for row in report.repaired:
+            print(f"repaired {row['subject']['kind']} {row['subject']['id']}: {row['was']}")
+        for row in report.unverified:
+            print(f"unverified {row['subject']['kind']} {row['subject']['id']}: {row['why']}")
+        for row in report.failed:
+            print(
+                f"FAILED {row['subject']['kind']} {row['subject']['id']}: "
+                f"{row['code']}: {row['message']}",
+                file=sys.stderr,
+            )
+        if report.verify_only:
+            for row in report.broken:
+                print(f"broken {row['subject']['kind']} {row['subject']['id']}: {row['was']}")
+        print(
+            f"checked {len(report.checked)}, hashed {gib_text(report.bytes_hashed)}, "
+            f"{gib_text(report.bytes_skipped_verified)} already verified: "
+            + ("healthy" if report.healthy else "unhealthy")
+        )
+    return EXIT_OK if report.healthy else EXIT_REFUSED
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
+    if args.repair or args.verify_only:
+        return cmd_repair(args)
+    if args.only is not None:
+        return _fail("--only goes with --repair or --verify-only")
     report = _doctor_report()
     render(report, args.json)
     return EXIT_OK if report["healthy"] else EXIT_REFUSED
@@ -1276,6 +1347,21 @@ def cmd_env_patch(args: argparse.Namespace) -> int:
 def add_parser(subparsers: argparse._SubParsersAction) -> None:
     doctor = subparsers.add_parser("doctor", help="probe the host and the job types")
     doctor.add_argument("--json", action="store_true", help="machine-readable report")
+    doctor.add_argument(
+        "--repair",
+        action="store_true",
+        help="verify every installed env and model by hash and put back what is broken",
+    )
+    doctor.add_argument(
+        "--verify-only",
+        action="store_true",
+        help="the same checks, reporting what is broken and changing nothing",
+    )
+    doctor.add_argument(
+        "--only",
+        choices=("envs", "weights"),
+        help="with --repair or --verify-only, look at only these",
+    )
     doctor.set_defaults(func=cmd_doctor)
 
     env_parser = subparsers.add_parser(

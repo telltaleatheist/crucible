@@ -573,10 +573,10 @@ test('the reverse move is refused by this package, before it leaves', async () =
   );
 });
 
-test('a task type this build does not have names the four that exist', async () => {
+test('a task type this build does not have names the five that exist', async () => {
   await assert.rejects(
     client().submitTask({ type: 'reboot' } as never),
-    /'pull', 'install', 'module' or 'engine'/,
+    /'pull', 'install', 'module', 'engine' or 'repair'/,
   );
 });
 
