@@ -379,8 +379,10 @@ A recipe measured on its own replaces its row here and its header line together.
   worker imports beyond its own package: `numpy, num2words, regex, soundfile`.
   Both used to be `narrator`. Neither recipe pins narrator any more (REORG C3):
   `num2words` and its `docopt` are pinned outright, and the mlx-darwin recipe is a
-  freeze of the working Mac env without narrator, `snac` and `torch`, which only
-  narrator's Orpheus path needed.
+  freeze of the working Mac env without narrator and `snac`. `torch` stays on the
+  Mac: mlx-audio reads Higgs's codec tensors with safetensors' mlx framework,
+  which refuses bfloat16, and falls back to torch, so a bf16 voice does not load
+  without it. No import shows that; a load does.
 - **Serving stack: SGLang-Omni.** Owen 2026-09-15: *"we dont use vllm-omni. we use
   sglang. vllm-omni doesnt work for higgs."* vllm-omni's batched talker corrupts the
   newest batch row. Measured on the same 50 chunks: vllm-omni had 13/50 damaged at
