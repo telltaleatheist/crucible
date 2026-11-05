@@ -23,6 +23,12 @@ class = "generate"
 [[needs]]
 class = "decide"
 
+# Sentence align (electron/crucible/sentence-align.ts): qwen3-asr-1.7b hears the book,
+# whisper-large-v3-turbo is the second opinion on every cue Qwen would change.
+[[subjects]]
+kind = "model"
+id = "qwen3-asr-1.7b"
+
 [[subjects]]
 kind = "model"
 id = "whisper-large-v3-turbo"

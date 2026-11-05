@@ -1,6 +1,6 @@
 {
   "name": "bookforge",
-  "version": "2.0.34+4e27e6fdb5d0",
+  "version": "2.0.34+f60a6b0613e7",
   "job_types": [
     {
       "type": "llm",
@@ -49,6 +49,14 @@
     }
   ],
   "subjects": [
+    {
+      "kind": "model",
+      "id": "qwen3-asr-1.7b",
+      "backends": [
+        "cuda-linux",
+        "mlx-darwin"
+      ]
+    },
     {
       "kind": "model",
       "id": "whisper-large-v3-turbo",
