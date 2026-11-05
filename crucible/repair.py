@@ -16,9 +16,11 @@ many gigabytes:
   because a rebuild would install the same bytes. `pip check` is NOT a test: several recipes
   install packages with `--no-deps` on purpose, and it reports those healthy envs as conflicts.
 - A subject's weights are broken when a file the subject needs is missing, or when a file does
-  not hash to what the hub says that file is at the pinned revision. If the hub cannot be asked
-  (the network is weather), the subject is `unverified`, never broken: nothing is deleted on a
-  guess.
+  not hash to what the hub says that file is at the pinned revision, or, for a companion from
+  another repo, to the sha256 its manifest pins. If the hub cannot be asked (the network is
+  weather), or none of a subject's files can be matched to anything, the subject is `unverified`,
+  never broken: nothing is deleted on a guess. What could not be hashed against anything is listed
+  in `not_hash_checked`, so a clean result never claims more than was checked.
 
 Nothing here touches the card, and nothing here takes files out from under a running engine: an
 env or a subject that is in use is still READ and judged, and its repair waits until it is free,
@@ -114,6 +116,7 @@ class Report:
     repaired: list[dict[str, Any]] = field(default_factory=list)
     failed: list[dict[str, Any]] = field(default_factory=list)
     unverified: list[dict[str, Any]] = field(default_factory=list)
+    not_hash_checked: list[dict[str, Any]] = field(default_factory=list)
     bytes_hashed: int = 0
     bytes_skipped_verified: int = 0
     verify_only: bool = False
@@ -131,6 +134,7 @@ class Report:
             "repaired": self.repaired,
             "failed": self.failed,
             "unverified": self.unverified,
+            "not_hash_checked": self.not_hash_checked,
             "bytes_hashed": self.bytes_hashed,
             "bytes_skipped_verified": self.bytes_skipped_verified,
         }
@@ -256,6 +260,20 @@ def _rewritten_on_purpose(spec: jobenv.EnvSpec, packages: Path) -> frozenset[Pat
     if patches is None:
         return frozenset()
     return frozenset((packages / patch.rel_path) for patch in patches.patches)
+
+
+def record_wrong_here(directory: Path) -> list[str]:
+    """The files of this env left out because their own wheel's RECORD is wrong about them."""
+    packages = envpatches.site_packages(directory)
+    if packages is None:
+        return []
+    return sorted(
+        name
+        for dist, names in RECORD_WRONG.items()
+        if (packages / dist).is_dir()
+        for name in names
+        if (packages / name).exists()
+    )
 
 
 def record_rows(spec: jobenv.EnvSpec, directory: Path) -> tuple[list[RecordRow], list[str]]:
@@ -390,26 +408,42 @@ def _on_disk(directory: Path) -> list[Path]:
     ]
 
 
+def _pins_of(subject: catalog.Subject) -> dict[str, str]:
+    pinned = getattr(subject, "pinned_files", None)
+    return {} if pinned is None else pinned()
+
+
 def weights_problem(
     subject: catalog.Subject, found: weights.InstalledWeights, hub: dict[str, HubFile], hasher: Hasher
-) -> tuple[list[str], list[str]]:
-    """(the files that do not hash to what the hub says, the files the subject lacks)."""
+) -> tuple[list[str], list[str], list[str]]:
+    """(the files that do not hash to what they should, the files the subject lacks, the files
+    nothing could be compared with)."""
     missing = list(subject.missing_files()) if subject.missing_files is not None else []
+    pins = _pins_of(subject)
+    missing += [relative for relative in sorted(pins) if not (found.path / relative).is_file()]
     different: list[str] = []
+    unjudged: list[str] = []
     for path in _on_disk(found.path):
         relative = path.relative_to(found.path).as_posix()
+        pin = pins.get(relative)
+        if pin is not None:
+            if not hasher.matches(path, "sha256", (pin,), hasher.sha256):
+                different.append(relative)
+            continue
         entry = _match_hub_file(relative, hub)
         if entry is None:
+            unjudged.append(relative)
             continue
         if entry.sha256 is not None:
             good = hasher.matches(path, "sha256", (entry.sha256,), hasher.sha256)
         elif entry.blob_id is not None:
             good = hasher.matches(path, "git", (entry.blob_id,), hasher.git_blob_sha1)
         else:
+            unjudged.append(relative)
             continue
         if not good:
             different.append(relative)
-    return different, missing
+    return different, missing, unjudged
 
 
 def _drop_hub_copy(hf_repo: str, revision: str, relative: str) -> None:
@@ -433,9 +467,10 @@ def _put_back(
     on_progress: Callable[[int, int | None, str], None],
 ) -> None:
     """Delete only the bad files and fetch again: what is good stays, and is not downloaded."""
+    pins = _pins_of(subject)
     for relative in different:
         (found.path / relative).unlink(missing_ok=True)
-        if found.hf_repo is not None and found.revision is not None:
+        if relative not in pins and found.hf_repo is not None and found.revision is not None:
             _drop_hub_copy(found.hf_repo, found.revision, relative)
     (found.path / weights.STAMP_NAME).unlink(missing_ok=True)
     subject.pull(force=False, on_line=on_line, on_progress=on_progress)
@@ -552,6 +587,13 @@ def _repair_env(
     report.checked.append(subject)
     emit("repair", {"step": "verify", "subject": subject, "state": "running"})
     rows, unreadable = found_rows
+    wrong = record_wrong_here(jobenv.env_dir(config.home, spec))
+    if wrong:
+        report.not_hash_checked.append({
+            "subject": subject,
+            "files": wrong,
+            "why": "the published wheel's RECORD is wrong about these files",
+        })
     was = env_problem(config, backend, spec, rows, hasher)
     if was is None and unreadable:
         was = f"{len(unreadable)} RECORD file(s) could not be read: {unreadable[0]}"
@@ -618,7 +660,19 @@ def _repair_subject(
         report.unverified.append({"subject": row, "why": str(exc)})
         emit("repair", {"step": "verify", "subject": row, "state": "unverified", "detail": str(exc)})
         return
-    different, missing = weights_problem(subject, found, hub, hasher)
+    different, missing, unjudged = weights_problem(subject, found, hub, hasher)
+    judged = len(_on_disk(found.path)) - len(unjudged)
+    if not judged and not different and not missing:
+        why = f"none of its files are named in {found.hf_repo}@{found.revision[:12]}"
+        report.unverified.append({"subject": row, "why": why})
+        emit("repair", {"step": "verify", "subject": row, "state": "unverified", "detail": why})
+        return
+    if unjudged:
+        report.not_hash_checked.append({
+            "subject": row,
+            "files": unjudged,
+            "why": f"not named in {found.hf_repo}@{found.revision[:12]} or pinned by the manifest",
+        })
     if not different and not missing:
         emit("repair", {"step": "verify", "subject": row, "state": "ok"})
         return
@@ -660,7 +714,7 @@ def _repair_subject(
         report.failed.append({"subject": row, "code": "pull_failed", "message": message})
         emit("repair", {"step": "repull", "subject": row, "state": "failed", "detail": message})
         return
-    still, gone = weights_problem(subject, now, hub, hasher)
+    still, gone, _unjudged = weights_problem(subject, now, hub, hasher)
     if still or gone:
         message = f"after a fresh fetch {', '.join((still + gone)[:5])} still do(es) not match the hub"
         report.failed.append({"subject": row, "code": "weights_sha_mismatch", "message": message})

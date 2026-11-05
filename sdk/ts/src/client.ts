@@ -6499,6 +6499,11 @@ function readRepairResult(body: Json, where: string): RepairResult {
       subject: readRepairSubject(row['subject'], `${at}.subject`),
       why: str(row, 'why', at),
     })),
+    notHashChecked: rows('not_hash_checked').map(({ at, row }) => ({
+      subject: readRepairSubject(row['subject'], `${at}.subject`),
+      files: strArray(row, 'files', at),
+      why: str(row, 'why', at),
+    })),
     bytesHashed: num(body, 'bytes_hashed', where),
     bytesSkippedVerified: num(body, 'bytes_skipped_verified', where),
   };

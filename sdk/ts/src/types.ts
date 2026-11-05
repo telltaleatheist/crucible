@@ -3156,6 +3156,13 @@ export interface RepairUnverified {
   readonly why: string;
 }
 
+/** Files of an otherwise checked subject that nothing could be compared with, and why. */
+export interface RepairNotHashChecked {
+  readonly subject: RepairSubject;
+  readonly files: readonly string[];
+  readonly why: string;
+}
+
 /** `TaskStatus.result` of a `repair` task, and what `crucible doctor --repair --json` prints. */
 export interface RepairResult {
   /** No `failed`, and, in a verify-only run, nothing `broken`. Judged after the repair. */
@@ -3166,6 +3173,7 @@ export interface RepairResult {
   readonly repaired: readonly RepairFinding[];
   readonly failed: readonly RepairFailure[];
   readonly unverified: readonly RepairUnverified[];
+  readonly notHashChecked: readonly RepairNotHashChecked[];
   readonly bytesHashed: number;
   /** Not hashed again: unchanged since a repair last vouched for them. */
   readonly bytesSkippedVerified: number;

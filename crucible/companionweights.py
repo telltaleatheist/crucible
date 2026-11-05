@@ -20,6 +20,17 @@ from .audiomodels import Companion
 from .config import Config
 
 
+def pins(spec: Any) -> dict[str, str]:
+    """Each companion file's place under the model's directory and the sha256 the manifest pins.
+    These come from another repo than the main one, so the main repo says nothing about them
+    (dreamshaper's vae/ is madebyollin/sdxl-vae-fp16-fix, and the main repo has its own vae/)."""
+    return {
+        f"{companion.name}/{entry.target}": entry.sha256
+        for companion in spec.companions
+        for entry in companion.files
+    }
+
+
 def companion_dir(model_dir: Path, companion: Companion) -> Path:
     return model_dir / companion.name
 

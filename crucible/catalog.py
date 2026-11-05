@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from . import (
     audioweights,
+    companionweights,
     denoisemodels,
     imageweights,
     llamacpp,
@@ -86,6 +87,9 @@ class Subject:
     # subject's pull fetches and its `installed` reads) and why.
     form: str | None = None
     form_reason: str | None = None
+    # Files this subject's manifest pins itself, {path under its directory: sha256}: what a
+    # repair judges them by, because they do not come from the subject's main repo.
+    pinned_files: Callable[[], dict[str, str]] | None = None
 
     def would_move(self) -> str | None:
         return None if self.moves_to is None else self.moves_to()
@@ -140,6 +144,7 @@ def _image_subject(config: Config, manifest: Any, spec: Any) -> Subject:
         installed=lambda: imageweights.installed(config, manifest, spec),
         pull=lambda **kwargs: imageweights.pull(config, manifest, spec, **kwargs),
         remove=lambda: imageweights.remove(config, manifest, spec),
+        pinned_files=lambda: companionweights.pins(spec),
     )
 
 
@@ -163,6 +168,7 @@ def _audio_subject(config: Config, manifest: Any, spec: Any) -> Subject:
         installed=lambda: audioweights.installed(config, manifest, spec),
         pull=lambda **kwargs: audioweights.pull(config, manifest, spec, **kwargs),
         remove=lambda: audioweights.remove(config, manifest, spec),
+        pinned_files=lambda: companionweights.pins(spec),
     )
 
 
@@ -186,6 +192,7 @@ def _video_subject(config: Config, manifest: Any, spec: Any) -> Subject:
         installed=lambda: videoweights.installed(config, manifest, spec),
         pull=lambda **kwargs: videoweights.pull(config, manifest, spec, **kwargs),
         remove=lambda: videoweights.remove(config, manifest, spec),
+        pinned_files=lambda: companionweights.pins(spec),
     )
 
 

@@ -266,6 +266,7 @@ export type {
   EngineRestartTaskRequest,
   RepairFailure,
   RepairFinding,
+  RepairNotHashChecked,
   RepairResult,
   RepairScope,
   RepairSubject,

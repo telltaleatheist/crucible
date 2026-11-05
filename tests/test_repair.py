@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -330,6 +331,72 @@ def test_the_hub_caches_copy_of_a_bad_file_goes_too(
     report, _ = _run(box)
     assert report.healthy
     assert not blob.exists() and not (snapshot / "bad.bin").is_symlink()
+
+
+def _with_a_companion(s: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, data: bytes) -> None:
+    """A vae/ from another repo, whose path the main repo also has, with other bytes (dreamshaper
+    and yue2-3b, read off this PC's real weights, 2026-11-04)."""
+    (s.target / "vae").mkdir()
+    (s.target / "vae" / "model.bin").write_bytes(data)
+    s.hub["vae/model.bin"] = repair.HubFile("vae/model.bin", _sha(b"the main repo's other vae"), None)
+    subject = replace(s.subject, pinned_files=lambda: {"vae/model.bin": _sha(b"the companion")})
+    monkeypatch.setattr(catalog, "subjects", lambda *a: [subject])
+
+
+def test_a_companion_is_judged_by_its_pin_and_not_by_the_main_repo(
+    box: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = _subject_on_disk(box, monkeypatch, {"x.bin": b"x"})
+    _with_a_companion(s, monkeypatch, b"the companion")
+    report, _ = _run(box)
+    assert report.healthy and not report.broken and s.pulls == []
+    assert (s.target / "vae" / "model.bin").read_bytes() == b"the companion"
+
+
+def test_a_damaged_companion_is_broken_by_its_pin(
+    box: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = _subject_on_disk(box, monkeypatch, {"x.bin": b"x"})
+    _with_a_companion(s, monkeypatch, b"bit rot")
+    report, _ = _run(box, repair.Scope(verify_only=True))
+    assert "vae/model.bin" in report.broken[0]["was"]
+
+
+def test_a_missing_companion_is_broken(box: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = _subject_on_disk(box, monkeypatch, {"x.bin": b"x"})
+    _with_a_companion(s, monkeypatch, b"the companion")
+    (s.target / "vae" / "model.bin").unlink()
+    report, _ = _run(box, repair.Scope(verify_only=True))
+    assert "1 missing" in report.broken[0]["was"]
+
+
+def test_a_subject_nothing_can_be_compared_with_is_unverified(
+    box: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = _subject_on_disk(box, monkeypatch, {"x.pth": b"x"})
+    monkeypatch.setattr(repair, "hub_files", lambda *a: {})
+    report, _ = _run(box)
+    assert report.healthy and "none of its files" in report.unverified[0]["why"]
+    assert s.pulls == []
+
+
+def test_a_clean_result_says_what_it_could_not_compare(
+    box: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = _subject_on_disk(box, monkeypatch, {"x.bin": b"x"})
+    (s.target / "extra.gguf").write_bytes(b"from elsewhere")
+    report, _ = _run(box)
+    assert report.healthy
+    assert report.not_hash_checked[0]["files"] == ["extra.gguf"]
+
+
+def test_a_wheel_record_exception_is_listed_not_silently_skipped(box: SimpleNamespace) -> None:
+    name = "PyNvVideoCodec/PyNvVideoCodec_121.cpython-311-x86_64-linux-gnu.so"
+    (box.packages / "PyNvVideoCodec").mkdir()
+    (box.packages / name).write_bytes(b"what the wheel really holds")
+    _add_record(box.packages, "pynvvideocodec-2.0.4.dist-info", [f"{name},{_record_digest(b'x')},1"])
+    report, _ = _run(box)
+    assert report.not_hash_checked[0]["files"] == [name]
 
 
 def test_a_hub_that_cannot_be_asked_deletes_nothing(

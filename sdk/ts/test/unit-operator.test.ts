@@ -360,6 +360,7 @@ test('a repair task reads back what it found and did', async () => {
       repaired: [{ subject, was: '1 file(s) changed' }],
       failed: [{ subject: { kind: 'model', id: 'm' }, code: 'subject_in_use', message: 'it is on the card' }],
       unverified: [{ subject: { kind: 'voice', id: 'v' }, why: 'no network' }],
+      not_hash_checked: [{ subject, files: ['a.so'], why: 'its RECORD is wrong' }],
       bytes_hashed: 10,
       bytes_skipped_verified: 90,
     },
@@ -373,6 +374,7 @@ test('a repair task reads back what it found and did', async () => {
     repaired: [{ subject, was: '1 file(s) changed' }],
     failed: [{ subject: { kind: 'model', id: 'm' }, code: 'subject_in_use', message: 'it is on the card' }],
     unverified: [{ subject: { kind: 'voice', id: 'v' }, why: 'no network' }],
+    notHashChecked: [{ subject, files: ['a.so'], why: 'its RECORD is wrong' }],
     bytesHashed: 10,
     bytesSkippedVerified: 90,
   });
