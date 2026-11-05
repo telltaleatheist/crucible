@@ -15,6 +15,9 @@ many gigabytes:
   judges those. A wheel whose RECORD is wrong about its own files is named in `RECORD_WRONG`,
   because a rebuild would install the same bytes. `pip check` is NOT a test: several recipes
   install packages with `--no-deps` on purpose, and it reports those healthy envs as conflicts.
+- A subject that finished a pull of its pin (`Subject.was_pulled`) and no longer reads as
+  installed has lost a file, and is broken: nobody pulling it and a pull that lost a file both read
+  "not installed", and only the second is a repair's to mend.
 - A subject's weights are broken when a file the subject needs is missing, or when a file does
   not hash to what the hub says that file is at the pinned revision, or, for a companion from
   another repo, to the sha256 its manifest pins. If the hub cannot be asked (the network is
@@ -426,6 +429,13 @@ def weights_problem(
     missing = list(subject.missing_files()) if subject.missing_files is not None else []
     pins = _pins_of(subject)
     missing += [relative for relative in sorted(pins) if not (found.path / relative).is_file()]
+    wants = getattr(subject, "wants_file", None)
+    if wants is not None:
+        missing += [
+            relative
+            for relative in sorted(hub)
+            if relative not in pins and wants(relative) and not (found.path / relative).is_file()
+        ]
     different: list[str] = []
     unjudged: list[str] = []
     only_pinned = getattr(subject, "pinned_only", False)
@@ -546,14 +556,21 @@ def run(
     hasher = Hasher(report, cache, emit, cancelled)
     envs = installed_envs(config, backend, scope)
     env_rows = {spec.key: record_rows(spec, jobenv.env_dir(config.home, spec)) for spec in envs}
-    subjects: list[tuple[catalog.Subject, weights.InstalledWeights]] = []
+    subjects: list[tuple[catalog.Subject, weights.InstalledWeights, bool]] = []
     if scope.weights:
         for subject in catalog.subjects(config, backend):
+            if subject.shares_weights_of is not None:
+                continue
             found = subject.installed()
-            if found is not None and subject.shares_weights_of is None:
-                subjects.append((subject, found))
+            lost = False
+            if found is None:
+                was_pulled = getattr(subject, "was_pulled", None)
+                found = None if was_pulled is None else was_pulled()
+                lost = found is not None
+            if found is not None:
+                subjects.append((subject, found, lost))
     hasher.total = sum(_env_bytes(env_rows[spec.key][0]) for spec in envs) + sum(
-        found.bytes for _subject_row, found in subjects
+        found.bytes for _subject_row, found, _lost in subjects
     )
     emit(
         "repair",
@@ -561,7 +578,7 @@ def run(
             "step": "plan",
             "state": "running",
             "envs": [spec.key for spec in envs],
-            "subjects": [_subject(s.kind, s.id) for s, _found in subjects],
+            "subjects": [_subject(s.kind, s.id) for s, _found, _lost in subjects],
             "bytes_to_check": hasher.total,
         },
     )
@@ -569,8 +586,8 @@ def run(
         for spec in envs:
             _repair_env(config, backend, spec, env_rows[spec.key], scope, doors, report, hasher,
                         emit, cancelled, on_line, sleep, clock, wait_budget_s)
-        for subject, found in subjects:
-            _repair_subject(config, subject, found, scope, doors, report, hasher,
+        for subject, found, lost in subjects:
+            _repair_subject(config, subject, found, lost, scope, doors, report, hasher,
                             emit, cancelled, on_line, sleep, clock, wait_budget_s)
     finally:
         cache.save()
@@ -646,6 +663,7 @@ def _repair_subject(
     config: Config,
     subject: catalog.Subject,
     found: weights.InstalledWeights,
+    lost: bool,
     scope: Scope,
     doors: Doors,
     report: Report,
@@ -671,6 +689,8 @@ def _repair_subject(
         emit("repair", {"step": "verify", "subject": row, "state": "unverified", "detail": str(exc)})
         return
     different, missing, unjudged = weights_problem(subject, found, hub, hasher)
+    if lost and not missing:
+        missing = ["a file its pull placed"]
     judged = len(_on_disk(found.path)) - len(unjudged)
     if not judged and not different and not missing:
         why = f"none of its files are named in {found.hf_repo}@{found.revision[:12]}"

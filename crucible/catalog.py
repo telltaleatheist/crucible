@@ -93,6 +93,12 @@ class Subject:
     # True when the pins are ALL of this subject's files and its directory holds other
     # subjects' too (every separator shares one).
     pinned_only: bool = False
+    # A finished pull of this subject's pin, whatever has happened to its files since; None
+    # when nobody pulled it. Where this answers and `installed` does not, it lost a file.
+    was_pulled: Callable[[], weights.InstalledWeights | None] | None = None
+    # Whether a pull of this subject fetches this path of its repo: what says a file the hub
+    # has is one this subject should hold (a manifest with no file list takes the whole repo).
+    wants_file: Callable[[str], bool] | None = None
 
     def would_move(self) -> str | None:
         return None if self.moves_to is None else self.moves_to()
@@ -135,6 +141,19 @@ def _image_subjects(config: Config, backend: Backend) -> list[Subject]:
     ]
 
 
+def _was_pulled(
+    config: Config, manifest: Any, spec: Any
+) -> Callable[[], weights.InstalledWeights | None]:
+    def stamped() -> weights.InstalledWeights | None:
+        if weights.local_source(spec) is not None:
+            return None
+        return weights.stamped(
+            weights.subject_dir(config, manifest, spec.backend), spec.hf_repo, spec.revision
+        )
+
+    return stamped
+
+
 def _image_subject(config: Config, manifest: Any, spec: Any) -> Subject:
     return Subject(
         kind="model",
@@ -148,6 +167,8 @@ def _image_subject(config: Config, manifest: Any, spec: Any) -> Subject:
         pull=lambda **kwargs: imageweights.pull(config, manifest, spec, **kwargs),
         remove=lambda: imageweights.remove(config, manifest, spec),
         pinned_files=lambda: companionweights.pins(spec),
+        was_pulled=_was_pulled(config, manifest, spec),
+        wants_file=lambda relative: weights.wanted(relative, spec),
     )
 
 
@@ -172,6 +193,8 @@ def _audio_subject(config: Config, manifest: Any, spec: Any) -> Subject:
         pull=lambda **kwargs: audioweights.pull(config, manifest, spec, **kwargs),
         remove=lambda: audioweights.remove(config, manifest, spec),
         pinned_files=lambda: companionweights.pins(spec),
+        was_pulled=_was_pulled(config, manifest, spec),
+        wants_file=lambda relative: weights.wanted(relative, spec),
     )
 
 
@@ -196,6 +219,8 @@ def _video_subject(config: Config, manifest: Any, spec: Any) -> Subject:
         pull=lambda **kwargs: videoweights.pull(config, manifest, spec, **kwargs),
         remove=lambda: videoweights.remove(config, manifest, spec),
         pinned_files=lambda: companionweights.pins(spec),
+        was_pulled=_was_pulled(config, manifest, spec),
+        wants_file=lambda relative: weights.wanted(relative, spec),
     )
 
 
@@ -248,6 +273,8 @@ def _model_subject(
         installed=_installed_weights(config, manifest, spec),
         pull=_pull_weights(config, manifest, spec),
         remove=_remove_weights(config, manifest, spec),
+        was_pulled=_was_pulled(config, manifest, spec),
+        wants_file=lambda relative: weights.wanted(relative, spec),
         shares_weights_of=base_id,
         missing_files=(
             None
@@ -286,6 +313,8 @@ def _voice_subjects(config: Config, backend: Backend) -> list[Subject]:
                 pull=_pull_voice(config, voice, backend.kind),
                 remove=_remove_weights(config, voice, spec),
                 moves_to=_voice_moves_to(config, voice),
+                was_pulled=_was_pulled(config, voice, spec),
+                wants_file=lambda relative, spec=spec: weights.wanted(relative, spec),
             )
         )
     return found
@@ -330,6 +359,7 @@ def _rvc_subjects(config: Config, backend: Backend) -> list[Subject]:
                 installed=_installed_weights(config, model, spec),
                 pull=_pull_archive(config, model, spec),
                 remove=_remove_weights(config, model, spec),
+                was_pulled=_was_pulled(config, model, spec),
             )
         )
     return found
@@ -352,6 +382,9 @@ def _rvc_base_subject(config: Config) -> Subject:
         ),
         pinned_files=lambda: {entry.target: entry.sha256 for entry in assets.files},
         pinned_only=True,
+        was_pulled=lambda: weights.stamped(
+            rvcbase.base_root(config), assets.hf_repo, assets.revision
+        ),
     )
 
 
@@ -398,6 +431,12 @@ def _denoise_subjects(config: Config, backend: Backend) -> list[Subject]:
                     for entry in denoisemodels.model_files(separator, spec)
                 },
                 pinned_only=True,
+                was_pulled=lambda separator=separator, spec=spec: weights.stamped(
+                    denoisemodels.denoise_models_root(config.home),
+                    spec.hf_repo,
+                    spec.revision,
+                    denoisemodels.stamp_name(separator),
+                ),
             )
         )
     return found

@@ -643,7 +643,7 @@ def cached_snapshot(spec: WeightsSource) -> Path | None:
     return snapshot if snapshot.is_dir() else None
 
 
-def _wanted(relative: str, spec: WeightsSource) -> bool:
+def wanted(relative: str, spec: WeightsSource) -> bool:
     return not spec.files or any(fnmatch.fnmatch(relative, pattern) for pattern in spec.files)
 
 
@@ -673,7 +673,7 @@ def adopt_hub_cache(
     linked = sum(
         _link_into(source, target / source.relative_to(snapshot))
         for source in sorted(snapshot.rglob("*"))
-        if source.is_file() and _wanted(source.relative_to(snapshot).as_posix(), spec)
+        if source.is_file() and wanted(source.relative_to(snapshot).as_posix(), spec)
     )
     if linked:
         _say(
@@ -1151,6 +1151,29 @@ class FileSource(Protocol):
     target: str
     sha256: str
     bytes: int
+
+
+def stamped(
+    directory: Path, hf_repo: str, revision: str, stamp_name: str = STAMP_NAME
+) -> InstalledWeights | None:
+    """A pull of this pin that finished here, whatever has happened to its files since. It is
+    what tells a subject that lost a file from one nobody pulled, which `installed` calls the
+    same; a stamp of another pin is a subject that moved, and not this."""
+    stamp = directory / stamp_name
+    try:
+        record = json.loads(stamp.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if record.get("hf_repo") != hf_repo or record.get("revision") != revision:
+        return None
+    return InstalledWeights(
+        path=directory,
+        hf_repo=hf_repo,
+        revision=revision,
+        bytes=int(record.get("bytes") or 0),
+        pulled=record.get("pulled"),
+        source=PINNED,
+    )
 
 
 def files_installed(

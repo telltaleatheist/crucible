@@ -314,6 +314,64 @@ def test_a_pull_that_answers_from_its_stamp_is_asked_for_the_whole_subject(
     assert report.healthy and report.repaired
 
 
+def _lost_a_file(s: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, *, moved: bool = False) -> None:
+    """A subject `installed` calls absent: a pull finished here and a file it placed has gone."""
+    on_disk = weights.InstalledWeights(s.target, "org/repo", "abc123", 10, None, "pulled")
+    subject = replace(
+        s.subject,
+        installed=lambda: on_disk if (s.target / "bad.bin").is_file() else None,
+        was_pulled=lambda: None if moved else on_disk,
+    )
+    monkeypatch.setattr(catalog, "subjects", lambda *a: [subject])
+
+
+def test_a_subject_that_lost_a_file_is_broken_and_fetched_again(
+    box: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = _subject_on_disk(box, monkeypatch, {"bad.bin": b"bad"})
+    _lost_a_file(s, monkeypatch)
+    (s.target / "bad.bin").unlink()
+    report, _ = _run(box, repair.Scope(verify_only=True))
+    assert report.broken and not report.healthy and s.pulls == []
+    report, _ = _run(box)
+    assert report.healthy and report.repaired
+    assert (s.target / "bad.bin").read_bytes() == b"bad"
+
+
+def test_a_whole_repo_subject_that_lost_a_file_the_hub_has_is_broken(
+    box: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It still reads as installed: its manifest names no files for `installed` to look for."""
+    s = _subject_on_disk(box, monkeypatch, {"model.bin": b"weights", "config.json": b"{}"})
+    subject = replace(s.subject, wants_file=lambda _relative: True)
+    monkeypatch.setattr(catalog, "subjects", lambda *a: [subject])
+    (s.target / "model.bin").unlink()
+    report, _ = _run(box)
+    assert report.healthy and report.repaired
+    assert (s.target / "model.bin").read_bytes() == b"weights"
+
+
+def test_a_file_of_the_repo_this_subject_does_not_take_is_not_missing(
+    box: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = _subject_on_disk(box, monkeypatch, {"model.bin": b"weights"})
+    s.hub["other-form.gguf"] = repair.HubFile("other-form.gguf", "0" * 64, None)
+    subject = replace(s.subject, wants_file=lambda relative: relative == "model.bin")
+    monkeypatch.setattr(catalog, "subjects", lambda *a: [subject])
+    report, _ = _run(box)
+    assert report.healthy and not report.broken and s.pulls == []
+
+
+def test_a_subject_nobody_pulled_is_not_a_repairs_to_fetch(
+    box: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = _subject_on_disk(box, monkeypatch, {"bad.bin": b"bad"})
+    _lost_a_file(s, monkeypatch, moved=True)
+    (s.target / "bad.bin").unlink()
+    report, _ = _run(box)
+    assert report.checked == [] and s.pulls == []
+
+
 def test_a_subject_whose_pins_are_all_it_has_leaves_its_neighbours_alone(
     box: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
