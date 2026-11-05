@@ -49,6 +49,7 @@ def test_bookforge_asks_for_what_its_install_door_used_to_print() -> None:
         "rvc",
     ]
     assert {(s["kind"], s["id"]) for s in document["subjects"]} == {
+        ("model", "qwen3-asr-1.7b"),
         ("model", "whisper-large-v3-turbo"),
         ("model", "qwen3-aligner"),
         ("voice", "higgs-default"),

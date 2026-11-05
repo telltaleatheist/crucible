@@ -25,7 +25,7 @@ for name in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
     os.environ.pop(name, None)
 assert ".crucible" not in str(home)
 
-from crucible import catalog, jobenv, repair, weights  # noqa: E402
+from crucible import catalog, jobenv, repair  # noqa: E402
 from crucible.backend import Backend, Gpu  # noqa: E402
 from crucible.config import load_config, write_config  # noqa: E402
 from crucible.narratorengines import declared_tts_footprints  # noqa: E402
