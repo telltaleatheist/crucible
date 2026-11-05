@@ -262,6 +262,14 @@ class VoiceInfo(_Open):
         default=None,
         description="`{in, out}`: raised-cosine fades, in milliseconds, at each chunk edge on this arm.",
     )
+    edges: dict[str, Any] | None = Field(
+        default=None,
+        description="How this voice's chunks join, what an assembler reads: `pads` (true: the "
+        "engine bakes the silence into each chunk and the assembler concatenates; false: it "
+        "emits bare speech, and the assembler fades each edge and inserts the gaps), and "
+        "`fade_in_ms`, `fade_out_ms`: the engine's numbers, or the `edge_fade_ms` the voice "
+        "states instead. Null where this backend has no arm of the voice.",
+    )
     chunk_gap: dict[str, Any] | None = Field(
         default=None,
         description="The silence to add after each chunk: `inject_s` (net of the model's own tail), "

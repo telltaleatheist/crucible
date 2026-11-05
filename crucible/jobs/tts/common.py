@@ -10,7 +10,7 @@ from ...clock import utcnow
 from ...config import Config
 from ...engines import EngineError, NarratorEngine, find_free_port, start_engine
 from ...errors import ApiError
-from ...narratorengines import DOCUMENT_READERS, HIGGS_V3
+from ...narratorengines import DOCUMENT_READERS, HIGGS_V3, NARRATOR_ENGINE_EDGES
 from ...narratorvoices import not_served_here, write_document
 from ...residency import (
     DEFAULT_READY_TIMEOUT_SECONDS,
@@ -147,7 +147,7 @@ VOICE_ROW_FIELDS: dict[str, Any] = {
     "needs_reference": False, "pace": None,
     "ref": None, "latest_revision": None, "update_available": False,
     "update_checked_at": None, "update_error": None,
-    "sampling": None, "edge_fade_ms": None, "chunk_gap": None,
+    "sampling": None, "edge_fade_ms": None, "edges": None, "chunk_gap": None,
     "reference_seconds_cap": None, "allowed_controls": None,
 }
 
@@ -222,7 +222,20 @@ def _backend_fields(
         "max_chars": spec.max_chars,
         "max_chars_basis": spec.max_chars_basis,
         **_arm_facts(spec),
+        "edges": voice_edges(manifest, spec),
     }
+
+
+def voice_edges(manifest: VoiceManifest, spec: VoiceBackendSpec) -> dict[str, bool | float] | None:
+    """How this voice's chunks join on this arm: the engine's numbers, or the fades its manifest
+    states instead. None for an engine with no row, which nothing here serves."""
+    engine = NARRATOR_ENGINE_EDGES.get(manifest.narrator_engine)
+    if engine is None:
+        return None
+    stated = spec.to_dict()["edge_fade_ms"]
+    if stated is None:
+        return dict(engine)
+    return {**engine, "fade_in_ms": stated["in"], "fade_out_ms": stated["out"]}
 
 
 def _arm_facts(spec: VoiceBackendSpec) -> dict[str, Any]:

@@ -252,6 +252,7 @@ test('voices() reads every field /v1/voices promises, on the authed route', asyn
       updateError: null,
       sampling: { temperature: 0.8, topP: 0.95, topK: 50 },
       edgeFadeMs: { in: 10, out: 25 },
+      edges: null,
       chunkGap: CHUNK_GAP,
       referenceSecondsCap: 30,
       allowedControls: [],
@@ -304,6 +305,7 @@ test('voices() reads every field /v1/voices promises, on the authed route', asyn
       updateError: null,
       sampling: null,
       edgeFadeMs: null,
+      edges: null,
       chunkGap: CHUNK_GAP,
       referenceSecondsCap: null,
       allowedControls: null,
@@ -1216,4 +1218,10 @@ test('a progress fraction that is present but not a number is a protocol error',
       // drain
     }
   }, /fraction is not a number/);
+});
+
+test('a voice row says how its chunks join, in the SDK\'s spelling', async () => {
+  answers(200, [{ ...VOICE_ROW, edges: { pads: false, fade_in_ms: 10, fade_out_ms: 25 } }]);
+  const [voice] = await client().voices();
+  assert.deepEqual(voice?.edges, { pads: false, fadeInMs: 10, fadeOutMs: 25 });
 });

@@ -16,6 +16,16 @@ NARRATOR_ENGINE_SAMPLING: dict[str, dict[str, float]] = {
 
 NARRATOR_ENGINES: frozenset[str] = frozenset(NARRATOR_ENGINE_SAMPLING)
 
+# How each engine's chunks join, which is the model's own behaviour and what an assembler reads
+# (GET /v1/voices `edges`). `pads` False: it emits bare speech, and the assembler fades each
+# chunk's edges and inserts the gaps. A Higgs edge sits near -30 dB after the codec's trim and
+# clicks on a join; 10 in / 25 out takes it to -45..-48 dB, and the tail needs the wider window.
+# tests/test_voice_edges.py holds these equal to the worker's own constants, which it cannot
+# import from here: it runs in the tts env.
+NARRATOR_ENGINE_EDGES: dict[str, dict[str, bool | float]] = {
+    HIGGS_V3: {"pads": False, "fade_in_ms": 10.0, "fade_out_ms": 25.0},
+}
+
 DOCUMENT_READERS: frozenset[str] = frozenset({HIGGS_V3})
 
 ESTIMATE_BASES: frozenset[str] = frozenset({"measured", "declared"})

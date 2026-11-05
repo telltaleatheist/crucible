@@ -360,6 +360,7 @@ export type {
   UpstreamTestResult,
   VoiceChunkGap,
   VoiceEdgeFade,
+  VoiceEdges,
   VoiceInfo,
   VoiceKind,
   VoicePace,

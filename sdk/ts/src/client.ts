@@ -218,6 +218,7 @@ import {
   type UpstreamTestResult,
   type VoiceChunkGap,
   type VoiceEdgeFade,
+  type VoiceEdges,
   type VoiceInfo,
   type VoicePace,
   type VoiceSampling,
@@ -4528,6 +4529,7 @@ function readVoiceInfo(entry: Json, where: string): VoiceInfo {
     updateError: optStr(entry, 'update_error', where),
     sampling: readVoiceSampling(entry, where),
     edgeFadeMs: readVoiceEdgeFade(entry, where),
+    edges: readVoiceEdges(entry, where),
     chunkGap: readVoiceChunkGap(entry, where),
     referenceSecondsCap: optNum(entry, 'reference_seconds_cap', where),
     allowedControls: optStrArray(entry, 'allowed_controls', where),
@@ -4550,6 +4552,15 @@ function readVoiceEdgeFade(entry: Json, where: string): VoiceEdgeFade | null {
   if (block === null) return null;
   const at = `${where}.edge_fade_ms`;
   return { in: num(block, 'in', at), out: num(block, 'out', at) };
+}
+
+function readVoiceEdges(entry: Json, where: string): VoiceEdges | null {
+  const block = optObject(entry, 'edges', where);
+  if (block === null) return null;
+  const at = `${where}.edges`;
+  const pads = block['pads'];
+  if (typeof pads !== 'boolean') throw new CrucibleProtocolError(`${at}.pads is not a boolean`);
+  return { pads, fadeInMs: num(block, 'fade_in_ms', at), fadeOutMs: num(block, 'fade_out_ms', at) };
 }
 
 function readVoiceChunkGap(entry: Json, where: string): VoiceChunkGap | null {

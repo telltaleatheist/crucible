@@ -1856,6 +1856,13 @@ export type VoiceKind = 'checkpoint' | 'zeroshot' | 'token';
 export type EstimateBasis = 'measured' | 'declared';
 
 /** One voice this server knows about, as `GET /v1/voices` describes it. */
+/** `pads`: the engine bakes silence into each chunk; otherwise the assembler fades and inserts gaps. */
+export interface VoiceEdges {
+  readonly pads: boolean;
+  readonly fadeInMs: number;
+  readonly fadeOutMs: number;
+}
+
 export interface VoiceInfo {
   /** Crucible's voice id, stable across backends, e.g. `deathstalker`. */
   readonly id: string;
@@ -1921,6 +1928,11 @@ export interface VoiceInfo {
   readonly sampling: VoiceSampling | null;
   /** The fades at each chunk edge on this arm, or null when the manifest states none. */
   readonly edgeFadeMs: VoiceEdgeFade | null;
+  /**
+   * How this voice's chunks join, what an assembler reads: the engine's numbers, or `edgeFadeMs`
+   * where the voice states it. Null where this backend has no arm of the voice.
+   */
+  readonly edges: VoiceEdges | null;
   /** The silence a client adds after each chunk, or null when the manifest states none. */
   readonly chunkGap: VoiceChunkGap | null;
   /** The most reference-clip audio this arm takes, in seconds, or null when unstated. */
