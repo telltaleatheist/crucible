@@ -356,15 +356,13 @@ def test_this_build_ships_a_tts_recipe_for_every_env_a_voice_can_need(
     assert len(mac) == 1
 
 
-def test_every_tts_recipe_pins_narrator_by_a_commit(home: Path, viable: None) -> None:
+def test_no_tts_recipe_installs_anything_from_a_git_commit(home: Path, viable: None) -> None:
+    """narrator was the tts envs' one direct reference; it left them in REORG C3."""
     for spec in (
         jobenv.tts_env("higgs-v3", "cuda-linux"),
         jobenv.tts_env("higgs-v3", "mlx-darwin"),
     ):
-        recipe = jobenv.recipe_for(spec)
-        references = jobenv.recipe_direct_references(recipe)
-        assert list(references) == ["narrator"]
-        assert len(references["narrator"]) == 40
+        assert jobenv.recipe_direct_references(jobenv.recipe_for(spec)) == {}
 
 
 def test_the_tts_recipes_pin_the_stack_each_arm_measured(
