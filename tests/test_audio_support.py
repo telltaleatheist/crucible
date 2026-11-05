@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 from typing import Any
@@ -286,7 +287,9 @@ def test_the_mac_causal_check_passes_a_sound_kernel_and_refuses_a_leaking_one() 
     source = path.read_text(encoding="utf-8")
     start = source.index("CAUSAL_CHECK_LENGTHS")
     end = source.index("def _version_of")
-    namespace: dict[str, Any] = {}
+    # The slice is exec'd, not imported, so it gets the module's imports it uses by hand:
+    # without contextlib this test failed wherever torch was installed, and CI has none.
+    namespace: dict[str, Any] = {"contextlib": contextlib}
     exec(compile(source[start:end], str(path), "exec"), namespace)
     check = namespace["mps_causal_is_sound"]
 

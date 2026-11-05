@@ -7,6 +7,7 @@ notes.
 
 ## Unreleased
 
+- The test of YuE2's Mac causal-attention check runs wherever torch is installed. It executes a slice of the worker and was missing the `contextlib` import that slice uses, so it failed in every env that had torch, and CI, which has none, skipped it.
 - Crucible's tool downloads (ffmpeg, the speech detector, llama-server, zig) wait out a release host's bad moment instead of failing. They go through the resumable fetch, about five minutes of tries, and say each wait, in a job's `warming` events and in `crucible install`. A single 504 from GitHub used to fail a transcription job with `speech_detector_unavailable`. A 404 still refuses at once. Tests can no longer download a tool.
 - CI runs the Higgs worker's tests. The `test` extra now carries `num2words`, `regex` and `soundfile`; without them `tests/higgs_worker` collected one test, which skipped. A test holds that list to the worker's. Tests that need MLX or a POSIX launch still skip by name.
 - The Windows host's door reads every POST's body, whether its route wants it or not. `/restart`, `/quit` and `/local/*` answered with it unread, and a socket closed that way sends a reset that can destroy the answer before the client reads it.
