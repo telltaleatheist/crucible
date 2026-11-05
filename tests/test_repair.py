@@ -491,6 +491,40 @@ def test_a_wheel_record_exception_is_listed_not_silently_skipped(box: SimpleName
     assert report.not_hash_checked[0]["files"] == [name]
 
 
+def test_cancelling_a_fetch_leaves_the_next_repair_able_to_finish_it(
+    box: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = _subject_on_disk(box, monkeypatch, {"bad.bin": b"bad"})
+    (s.target / "bad.bin").write_bytes(b"bit rot")
+
+    def stopped(*, force: bool, on_line: Any, on_progress: Any) -> None:
+        raise weights.PullCancelled("cancelled part way through the download")
+
+    interrupted = replace(s.subject, pull=stopped, installed=lambda: (
+        weights.InstalledWeights(s.target, "org/repo", "abc123", 10, None, "pulled")
+        if (s.target / "bad.bin").is_file() else None
+    ), was_pulled=lambda: weights.InstalledWeights(s.target, "org/repo", "abc123", 10, None, "pulled")
+        if (s.target / weights.STAMP_NAME).is_file() else None)
+    monkeypatch.setattr(catalog, "subjects", lambda *a: [interrupted])
+    with pytest.raises(repair.RepairCancelled):
+        _run(box)
+    assert (s.target / weights.STAMP_NAME).is_file(), "the stamp is what says it lost a file"
+    assert not (s.target / "bad.bin").exists(), "the bad bytes are gone and the good are not here yet"
+    monkeypatch.setattr(catalog, "subjects", lambda *a: [replace(interrupted, pull=s.subject.pull)])
+    report, _ = _run(box)
+    assert report.healthy and report.repaired
+    assert (s.target / "bad.bin").read_bytes() == b"bad"
+
+
+def test_a_cancel_between_subjects_stops_before_the_next(
+    box: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = _subject_on_disk(box, monkeypatch, {"x.bin": b"x"})
+    with pytest.raises(repair.RepairCancelled):
+        _run(box, cancelled=lambda: True)
+    assert s.pulls == []
+
+
 def test_a_hub_that_cannot_be_asked_deletes_nothing(
     box: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:

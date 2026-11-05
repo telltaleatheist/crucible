@@ -63,7 +63,7 @@ export function parseLocalConfig(text: string, configPath: string, via: 'file' |
     const reason = err instanceof TomlError ? err.message : (err as Error).message;
     throw new BootstrapRefusal(
       'config_unreadable',
-      `${configPath} is not TOML this reader accepts (${reason}). The server would refuse it too.`,
+      `${configPath} is not TOML this package's reader can read (${reason}). That is this reader's limit and may not be the file's fault: the server reads it with Python's own TOML.`,
       { command: REINIT, cause: err },
     );
   }

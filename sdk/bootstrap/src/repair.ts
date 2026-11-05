@@ -14,7 +14,7 @@ import { BootstrapRefusal } from './errors.js';
 import { backendFor } from './release.js';
 import { installRuntime, probeGuest, type GuestFacts } from './runtime.js';
 import { processRunner, type Runner } from './runner.js';
-import { ensureRunning } from './service.js';
+import { ensureRunning, readStatus } from './service.js';
 import { describeTarget, resolveTarget, type Target } from './target.js';
 import { BOOTSTRAP_VERSION } from './version.js';
 
@@ -56,12 +56,21 @@ export interface RepairOptions extends LocalConfigOptions {
 }
 
 export interface LocalRepairResult {
-  /** `reinstalled` when the server itself would not answer, and the release it names went back. */
-  server: 'ok' | 'reinstalled';
-  service: 'running' | 'started';
-  /** What the server's own repair task found and did: the one result both doors answer. */
-  task: RepairResult;
+  /**
+   * `reinstalled` when the server itself would not answer, and the release it names went back.
+   * `broken`, on a verify-only run alone: it would not answer, and nothing was done about it.
+   */
+  server: 'ok' | 'reinstalled' | 'broken';
+  /** `stopped`, on a verify-only run alone: it is down, and it was not started. */
+  service: 'running' | 'started' | 'stopped';
+  /**
+   * What the server's own repair task found and did: the one result both doors answer. Null only on
+   * a verify-only run whose server or service was not up to ask, which `detail` then says.
+   */
+  task: RepairResult | null;
   healthy: boolean;
+  /** Why a verify-only run could not ask the server; null otherwise. */
+  detail: string | null;
 }
 
 /** Why the installed server cannot be trusted as it stands, or null when it can. */
@@ -74,6 +83,34 @@ function serverProblem(facts: GuestFacts): string | null {
   if (server.release !== null && !server.version.includes(server.release)) {
     return `${server.crucible} says ${server.version} and its stamp says ${server.release}`;
   }
+  return null;
+}
+
+/**
+ * A `scope.verifyOnly` run changes nothing, on this machine as on the server: a broken runtime or a
+ * stopped service is reported, not cured. Null when both are up, and the task can be asked.
+ */
+async function verifyOnlyAnswer(
+  runner: Runner,
+  target: Target,
+  facts: GuestFacts,
+  options: RepairOptions,
+  say: (name: RepairStepName) => (status: RepairStep['status'], detail: string) => void,
+): Promise<LocalRepairResult | null> {
+  const problem = serverProblem(facts);
+  if (problem !== null || facts.server === null) {
+    say('server')('failed', problem ?? 'there is no server');
+    return { server: 'broken', service: 'stopped', task: null, healthy: false, detail: problem };
+  }
+  say('server')('ok', facts.server.version ?? '');
+  const env = options.home === undefined ? undefined : { CRUCIBLE_HOME: options.home };
+  const status = await readStatus(runner, target, facts.server.crucible, env, describeTarget(target));
+  if (!status.running) {
+    const detail = `the service is not running (${status.detail}); a verify-only run does not start it`;
+    say('service')('failed', detail);
+    return { server: 'ok', service: 'stopped', task: null, healthy: false, detail };
+  }
+  say('service')('ok', 'running');
   return null;
 }
 
@@ -157,12 +194,19 @@ export async function repair(options: RepairOptions = {}, runner: Runner = proce
   const distro = runner.platform === 'win32' ? await resolveDistro(runner, where) : options.distro;
   const target = resolveTarget(runner, distro);
   say('server')('running', 'asking the server what it is');
-  const server = await repairServer(runner, target, await probeGuest(runner, target, options.home), options, say('server'));
-
-  say('service')('running', '');
-  const running = await ensureRunning({ ...where, ...home }, runner);
-  const service = running.started ? 'started' : 'running';
-  say('service')('ok', service);
+  const facts = await probeGuest(runner, target, options.home);
+  let server: LocalRepairResult['server'] = 'ok';
+  let service: LocalRepairResult['service'] = 'running';
+  if (options.scope?.verifyOnly === true) {
+    const answer = await verifyOnlyAnswer(runner, target, facts, options, say);
+    if (answer !== null) return answer;
+  } else {
+    server = await repairServer(runner, target, facts, options, say('server'));
+    say('service')('running', '');
+    const running = await ensureRunning({ ...where, ...home }, runner);
+    service = running.started ? 'started' : 'running';
+    say('service')('ok', service);
+  }
 
   const config = await readLocalConfig({ ...where, ...home }, runner);
   const clientName = options.clientName ?? `crucible-bootstrap/${BOOTSTRAP_VERSION}`;
@@ -187,5 +231,5 @@ export async function repair(options: RepairOptions = {}, runner: Runner = proce
     );
   }
   say('repair')(finished.result.healthy ? 'ok' : 'failed', finished.result.healthy ? 'healthy' : 'unhealthy');
-  return { server, service, task: finished.result, healthy: finished.result.healthy };
+  return { server, service, task: finished.result, healthy: finished.result.healthy, detail: null };
 }

@@ -1,4 +1,10 @@
-/** Refusal for TOML outside the dialect `crucible/config.py` writes. */
+/**
+ * The TOML of a Crucible config.toml. The server reads it with Python's tomllib, and a person or
+ * another tool can write any valid TOML into it, so a form this reader cannot read says so as this
+ * reader's limit and never as the file's fault. What it reads beyond tomli_w's output is what real
+ * configs hold: arrays over several lines (this PC's `advertise` and `cors_origins`, 2026-11-05),
+ * inline tables, multi-line strings and dates (kept as their text).
+ */
 
 export class TomlError extends Error {
   readonly line: number;
@@ -59,12 +65,61 @@ export function parseToml(text: string): TomlTable {
     const target = descend(current, keys.slice(0, -1), lineNo);
     const key = keys[keys.length - 1] as string;
     if (key in target) throw new TomlError(lineNo, `${keys.join('.')} is defined twice`);
-    const rawValue = line.slice(equals + 1).trim();
+    let rawValue = line.slice(equals + 1).trim();
+    // A value that has not ended on this line carries on over the next ones.
+    while (valueIsOpen(rawValue) && index + 1 < lines.length) {
+      index += 1;
+      const next = lines[index] as string;
+      rawValue += '\n' + (insideMultilineString(rawValue) ? next : stripComment(next).trim());
+    }
     const { value, rest } = parseValue(rawValue, lineNo);
     if (rest.trim().length > 0) throw new TomlError(lineNo, `trailing text after value: ${JSON.stringify(rest)}`);
     target[key] = value;
   }
   return root;
+}
+
+/** Walks a value's text: open brackets and whether it stopped inside a multi-line string. */
+function scan(text: string): { depth: number; multiline: boolean } {
+  let depth = 0;
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i] as string;
+    const three = text.slice(i, i + 3);
+    if (three === '"""' || three === "'''") {
+      let end = text.indexOf(three, i + 3);
+      while (three === '"""' && end > 0 && escaped(text, end)) end = text.indexOf(three, end + 1);
+      if (end < 0) return { depth, multiline: true };
+      i = end + 3;
+      while (text[i] === three[0]) i += 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      i += 1;
+      while (i < text.length && text[i] !== ch) i += ch === '"' && text[i] === '\\' ? 2 : 1;
+    } else if (ch === '[' || ch === '{') {
+      depth += 1;
+    } else if (ch === ']' || ch === '}') {
+      depth -= 1;
+    }
+    i += 1;
+  }
+  return { depth, multiline: false };
+}
+
+function escaped(text: string, at: number): boolean {
+  let slashes = 0;
+  for (let i = at - 1; i >= 0 && text[i] === '\\'; i -= 1) slashes += 1;
+  return slashes % 2 === 1;
+}
+
+function valueIsOpen(text: string): boolean {
+  const { depth, multiline } = scan(text);
+  return multiline || depth > 0;
+}
+
+function insideMultilineString(text: string): boolean {
+  return scan(text).multiline;
 }
 
 function stripComment(line: string): string {
@@ -143,9 +198,7 @@ function parseValue(text: string, lineNo: number): { value: TomlValue; rest: str
   if (text.length === 0) throw new TomlError(lineNo, 'missing value');
   const first = text[0] as string;
 
-  if (text.startsWith('"""') || text.startsWith("'''")) {
-    throw new TomlError(lineNo, 'multi-line strings are not something crucible writes; refusing to guess');
-  }
+  if (text.startsWith('"""') || text.startsWith("'''")) return parseMultilineString(text, lineNo);
   if (first === '"') return parseBasicString(text, lineNo);
   if (first === "'") {
     const end = text.indexOf("'", 1);
@@ -153,19 +206,65 @@ function parseValue(text: string, lineNo: number): { value: TomlValue; rest: str
     return { value: text.slice(1, end), rest: text.slice(end + 1) };
   }
   if (first === '[') return parseArray(text, lineNo);
-  if (first === '{') throw new TomlError(lineNo, 'inline tables are not something crucible writes; refusing to guess');
+  if (first === '{') return parseInlineTable(text, lineNo);
 
-  const scalar = /^[^,\]\s]+/.exec(text);
+  // A date and time has a space in it; it is kept as its text, which nothing here reads.
+  const date = /^\d{4}-\d{2}-\d{2}(?:[Tt ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})?)?|^\d{2}:\d{2}:\d{2}(?:\.\d+)?/.exec(text);
+  if (date !== null) return { value: date[0], rest: text.slice(date[0].length) };
+
+  const scalar = /^[^,\]}\s]+/.exec(text);
   if (scalar === null) throw new TomlError(lineNo, `bad value ${JSON.stringify(text)}`);
   const token = scalar[0];
   const rest = text.slice(token.length);
   if (token === 'true') return { value: true, rest };
   if (token === 'false') return { value: false, rest };
   if (/^[+-]?(0|[1-9](_?[0-9])*)$/.test(token)) return { value: Number(token.replace(/_/g, '')), rest };
+  if (/^0x[0-9A-Fa-f](_?[0-9A-Fa-f])*$|^0o[0-7](_?[0-7])*$|^0b[01](_?[01])*$/.test(token)) {
+    return { value: Number(token.replace(/_/g, '')), rest };
+  }
+  if (/^[+-]?inf$/.test(token)) return { value: token.startsWith('-') ? -Infinity : Infinity, rest };
+  if (/^[+-]?nan$/.test(token)) return { value: Number.NaN, rest };
   if (/^[+-]?(0|[1-9](_?[0-9])*)(\.[0-9](_?[0-9])*)?([eE][+-]?[0-9]+)?$/.test(token)) {
     return { value: Number(token.replace(/_/g, '')), rest };
   }
   throw new TomlError(lineNo, `unsupported value ${JSON.stringify(token)} (dates and other forms are refused, not guessed)`);
+}
+
+function parseMultilineString(text: string, lineNo: number): { value: string; rest: string } {
+  const quote = text.slice(0, 3);
+  let end = text.indexOf(quote, 3);
+  while (quote === '"""' && end > 0 && escaped(text, end)) end = text.indexOf(quote, end + 1);
+  if (end < 0) throw new TomlError(lineNo, 'unterminated multi-line string');
+  // Up to two more quotes may close it: they belong to the string.
+  while (text[end + 3] === quote[0]) end += 1;
+  let body = text.slice(3, end);
+  if (body.startsWith('\r\n')) body = body.slice(2);
+  else if (body.startsWith('\n')) body = body.slice(1);
+  if (quote === '"""') {
+    // A line-ending backslash joins the lines; the rest are the basic string's own escapes.
+    body = body.replace(/\\[ \t]*\r?\n\s*/g, '');
+    const { value } = parseBasicString(`"${body.replace(/(?<!\\)((?:\\\\)*)"/g, '$1\\"').replace(/\r?\n/g, '\\n')}"`, lineNo);
+    return { value, rest: text.slice(end + 3) };
+  }
+  return { value: body, rest: text.slice(end + 3) };
+}
+
+function parseInlineTable(text: string, lineNo: number): { value: TomlTable; rest: string } {
+  const table: TomlTable = {};
+  let rest = text.slice(1).trimStart();
+  for (;;) {
+    if (rest.startsWith('}')) return { value: table, rest: rest.slice(1) };
+    if (rest.length === 0) throw new TomlError(lineNo, 'unterminated inline table');
+    const equals = findUnquoted(rest, '=');
+    if (equals < 0) throw new TomlError(lineNo, `expected key = value in an inline table, got ${JSON.stringify(rest)}`);
+    const keys = splitKey(rest.slice(0, equals).trim(), lineNo);
+    const target = descend(table, keys.slice(0, -1), lineNo);
+    const parsed = parseValue(rest.slice(equals + 1).trimStart(), lineNo);
+    target[keys[keys.length - 1] as string] = parsed.value;
+    rest = parsed.rest.trimStart();
+    if (rest.startsWith(',')) rest = rest.slice(1).trimStart();
+    else if (!rest.startsWith('}')) throw new TomlError(lineNo, `expected , or } in an inline table, got ${JSON.stringify(rest)}`);
+  }
 }
 
 function parseBasicString(text: string, lineNo: number): { value: string; rest: string } {
@@ -211,7 +310,7 @@ function parseArray(text: string, lineNo: number): { value: TomlValue[]; rest: s
   let rest = text.slice(1).trimStart();
   for (;;) {
     if (rest.startsWith(']')) return { value: items, rest: rest.slice(1) };
-    if (rest.length === 0) throw new TomlError(lineNo, 'unterminated array (arrays must be on one line)');
+    if (rest.length === 0) throw new TomlError(lineNo, 'unterminated array');
     const parsed = parseValue(rest, lineNo);
     items.push(parsed.value);
     rest = parsed.rest.trimStart();

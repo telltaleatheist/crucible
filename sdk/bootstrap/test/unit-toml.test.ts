@@ -41,15 +41,11 @@ test('a dotted header under an array of tables addresses its last element', () =
 });
 
 for (const [label, text, pattern] of [
-  ['an inline table', 'a = { b = 1 }', /inline tables/],
-  ['a multi-line string', 'a = """x"""', /multi-line strings/],
-  ['a date', 'a = 2026-09-13T00:00:00Z', /dates/],
   ['a duplicate key', 'a = 1\na = 2', /defined twice/],
   ['a bare word', 'a = nope', /unsupported value/],
   ['a line that is not key = value', 'just text', /expected key = value/],
   ['an unterminated string', 'a = "open', /unterminated string/],
   ['an unterminated header', '[server', /unterminated table header/],
-  ['a multi-line array', 'a = [1,\n2]', /unterminated array/],
   ['trailing text', 'a = 1 2', /trailing text/],
 ] as const) {
   test(`refuses ${label} by name, with the line number`, () => {

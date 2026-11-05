@@ -490,10 +490,19 @@ def _put_back(
         (found.path / relative).unlink(missing_ok=True)
         if relative not in pins and found.hf_repo is not None and found.revision is not None:
             _drop_hub_copy(found.hf_repo, found.revision, relative)
-    (found.path / weights.STAMP_NAME).unlink(missing_ok=True)
-    # A pull_files subject (a separator, the RVC base) has its own stamp and answers from it, so
-    # this can come back having fetched nothing; `_repair_subject` then asks for the whole of it.
-    subject.pull(force=False, on_line=on_line, on_progress=on_progress)
+    stamp = found.path / weights.STAMP_NAME
+    kept = stamp.read_bytes() if stamp.is_file() else None
+    stamp.unlink(missing_ok=True)
+    try:
+        # A pull_files subject (a separator, the RVC base) has its own stamp and answers from it,
+        # so this can come back having fetched nothing; `_repair_subject` then asks for all of it.
+        subject.pull(force=False, on_line=on_line, on_progress=on_progress)
+    except BaseException:
+        # Cancelled or failed part way: the stamp is what lets the next repair see this subject
+        # lost a file, instead of reading it as one nobody pulled.
+        if kept is not None and not stamp.exists() and found.path.is_dir():
+            stamp.write_bytes(kept)
+        raise
 
 
 # ── the repair ───────────────────────────────────────────────────────────────────────────────
@@ -610,6 +619,8 @@ def _repair_env(
     clock: Callable[[], float],
     wait_budget_s: float,
 ) -> None:
+    if cancelled():
+        raise RepairCancelled()
     subject = _subject(ENV, spec.key)
     report.checked.append(subject)
     emit("repair", {"step": "verify", "subject": subject, "state": "running"})
@@ -675,6 +686,8 @@ def _repair_subject(
     clock: Callable[[], float],
     wait_budget_s: float,
 ) -> None:
+    if cancelled():
+        raise RepairCancelled()
     row = _subject(subject.kind, subject.id)
     report.checked.append(row)
     if found.hf_repo is None or found.revision is None:

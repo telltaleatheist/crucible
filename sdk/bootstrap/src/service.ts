@@ -112,7 +112,7 @@ export async function ensureRunning(options: EnsureRunningOptions = {}, runner: 
   return running(after, true, target);
 }
 
-async function readStatus(
+export async function readStatus(
   runner: Runner,
   target: Target,
   crucible: string,

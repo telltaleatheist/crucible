@@ -40,14 +40,45 @@ export function hostInstallCommand(release: string): string {
   return `irm ${releaseAssetUrl(release, 'install.ps1')} | iex`;
 }
 
-/** The door's bearer: the engine token, read from the host's own config. */
+/**
+ * The token in the host's pairing file (`crucible://<name>@<host>:<port>/#<token>`), or null. A
+ * pairing line with no token is a server that takes none, and a host door always takes one.
+ */
+function pairingToken(runner: Runner): string | null {
+  const path = crucibleAppData(runner, 'pairing');
+  if (!runner.fileExists(path)) return null;
+  let line: string;
+  try {
+    line = runner.readFile(path);
+  } catch {
+    return null;
+  }
+  const at = line.indexOf('#');
+  if (at < 0) return null;
+  const raw = line.slice(at + 1).trim();
+  if (raw === '') return null;
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The door's bearer, in the order the host itself takes it (crucible/controller_client.py `bearer`):
+ * the pairing the host keeps for whichever engine it owns, then the host's own config. The config
+ * alone is not the answer: where the engine lives in WSL, as on this PC, it holds `[orchestrator]`
+ * and no token, and that is right. Every server row in BookForge read red for it (2026-11-05).
+ */
 export function hostToken(runner: Runner): string {
+  const paired = pairingToken(runner);
+  if (paired !== null) return paired;
   const path = hostConfigPath(runner);
   if (!runner.fileExists(path)) {
     throw new BootstrapRefusal(
       'host_no_token',
-      `${path} does not exist, so the host has no engine token yet and its door cannot be authorised. `
-        + 'The host writes this file on its first `crucible init`; until then there is nothing to pair with.',
+      `${path} does not exist and this host has no pairing, so it has no engine token yet and its door cannot be `
+        + 'authorised. The host writes these once it has an engine; until then there is nothing to pair with.',
     );
   }
   let text: string;
@@ -66,7 +97,8 @@ export function hostToken(runner: Runner): string {
   } catch (err) {
     throw new BootstrapRefusal(
       'config_unreadable',
-      `${path} is not TOML this reader accepts (${(err as Error).message}). The server would refuse it too.`,
+      `${path} is not TOML this package's reader can read (${(err as Error).message}). That is this reader's limit `
+        + 'and may not be the file\'s fault: the server reads it with Python\'s own TOML.',
       { cause: err },
     );
   }
@@ -74,7 +106,7 @@ export function hostToken(runner: Runner): string {
   if (typeof token !== 'string' || token.trim() === '') {
     throw new BootstrapRefusal(
       'host_no_token',
-      `${path} has no [auth] token, so there is nothing to authorise the host's door with. `
+      `this host has no pairing and ${path} has no [auth] token, so there is nothing to authorise the host's door with. `
         + "The host's door always takes the engine token, whatever the engine's own [auth] mode is.",
     );
   }

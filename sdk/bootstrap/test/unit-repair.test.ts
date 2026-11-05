@@ -101,15 +101,47 @@ test('a server that answers is left alone, and the task\'s result is the answer'
 
 test('the scope goes to the task as it was given', async () => {
   const fake = client(status(HEALTHY));
-  await repairWith(fake, machine('crucible 2.0.34', '2.0.34'), { scope: { verifyOnly: true } });
-  assert.deepEqual(fake.asked, [{ type: 'repair', scope: { verifyOnly: true } }]);
+  await repairWith(fake, machine('crucible 2.0.34', '2.0.34'), { scope: { envs: ['rvc'] } });
+  assert.deepEqual(fake.asked, [{ type: 'repair', scope: { envs: ['rvc'] } }]);
+});
+
+test('verify-only asks a running server and changes nothing here', async () => {
+  const fake = client(status(HEALTHY));
+  const said = { argv: () => true, stdout: probe('crucible 2.0.34', '2.0.34') };
+  const runner = new FakeRunner(HOST, [said, { argv: (argv) => argv.includes('status'), stdout: SERVICE_UP }]);
+  const answer = await repairWith(fake, runner, { scope: { verifyOnly: true } });
+  runner.assertDrained();
+  assert.deepEqual(answer.task, HEALTHY);
+  assert.equal(answer.server, 'ok');
+  assert.ok(runner.calls.every((call) => !call.argv.includes('start')), 'nothing was started');
+});
+
+test('verify-only reports a stopped service and does not start it', async () => {
+  const down = SERVICE_UP.replace('"running":true', '"running":false');
+  const said = { argv: () => true, stdout: probe('crucible 2.0.34', '2.0.34') };
+  const runner = new FakeRunner(HOST, [said, { argv: (argv) => argv.includes('status'), stdout: down }]);
+  const answer = await repairWith(client(status(HEALTHY)), runner, { scope: { verifyOnly: true } });
+  runner.assertDrained();
+  assert.equal(answer.service, 'stopped');
+  assert.equal(answer.task, null);
+  assert.equal(answer.healthy, false);
+  assert.match(answer.detail ?? '', /does not start it/);
+});
+
+test('verify-only reports a server that will not answer and puts nothing back', async () => {
+  const runner = new FakeRunner(HOST, [{ argv: () => true, stdout: probe(null, '2.0.34') }]);
+  const answer = await repairWith(client(status(HEALTHY)), runner, { scope: { verifyOnly: true } });
+  runner.assertDrained();
+  assert.equal(answer.server, 'broken');
+  assert.equal(answer.task, null);
+  assert.equal(answer.healthy, false);
 });
 
 test('what could not be put back is an unhealthy answer, not a refusal', async () => {
   const failed = { ...HEALTHY, healthy: false, failed: [{ subject: { kind: 'env', id: 'rvc' }, code: 'env_build_failed', message: 'no' }] };
   const answer = await repairWith(client(status(failed)), machine('crucible 2.0.34', '2.0.34'));
   assert.equal(answer.healthy, false);
-  assert.equal(answer.task.failed[0]?.code, 'env_build_failed');
+  assert.equal(answer.task?.failed[0]?.code, 'env_build_failed');
 });
 
 test('a task that did not finish is repair_failed, with what it said', async () => {
