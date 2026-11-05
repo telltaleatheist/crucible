@@ -13,7 +13,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from crucible import API_VERSION, accelerator, jobenv
+from crucible import API_VERSION, accelerator, hosttools, jobenv
 from crucible import engines as engines_module
 from crucible.api import create_app
 from crucible.backend import Backend, Gpu
@@ -628,6 +628,25 @@ def cached_as_of_the_fixtures(home: Path, hf_repo: str, ref: str) -> Any:
     return voicerefs.RefCheck(
         hf_repo=hf_repo, ref=ref, revision=sha, checked_at="fixture", error=None
     )
+
+
+_REAL_TOOL_DOWNLOAD = hosttools._download
+
+
+def _no_tool_downloads(url: str, destination: Path) -> str:
+    raise AssertionError(f"a test tried to download {url}; stub the tool or pass fetch=")
+
+
+@pytest.fixture(autouse=True)
+def _no_test_downloads_a_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 504 from GitHub failed a dozen ASR tests, which had fetched the real speech detector."""
+    monkeypatch.setattr(hosttools, "_download", _no_tool_downloads)
+    monkeypatch.setattr(hosttools, "silero_vad_placed", lambda home: True)
+
+
+@pytest.fixture
+def real_tool_download() -> Callable[..., str]:
+    return _REAL_TOOL_DOWNLOAD
 
 
 @pytest.fixture(autouse=True)

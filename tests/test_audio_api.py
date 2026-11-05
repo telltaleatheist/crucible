@@ -233,10 +233,10 @@ def test_a_song_can_be_an_mp3_at_192_kbps_cbr_served_as_audio_mpeg_with_ranges(
     assert whole.headers["content-type"] == "audio/mpeg"
     body = whole.content
     assert body[:2] == bytes([0xFF, 0xFB])
-    # MPEG-1 Layer III header: bitrate index 1011 is 192 kbps, sample-rate index 00 is 44.1 kHz.
-    assert (body[2] >> 4, (body[2] >> 2) & 0x3) == (0b1011, 0b00)
+    # MPEG-1 Layer III header: bitrate index 1011 is 192 kbps, sample-rate index 01 is 48 kHz.
+    assert (body[2] >> 4, (body[2] >> 2) & 0x3) == (0b1011, 0b01)
     # Every frame says the same: constant bitrate.
-    frame = 144 * 192_000 // 44100
+    frame = 144 * 192_000 // 48000
     assert body[frame] == 0xFF and (body[frame + 2] >> 4) == 0b1011
     part = ready.get(f"/v1/jobs/{job_id}/artifacts/audio.mp3", headers={**auth, "Range": "bytes=0-99"})
     assert part.status_code == 206

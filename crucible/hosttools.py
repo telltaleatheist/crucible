@@ -17,7 +17,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from . import interpreter
 from .errors import ApiError, CrucibleError
+from .weights import sha256_of
 
 PATH_ENV = "PATH"
 
@@ -277,24 +279,14 @@ def ffmpeg_report(home: Path) -> dict[str, object]:
     }
 
 
-def _download(url: str, destination: Path) -> str:
-    digest = hashlib.sha256()
-    request = urllib.request.Request(url, headers={"Accept": "application/octet-stream"})
+def _download(url: str, destination: Path, *, pause_s: float = interpreter.FETCH_PAUSE_S) -> str:
+    """Fetch through `interpreter.fetch`, so a 504 from the release host is waited on and not a
+    failed job; what it could not get within its budget, or a 404, is `tool_download_failed`."""
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            with destination.open("wb") as handle:
-                while True:
-                    block = response.read(_CHUNK_BYTES)
-                    if not block:
-                        break
-                    handle.write(block)
-                    digest.update(block)
-    except (urllib.error.URLError, OSError) as exc:
-        raise HostToolError(
-            "tool_download_failed",
-            f"{url} could not be fetched: {type(exc).__name__}: {exc}",
-        ) from None
-    return digest.hexdigest()
+        interpreter.fetch(url, destination, pause_s=pause_s)
+    except interpreter.InterpreterError as exc:
+        raise HostToolError("tool_download_failed", exc.message) from None
+    return sha256_of(destination)
 
 
 def ensure_ffmpeg(
