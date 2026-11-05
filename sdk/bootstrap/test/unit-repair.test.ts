@@ -99,6 +99,12 @@ test('a server that answers is left alone, and the task\'s result is the answer'
   assert.deepEqual([...new Set(steps.map((s) => s.name))], ['server', 'service', 'repair']);
 });
 
+test('the task id reaches the caller as soon as there is one, so it can be cancelled', async () => {
+  const seen: string[] = [];
+  await repairWith(client(status(HEALTHY)), machine('crucible 2.0.34', '2.0.34'), { onTask: (id) => seen.push(id) });
+  assert.deepEqual(seen, ['t1']);
+});
+
 test('the scope goes to the task as it was given', async () => {
   const fake = client(status(HEALTHY));
   await repairWith(fake, machine('crucible 2.0.34', '2.0.34'), { scope: { envs: ['rvc'] } });

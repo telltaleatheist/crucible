@@ -45,6 +45,8 @@ export interface RepairOptions extends LocalConfigOptions {
   clientName?: string;
   onLine?: (line: string, stream: 'stdout' | 'stderr') => void;
   onStep?: (step: RepairStep) => void;
+  /** The server's task id, once it has one: what `client.cancelTask(id)` stops. */
+  onTask?: (taskId: string) => void;
   /** Each thing the task judges or replaces. */
   onRepair?: (data: TaskRepairData) => void;
   /** Bytes read so far of `bytesToCheck`, or bytes of a download. */
@@ -215,6 +217,7 @@ export async function repair(options: RepairOptions = {}, runner: Runner = proce
 
   say('repair')('running', 'asking the server to check what it has');
   const taskId = await submitWhenFree(client, options.scope, options, say('repair'));
+  options.onTask?.(taskId);
   for await (const event of client.taskEvents(taskId)) {
     if (event.event === 'repair') options.onRepair?.(event.data);
     if (event.event === 'progress' && 'bytesDone' in event.data) options.onProgress?.(event.data);
