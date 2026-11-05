@@ -422,7 +422,7 @@ def cmd_env_sync(args: argparse.Namespace) -> int:
     new recipe on both machines, but no deploy step re-syncs an env, so the Mac's tts env
     stayed on 94c1f49d and every Higgs voice there read `loadable: false` ("does not match
     mlx-darwin.txt: narrator was installed from 94c1f49d…, recipe pins dc05e7e7…") until
-    `crucible install tts` was run on it by hand. An env that is not installed here is not
+    `crucible install tts` was run on it manually. An env that is not installed here is not
     this step's: installing a type is an install. One that cannot be brought to its recipe
     fails the step by name."""
     config, backend = common.here()

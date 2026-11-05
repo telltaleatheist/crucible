@@ -134,7 +134,7 @@ def settle_a_left_sessions_load(
     would hold it was gone, and settle_for_job leaves a finished load-model resident on
     purpose. 2026-10-25 on owens-pc: BookForge quit while its pronunciation guide's
     session waited on qwen3.8-27b-4bit; the load finished at 16:49:53, the session was
-    gone, and the 27B sat on the card, held by nothing, until it was unloaded by hand.
+    gone, and the 27B sat on the card, held by nothing, until somebody unloaded it.
 
     Only the session's own model is touched, and only through the settlement, which
     unloads nothing anything else holds: an operator's load of another model, or a

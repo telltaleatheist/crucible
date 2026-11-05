@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..narratorengines import HIGGS_V3
+
 HERE = Path(__file__).parent
 
 # Each guide's file stem and the Crucible model ids it covers. A guide named after an
@@ -23,7 +25,7 @@ GUIDES: dict[str, tuple[str, ...]] = {
     "dreamshaper-xl-lightning": ("dreamshaper-xl-lightning",),
     "ltx-2.5-distilled": ("ltx-2.5-distilled",),
     "ltx-2.3-dubit": ("ltx-2.3-dubit",),
-    "higgs-v3": (),
+    HIGGS_V3: (),
     "qwen3.5": (
         "qwen3.5-0.8b",
         "qwen3.5-2b",
@@ -52,8 +54,8 @@ GUIDES: dict[str, tuple[str, ...]] = {
 _LLM = ("qwen3.5", "qwen3.8-27b")
 JOB_TYPE_GUIDES: dict[str, tuple[str, ...]] = {
     "load-model": (*_LLM, "dots-ocr", "qwen3-embedding-8b", "qwen3-reranker-8b"),
-    "load-voice": ("higgs-v3",),
-    "tts": ("higgs-v3",),
+    "load-voice": (HIGGS_V3,),
+    "tts": (HIGGS_V3,),
     "asr": ("qwen3-asr", "whisper"),
     "image": ("qwen-image-2.1", "dreamshaper-xl-lightning"),
     "audio": ("yue2-3b", "stable-audio-3-medium", "stable-audio-3-small-sfx"),
@@ -70,7 +72,7 @@ ROUTE_GUIDES: dict[str, tuple[str, ...]] = {
     "/v1/rerank": ("qwen3-reranker-8b",),
     "/v1/openai/rerank": ("qwen3-reranker-8b",),
     "/openai/v1/rerank": ("qwen3-reranker-8b",),
-    "/v1/tts/stream": ("higgs-v3",),
+    "/v1/tts/stream": (HIGGS_V3,),
 }
 
 

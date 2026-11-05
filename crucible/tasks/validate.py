@@ -136,7 +136,7 @@ def validate_install(config: Config, backend: Backend, request: dict[str, Any]) 
     build and turns the type on (TaskStore._run_install). It used to be refused
     `job_type_installed`, and that was the door `job_type_disabled` points at, so a type
     whose env was built while its flag was off had no door at all (owens-pc, 2.0.8, a
-    video job: it took `crucible jobs enable video` by hand)."""
+    video job: it took a manual `crucible jobs enable video`)."""
     require_installable(request["job_type"])
     require_narrator_engine(request["job_type"], request.get("narrator_engine"))
 

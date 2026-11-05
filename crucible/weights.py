@@ -1272,7 +1272,7 @@ def pull_files(
 
 def _placed(target_root: Path, entry: FileSource, on_line: Callable[[str], None] | None) -> bool:
     """Whether the file is already at its target with the bytes the declaration pins: put
-    there by hand (weights fetched before Crucible knew them, moved in rather than fetched
+    there manually (weights fetched before Crucible knew them, moved in rather than fetched
     twice) or by a pull whose stamp was lost. It is hashed, never trusted by name; a file
     that does not match is fetched and replaced as if it were absent."""
     destination = _safe_target(target_root, entry.target)

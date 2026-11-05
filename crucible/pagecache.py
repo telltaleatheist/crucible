@@ -4,7 +4,7 @@ Victoria's laptop, 2026-10-24: after `crucible install asr` and a 1.9 GB model p
 WSL VM (vmmemWSL) held 7.6 GB, of which the guest's processes used 0.9 GB; the rest was
 Linux's page cache of the files just written. Linux keeps that cache until something
 needs the memory, but a WSL guest's cache is memory Windows cannot use, and her Godot
-and Blender jobs were killed for low memory while it sat there. Dropping it by hand
+and Blender jobs were killed for low memory while it sat there. Dropping it manually
 (`echo 1 > /proc/sys/vm/drop_caches` as root) took the VM to 2.66 GB: WSL returns freed
 pages to Windows by itself (free page reporting), it only never sees cached ones as free.
 
