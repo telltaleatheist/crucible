@@ -695,6 +695,7 @@ Admit one operator task (pull, install, module, engine or engine-restart), or re
 | `narrator_engine` | string or null | no | — |  |
 | `module` | object or null | no | — |  |
 | `target` | string or null | no | — |  |
+| `scope` | object or null | no | — |  |
 
 *Answers:* `202`, `409` ErrorEnvelope, `422` HTTPValidationError
 
@@ -3518,6 +3519,7 @@ A queue session: one client's claim on the server for a run of requests. Not a T
 | `narrator_engine` | string or null | no | — |  |
 | `module` | object or null | no | — |  |
 | `target` | string or null | no | — |  |
+| `scope` | object or null | no | — |  |
 
 ### `TerminalStates`
 
@@ -3541,6 +3543,8 @@ The states after which a job or a task never changes again.
 | `loc` | array of string or integer | yes | — |  |
 | `msg` | string | yes | — |  |
 | `type` | string | yes | — |  |
+| `input` | Input | no | — |  |
+| `ctx` | object | no | — |  |
 
 ### `VoiceInfo`
 
