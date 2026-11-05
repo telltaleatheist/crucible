@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from crucible import cli, jobenv
+from crucible import cli, hosttools, jobenv
 from crucible.config import load_config
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
@@ -41,6 +41,7 @@ def test_install_segment_builds_its_one_env_and_smoke_imports_the_model_code(
 
     stepped: list[tuple[str, ...]] = []
     monkeypatch.setattr(jobenv, "install_env", install_env)
+    monkeypatch.setattr(hosttools, "ensure_ffmpeg", lambda home_dir, **_: "ffmpeg: ok")
     monkeypatch.setattr(cli.install, "_smoke_import", lambda _python, key, kind: smoked.append((key, kind)))
     monkeypatch.setattr(cli.install, "_measure_step", lambda *_a, **_k: None)
     monkeypatch.setattr(cli.install, "_capability_step", lambda _c, _b, *types: stepped.append(types) or 0)
