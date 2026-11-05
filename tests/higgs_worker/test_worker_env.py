@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import tomllib
+from pathlib import Path
 
 import pytest
 
@@ -16,3 +18,11 @@ def test_this_interpreter_can_run_the_higgs_worker_tests() -> None:
             "(~/.crucible/envs/tts-higgs-v3/bin/python -m pytest --noconftest "
             "tests/higgs_worker), which has them"
         )
+
+
+def test_ci_installs_what_the_higgs_worker_tests_need() -> None:
+    """Without this a dropped package would turn these tests into one quiet skip on CI."""
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    extra = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["optional-dependencies"]["test"]
+    named = {requirement.split(">")[0].split("=")[0].strip() for requirement in extra}
+    assert set(WORKER_MODULES) <= named

@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8", "build>=1.0", "pillow>=10", "numpy>=1.26"]
+test = ["pytest>=8", "build>=1.0", "pillow>=10", "numpy>=1.26", "num2words>=0.5", "regex>=2023", "soundfile>=0.12"]
 
 [project.scripts]
 crucible = "crucible.cli:main"
