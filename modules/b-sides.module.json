@@ -1,6 +1,6 @@
 {
   "name": "b-sides",
-  "version": "2.0.35+1e1458912f77",
+  "version": "2.0.36+1e1458912f77",
   "job_types": [
     {
       "type": "rvc",
