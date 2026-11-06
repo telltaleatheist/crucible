@@ -69,3 +69,26 @@ def test_the_docs_are_served_without_a_token(make_client: Callable[..., TestClie
         assert list(types) == list(JOB_DOCS)
         assert types["echo"]["enabled"] is True
         assert types["echo"]["params"]["properties"]["delay_ms"]["default"] == 25
+
+
+def test_a_fastapi_release_does_not_change_the_reference() -> None:
+    from crucible.apidocs import _version_free
+
+    fastapi_0_162 = {
+        "ValidationError": {
+            "type": "object",
+            "required": ["loc", "msg", "type"],
+            "properties": {
+                "loc": {"type": "array"},
+                "msg": {"type": "string"},
+                "type": {"type": "string"},
+                "input": {"title": "Input"},
+                "ctx": {"type": "object"},
+            },
+        },
+        "Other": {"properties": {"kept": {"type": "string"}}},
+    }
+    stable = _version_free(fastapi_0_162)
+    assert list(stable["ValidationError"]["properties"]) == ["loc", "msg", "type"]
+    assert "input" in fastapi_0_162["ValidationError"]["properties"], "app.openapi() caches its dict"
+    assert stable["Other"] == fastapi_0_162["Other"]

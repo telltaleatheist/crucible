@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- `docs/API.md` no longer changes when FastAPI does. FastAPI 0.162 added two optional fields to its own `ValidationError`, so the generated-docs check failed on every push while nothing of Crucible's had moved. The reference states the fields every version requires.
+
 - On WSL the server gives back the guest's file cache as it builds up. A model load read 4.9 GB into it, on top of the card's and the engine's own memory, and it stayed after the job: on an 8 GB laptop at 47 GB of Windows commit, one `qwen3-asr-0.6b` file reached within 0.8 GB of the commit limit and Claude Code killed the command waiting on it. `pagecache.CacheWatcher` looks every 10 s and releases unmapped cache over 1 GiB, whatever left it. The next load of a model reads from disk instead of memory.
 - `crucible doctor --verify-only` and `--repair` no longer fill the file cache with what they hash. On the same laptop a check of 74.5 GiB left 12.5 GB in the guest and 2.1 GB free on Windows, and another program's command was killed for low memory.
 - The `crucible` command, the Mac app and tray, and the Windows controller start in Crucible's home instead of the server's site-packages, as the service already did. `python -c` in another env put that folder first on its path, so `doctor --verify-only` reported a healthy `align` env as broken (huggingface-hub 1.32.0, the server's).

@@ -551,11 +551,23 @@ def render_job_types(enabled: frozenset[str] | None) -> list[str]:
     return out
 
 
+def _version_free(components: dict[str, Any]) -> dict[str, Any]:
+    """FastAPI's own `ValidationError`, with only the fields it requires. Its optional ones
+    follow the installed FastAPI (0.162 added `input` and `ctx`), and a reference generated
+    from the app must not change because a dependency released."""
+    row = components.get("ValidationError")
+    if row is None:
+        return components
+    required = row["required"]
+    stable = {name: row["properties"][name] for name in required}
+    return {**components, "ValidationError": {**row, "properties": stable}}
+
+
 def render(app: Any, enabled: frozenset[str] | None = None) -> str:
     """The whole reference. `enabled` (the job types this server runs) marks the rest;
     None, for docs/API.md, which describes the build rather than one host."""
     spec = app.openapi()
-    components = spec.get("components", {}).get("schemas", {})
+    components = _version_free(spec.get("components", {}).get("schemas", {}))
     scopes = auth_scopes(app)
 
     out: list[str] = [
