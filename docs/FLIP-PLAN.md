@@ -26,24 +26,22 @@ These changes go on top of v2.0.34, in landing order.
 | e487281, d5ea75d, cab9ab6 | tool downloads wait out a release host's bad moment |
 | 97798dd | test_segment_cli stubs ffmpeg |
 | b92c050 | the YuE2 causal-check test runs |
-| e20ebe9, c055118, de07b94 | C3: the tts recipes drop narrator; the Mac recipe keeps torch |
-| db8442c | CI server jobs time out at 90 minutes |
+| 4515c53, fa3f6c7, 11826dd | C3: the tts recipes drop narrator; the Mac recipe keeps torch |
+| 384ca10 | CI server jobs time out at 90 minutes |
 
-The last two rows are on `feat/c3-recipes-drop-narrator` and land only after the rebase in B.
+All of it is on main at 384ca10.
 
 ## B. Before ship.sh
 
-1. At step 0 (BookForge B6 step 8), rebase `feat/c3-recipes-drop-narrator` onto main.
-   Expect one conflict, in `docs/CHANGELOG.md`, where both sides add lines to the top
-   of Unreleased. Keep both.
-2. Push the rebased branch. When CI is 7/7 green, fast-forward main to it.
-3. `git fetch --tags origin`. Release tags are made server-side, so a checkout never
-   has them. The last tag is v2.0.34.
+1. Done: BookForge B6 step 8 reached main at 246213f4, and C3 was rebased and landed on
+   crucible main at 384ca10, with CI 7/7 green (run 42153151038).
+2. Still to do, right before the cut: `git fetch --tags origin`. Release tags are made
+   server-side, so a checkout never has them. The last tag is v2.0.34.
 
 ## C. The changelog
 
 `scripts/ship.sh` renames `## Unreleased` to `## 2.0.35 — <date>` and moves every line
-over verbatim. After the rebase the section reads, top to bottom:
+over verbatim. The section reads, top to bottom:
 
 - CI's server jobs stop after 90 minutes.
 - The tts envs no longer install narrator. They pin `num2words` and `docopt`, and the
@@ -117,7 +115,7 @@ entry stays as it is.
 ## F. Open before the go
 
 - Owen's test pass.
-- B6 step 8 live.
+- B6 step 8 is on BookForge main (246213f4); installing it is the next line's condition.
 - **No machine's tts env is rebuilt while a BookForge build that still spawns
   narrator is live on it.** Owen's installed BookForge must be the step-8 build
   before this PC's rebuild in D2, and the same goes for any other machine running
