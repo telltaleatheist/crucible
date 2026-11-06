@@ -64,6 +64,10 @@ No line needs rewording.
 
 ## D. The sequence
 
+Steps 1 to 3 ran on 2026-11-05, without their Higgs renders: Owen is testing one himself.
+2.0.35 is cut (ebd28d4) as a prerelease. On this PC and the Mac it is deployed, the tts
+env is rebuilt and doctor says healthy.
+
 1. **Cut.** From `C:\Users\tellt\Projects\crucible` on main, run
    `bash scripts/ship.sh patch`, without `--deploy`, so each machine below goes one at a
    time. It bumps to 2.0.35 (the seven version places, plus the regenerated modules and
@@ -71,15 +75,18 @@ No line needs rewording.
    dispatches the env packs.
 2. **This PC.** Run `./scripts/deploy.sh --release 2.0.35 --only pc --yes`. Then rebuild
    the tts env inside WSL: `crucible install tts --narrator-engine higgs-v3 --force`.
-   Check first that gcc is in WSL: cdifflib and docopt build from source, and the
-   doctor check for it is being added. The rebuild takes about 3.5 minutes with a warm
+   Check first that gcc is in WSL: `cdifflib`, which `nemo_text_processing` requires,
+   builds a C extension from source. `docopt` also comes from source but is pure Python. The rebuild takes about 3.5 minutes with a warm
    pip cache. With a cold cache it downloads about 5.3 GB more. Afterwards
    `crucible doctor` should show the tts env installed, and one short Higgs render
    and one stream should come back.
 3. **The Mac.** Run `./scripts/deploy.sh --release 2.0.35 --only mac --yes`, then the
    same `--force` rebuild. It takes under 30 seconds, or downloads about 0.9 GB more on
    a cold cache. Run the same checks.
-4. **Victoria's laptop, last.** Do it at her desk, with her okay. Run
+4. **Victoria's laptop, last.** Do it at her desk, with her okay. First check that no
+   B-Sides, BookForge or Crucible job is running there. This check is a stop: if one is
+   running, do not start the install; say so and wait. The Mac's rebuild printed this
+   check and carried on with an old BookForge open. Then run
    `install.ps1 -Release 2.0.35`, then `crucible doctor --verify-only`, which checks her
    install. She has no Higgs and does not need it (Owen), so there is no tts rebuild and
    no Deathstalker check. She gets this update for YuE2 (`audio`), which C3 does not touch.
@@ -117,9 +124,20 @@ entry stays as it is.
 - Owen's test pass.
 - B6 step 8 is on BookForge main (246213f4); installing it is the next line's condition.
 - **No machine's tts env is rebuilt while a BookForge build that still spawns
-  narrator is live on it.** Owen's installed BookForge must be the step-8 build
-  before this PC's rebuild in D2, and the same goes for any other machine running
-  BookForge before its own rebuild.
+  narrator is live on it.** The new installer is built from 2.0.35, so it cannot come
+  before the rebuild. What matters is that no old build is running, and the old build is
+  not opened on this PC or the Mac until the new installer is on. It was open on the Mac
+  when that rebuild started, and it has since closed. Nothing shows harm, but that does
+  not prove nothing was rendering in those seconds.
 - Owen told about the rebuilds in advance.
 - The held rulings stay out of this release: 884acdf (small-card LLM fit), the
   reserve value, and the B-Sides picker.
+
+## G. After the flip
+
+- **A source build needs a system compiler (REORG C4).** At install time pip uses the
+  host's `gcc`, `cc` or `clang` (`_HOST_COMPILERS` in `crucible/jobenv.py`), never
+  Crucible's pinned `zig cc`, which only serves Triton at runtime. So on a machine with
+  no system compiler, building the Linux tts env fails on `cdifflib`. One installer
+  should not need a toolchain the machine may not have: give the build Crucible's
+  compiler, or a wheel for `cdifflib`, and have doctor name the gap until then.
