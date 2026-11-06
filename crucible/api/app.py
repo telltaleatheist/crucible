@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 
-from .. import VERSION, catalog, manifests, upstreams, verbmodel
+from .. import VERSION, catalog, manifests, pagecache, upstreams, verbmodel
 from .. import peer as peer_module
 from .. import settings as settings_module
 from ..backend import Backend
@@ -419,6 +419,8 @@ def _lifespan(residency: Residency) -> Callable[[FastAPI], Any]:
         app.state.started_at = time.monotonic()
         store.restore()
         residency.start_reclaiming()
+        file_cache = pagecache.CacheWatcher(app.state.config.home)
+        file_cache.start()
         store.start()
         app.state.queue_pump.start()
         if app.state.config.enable_tts:
@@ -427,6 +429,7 @@ def _lifespan(residency: Residency) -> Callable[[FastAPI], Any]:
         try:
             yield
         finally:
+            file_cache.stop()
             watch.stop()
             events.stop("the server is shutting down")
             await app.state.tasks.stop()

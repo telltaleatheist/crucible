@@ -155,7 +155,7 @@ def spawn(home: Path) -> None:
         executable = executable.with_name("pythonw.exe")
     env = dict(os.environ, CRUCIBLE_HOME=str(home))
     subprocess.Popen([str(executable), "-m", "crucible.cli", "orchestrator", "--headless"],
-                     env=env, cwd=str(Path(__file__).resolve().parent.parent), stdin=subprocess.DEVNULL,
+                     env=env, cwd=str(home), stdin=subprocess.DEVNULL,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
 

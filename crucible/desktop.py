@@ -69,7 +69,7 @@ def _refuse_a_foreign_bundle(bundle: Path) -> None:
 def _write_mac_bundle(bundle: Path, home: Path) -> Path:
     from .desktop_app.launchers import write_mac_bundle
 
-    return write_mac_bundle(bundle, home, sys.executable, Path(__file__).resolve().parent.parent)
+    return write_mac_bundle(bundle, home, sys.executable, home)
 
 
 def _launchctl(*words: str, check: bool = True) -> subprocess.CompletedProcess:

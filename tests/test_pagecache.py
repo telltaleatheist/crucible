@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -59,3 +60,78 @@ def test_under_wsl_the_home_and_the_download_caches_are_released(
     assert said is not None and "back to Windows" in said
     assert seen[0][0] == tmp_path
     assert [root.name for root in seen[0][1:]] == ["pip", "uv", "huggingface"]
+
+
+MEMINFO = "MemFree: 100 kB\nCached:    5242880 kB\nShmem:      1024 kB\nMapped:   1048576 kB\n"
+
+
+def test_what_a_running_engine_has_mapped_is_not_droppable() -> None:
+    assert pagecache.droppable_bytes(MEMINFO) == (5242880 - 1048576 - 1024) * 1024
+
+
+def _watcher(tmp_path: Path, readings: list[int], gave: list[list[Path]]) -> pagecache.CacheWatcher:
+    return pagecache.CacheWatcher(
+        tmp_path,
+        droppable=lambda: readings.pop(0),
+        give_back=lambda roots: gave.append(roots) or pagecache.Released(1, 1, 0, 0.1),
+    )
+
+
+def test_under_the_limit_the_watcher_gives_nothing_back(tmp_path: Path) -> None:
+    gave: list[list[Path]] = []
+    watcher = _watcher(tmp_path, [pagecache.LIMIT_BYTES - 1], gave)
+    assert watcher.tick() == pagecache.LOOK_EVERY_SECONDS
+    assert gave == []
+
+
+def test_over_the_limit_the_watcher_gives_back_the_home_and_keeps_looking(tmp_path: Path) -> None:
+    gave: list[list[Path]] = []
+    watcher = _watcher(tmp_path, [pagecache.LIMIT_BYTES, 0], gave)
+    assert watcher.tick() == pagecache.LOOK_EVERY_SECONDS
+    assert gave[0][0] == tmp_path
+
+
+def test_cache_that_is_not_ours_does_not_walk_the_home_every_look(tmp_path: Path) -> None:
+    gave: list[list[Path]] = []
+    watcher = _watcher(tmp_path, [pagecache.LIMIT_BYTES * 2, pagecache.LIMIT_BYTES * 2], gave)
+    assert watcher.tick() == pagecache.AFTER_NO_GAIN_SECONDS
+    assert len(gave) == 1
+
+
+def test_off_wsl_the_watcher_starts_no_thread(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(pagecache, "in_wsl", lambda: False)
+    before = threading.active_count()
+    pagecache.CacheWatcher(tmp_path).start()
+    assert threading.active_count() == before
+
+
+def test_a_failed_look_says_so_and_the_watcher_lives_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    looks: list[int] = []
+
+    def broken() -> int:
+        looks.append(1)
+        watcher.stop()
+        raise OSError("no /proc")
+
+    watcher = pagecache.CacheWatcher(tmp_path, droppable=broken)
+    monkeypatch.setattr(pagecache, "LOOK_EVERY_SECONDS", 0.0)
+    watcher._run()
+    assert looks == [1]
+    assert "could not look: OSError: no /proc" in capsys.readouterr().err
+
+
+@LINUX_ONLY
+def test_forget_is_wsl_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen: list[tuple[int, int, int]] = []
+    monkeypatch.setattr(pagecache.os, "posix_fadvise", lambda fd, start, end, advice: seen.append((start, end, advice)))
+    target = tmp_path / "x"
+    target.write_bytes(b"x")
+    with target.open("rb") as handle:
+        monkeypatch.setattr(pagecache, "in_wsl", lambda: False)
+        pagecache.forget(handle.fileno(), 1)
+        assert seen == []
+        monkeypatch.setattr(pagecache, "in_wsl", lambda: True)
+        pagecache.forget(handle.fileno(), 1)
+    assert seen == [(0, 1, os.POSIX_FADV_DONTNEED)]

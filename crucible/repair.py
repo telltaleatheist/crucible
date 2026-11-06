@@ -46,7 +46,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from . import catalog, envpatches, jobenv, weights
+from . import catalog, envpatches, jobenv, pagecache, weights
 from .atomicjson import write_json
 from .backend import Backend
 from .config import Config
@@ -228,10 +228,13 @@ class Hasher:
 
     def read(self, path: Path, into: Any) -> None:
         with path.open("rb") as handle:
+            done = 0
             while block := handle.read(HASH_CHUNK):
                 if self._cancelled():
                     raise RepairCancelled()
                 into.update(block)
+                done += len(block)
+                pagecache.forget(handle.fileno(), done)
 
     def sha256(self, path: Path) -> str:
         digest = hashlib.sha256()

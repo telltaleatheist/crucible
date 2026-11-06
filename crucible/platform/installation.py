@@ -14,7 +14,6 @@ RECORD = "installation.json"
 
 RELEASE_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _release_numbers(value: str) -> tuple[int, ...]:
@@ -53,7 +52,7 @@ def publish_installation(home: Path | None = None) -> Path:
         "schema_version": 1, "platform": sys.platform, "release": VERSION,
         "home": str(home),
         "control": {"command": str(_console_interpreter()), "args": ["-m", "crucible.cli", "local"],
-                    "cwd": str(PACKAGE_ROOT)},
+                    "cwd": str(home)},
     }
     return write_json(home / RECORD, record, private=True)
 

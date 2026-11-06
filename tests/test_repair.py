@@ -690,3 +690,15 @@ def test_the_cli_can_look_at_only_weights(
     (box.packages / "pkg" / "a.py").write_bytes(b"damaged")
     assert _cli(monkeypatch, box, "unreachable", "--verify-only", "--only", "weights") == 0
     assert box.built == []
+
+
+def test_a_hash_leaves_nothing_in_the_file_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from crucible import pagecache
+
+    forgotten: list[int] = []
+    monkeypatch.setattr(pagecache, "forget", lambda _fd, upto: forgotten.append(upto))
+    target = tmp_path / "weights.bin"
+    target.write_bytes(b"x" * (repair.HASH_CHUNK + 1))
+    hasher = repair.Hasher(repair.Report(), repair.VerifiedCache(tmp_path / "v.json"), lambda *_: None, lambda: False)
+    hasher.read(target, hashlib.sha256())
+    assert forgotten[-1] == target.stat().st_size

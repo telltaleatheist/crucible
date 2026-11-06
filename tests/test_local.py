@@ -480,3 +480,10 @@ def test_a_non_object_answer_names_the_status_command(monkeypatch):
         controller_client.request("http://127.0.0.1:7101/v1/ping")
     assert "local_protocol_invalid" in str(caught.value)
     assert "crucible local status" in str(caught.value)
+
+
+def test_the_control_command_starts_in_the_home_not_in_site_packages(tmp_path: Path) -> None:
+    """`python -c` in another env puts the working folder first on its path, so starting in
+    the server's site-packages hands that env the server's packages."""
+    record = json.loads(local.publish_installation(tmp_path).read_text(encoding="utf-8"))
+    assert record["control"]["cwd"] == str(tmp_path.resolve())
