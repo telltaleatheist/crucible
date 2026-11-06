@@ -42,9 +42,13 @@ DOWNLOAD_CACHES = (".cache/pip", ".cache/uv", ".cache/huggingface")
 # Unmapped file cache the guest may hold before the watcher gives it back.
 LIMIT_BYTES = 1 << 30
 LOOK_EVERY_SECONDS = 10.0
-# A release that left the guest over the limit means the cache is not under our roots, so
-# looking again soon would walk the home for nothing.
-AFTER_NO_GAIN_SECONDS = 300.0
+# A guest still over the limit after a release: the cache is not under our roots, or a job
+# read it back during the walk. Neither is a reason to walk again straight away, and the
+# second must still be caught when the job ends, so this is a minute and not an hour.
+AFTER_NO_GAIN_SECONDS = 60.0
+# A walk of the home is seconds of one core (490,148 files: 22 s wall, 9.8 s CPU). Waiting
+# three times its length after each keeps the watcher under a quarter of a core.
+REST_PER_WALK = 3.0
 
 
 @dataclass(frozen=True)
@@ -145,8 +149,10 @@ class CacheWatcher:
         """One look; the seconds until the next."""
         if self._droppable() < LIMIT_BYTES:
             return LOOK_EVERY_SECONDS
-        print(f"crucible: file cache: {self._give_back(self._roots).sentence()}", file=sys.stderr)
-        return LOOK_EVERY_SECONDS if self._droppable() < LIMIT_BYTES else AFTER_NO_GAIN_SECONDS
+        released = self._give_back(self._roots)
+        print(f"crucible: file cache: {released.sentence()}", file=sys.stderr)
+        rest = max(LOOK_EVERY_SECONDS, REST_PER_WALK * released.seconds)
+        return rest if self._droppable() < LIMIT_BYTES else max(rest, AFTER_NO_GAIN_SECONDS)
 
     def _run(self) -> None:
         wait = LOOK_EVERY_SECONDS

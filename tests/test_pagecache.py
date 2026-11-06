@@ -98,6 +98,15 @@ def test_cache_that_is_not_ours_does_not_walk_the_home_every_look(tmp_path: Path
     assert len(gave) == 1
 
 
+def test_a_long_walk_earns_a_longer_rest(tmp_path: Path) -> None:
+    watcher = pagecache.CacheWatcher(
+        tmp_path,
+        droppable=iter([pagecache.LIMIT_BYTES, 0]).__next__,
+        give_back=lambda _roots: pagecache.Released(1, 1, 0, 20.0),
+    )
+    assert watcher.tick() == 20.0 * pagecache.REST_PER_WALK
+
+
 def test_off_wsl_the_watcher_starts_no_thread(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(pagecache, "in_wsl", lambda: False)
     before = threading.active_count()
