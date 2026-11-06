@@ -81,14 +81,13 @@ No line needs rewording.
 3. **The Mac.** Run `./scripts/deploy.sh --release 2.0.35 --only mac --yes`, then the
    same `--force` rebuild. It takes under 30 seconds, or downloads about 0.9 GB more on
    a cold cache. Run the same checks.
-4. **Kylie's PC.** By hand or by its agent, run `install.ps1 -Release 2.0.35`, then
-   `crucible doctor`. Rebuild with `--force` only if doctor lists a tts env there.
-5. **Victoria's laptop, last.** Do it at her desk, with her okay. Run the same install,
-   and rebuild only if doctor lists a tts env. Her B-Sides path is YuE2 (`audio`),
-   which C3 does not touch.
-6. **Promote.** This is Owen's attestation after his test pass:
+4. **Victoria's laptop, last.** Do it at her desk, with her okay. Run
+   `install.ps1 -Release 2.0.35`, then `crucible doctor --verify-only`, which checks her
+   install. She has no Higgs and does not need it (Owen), so there is no tts rebuild and
+   no Deathstalker check. She gets this update for YuE2 (`audio`), which C3 does not touch.
+5. **Promote.** This is Owen's attestation after his test pass:
    `python scripts/promote_release.py --tag v2.0.35 --publish --confirmed-install-smoke`.
-7. **The apps.**
+6. **The apps.**
    - a. BookForge adopts 2.0.35 with `node tools/adopt-crucible-release.mjs 2.0.35`.
      Owner: bookforge lead.
    - b. BookForge lands `feat/crucible-repair-button` (29578b2d, rebased). Owner:
@@ -97,6 +96,13 @@ No line needs rewording.
      `/v1/voices`, and drops `edgeFadeMs` from `higgs-models.json`. Owner: bookforge pc 2.
    - d. Foundry adopts 2.0.35 with the same `adopt-crucible-release.mjs`. Owner:
      foundry pc 1.
+
+Kylie's PC is off and is not updated in this release (Owen). That overrides "all four
+servers current" for 2.0.35.
+
+B-Sides' text moves fully to `claude -p` until Owen retrains his model, so
+`qwen3.5-4b-bside` is not uploaded. The Mac's copy stays where it is and the catalog
+entry stays as it is.
 
 ## E. Downtime per machine
 
@@ -116,7 +122,6 @@ No line needs rewording.
   narrator is live on it.** Owen's installed BookForge must be the step-8 build
   before this PC's rebuild in D2, and the same goes for any other machine running
   BookForge before its own rebuild.
-- `crucible doctor` answers from Kylie's PC and Victoria's laptop, read only.
 - Owen told about the rebuilds in advance.
 - The held rulings stay out of this release: 884acdf (small-card LLM fit), the
   reserve value, and the B-Sides picker.
