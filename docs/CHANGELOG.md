@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 2.0.35 — 2026-11-05
+
 - CI's server jobs stop after 90 minutes. A full run takes under an hour; a hung test used to run to GitHub's 6-hour default before anything failed.
 - The tts envs no longer install narrator. The Higgs worker has been Crucible's own since the move, so the recipes drop the narrator pin and pin what the worker imports (`num2words`, `docopt`) outright. The Mac recipe is now a freeze of the working Mac env without narrator and `snac`; it keeps `torch`, which mlx-audio needs to read a voice's bf16 codec tensors. Removing a requirement is a rebuild: each machine's tts env needs `crucible install tts --narrator-engine higgs-v3 --force` once.
 - The test of YuE2's Mac causal-attention check runs wherever torch is installed. It executes a slice of the worker and was missing the `contextlib` import that slice uses, so it failed in every env that had torch, and CI, which has none, skipped it.
