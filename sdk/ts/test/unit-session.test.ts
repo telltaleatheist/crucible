@@ -220,6 +220,31 @@ test('a session sends its verb beside its ceiling, and its act only labels', asy
   }
 });
 
+test('a session sends the context it needs as context_tokens', async () => {
+  ticket = { session_id: 'ses-1', status: 'open', position: null, model: 'qwen3.8-27b-4bit' };
+  feed.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: 'qwen3.8-27b-4bit', load_job: null });
+  const session = await client().session({ act: 'clean', model: 'qwen3.8-27b-4bit', contextTokens: 6000 });
+  try {
+    const opened = seen.filter((request) => request.path === '/v1/queue/sessions').at(-1);
+    assert.deepEqual(JSON.parse(opened?.body ?? '{}'), {
+      act: 'clean',
+      model: 'qwen3.8-27b-4bit',
+      context_tokens: 6000,
+    });
+  } finally {
+    await session.close();
+  }
+});
+
+test('a context need that is not a positive whole number is refused before anything is sent', async () => {
+  for (const wrong of [0, -5, 6000.5, '6000']) {
+    await assert.rejects(
+      client().session({ act: 'clean', model: 'qwen3.8-27b-4bit', contextTokens: wrong as number }),
+      /contextTokens/,
+    );
+  }
+});
+
 test('a session the server opens at once is open when session() answers', async () => {
   feed.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: null, load_job: null });
   const crucible = client();

@@ -95,7 +95,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
         line.refuse_if_full(client)
         session = sessions.create(
             act=act, client=client, model=model, idle_s=body.idle_s,
-            max_wait_s=body.max_wait_s,
+            max_wait_s=body.max_wait_s, context_tokens=body.context_tokens,
         )
         line.join_session(session)
         await ctx.queue_pump.step()

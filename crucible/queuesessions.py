@@ -119,6 +119,9 @@ class QueueSession:
     # FIRST_WORK_S window (the client is present), and idle_s decides from then on.
     first_touch_at: datetime | None = None
     load_job: str | None = None
+    # The least context its model must be started at (SessionOpen.context_tokens); None
+    # when the session stated none, and then any context the model has will do.
+    context_tokens: int | None = None
     # The context its model was started at, in tokens, set when it opens on a resident
     # text model; None for a session with no model, or one whose model is not a text one.
     context: int | None = None
@@ -208,12 +211,21 @@ class QueueSessions:
 
     def create(
         self, *, act: str, client: str | None, model: str | None, idle_s: int,
-        max_wait_s: int,
+        max_wait_s: int, context_tokens: int | None = None,
     ) -> QueueSession:
         self.updating.refuse_if_holding("a queue session")
+        if context_tokens is not None and model is None:
+            raise ApiError(
+                400,
+                "context_without_model",
+                f"this session asks for at least {context_tokens} tokens of context and "
+                "names no model to start at it; send a `model`, a `verb` or "
+                "`max_params_b` with `context_tokens`",
+                {"context_tokens": context_tokens},
+            )
         session = QueueSession(
             act=act, client=client, model=model, idle_s=idle_s,
-            max_wait_s=max_wait_s, created=self._now(),
+            max_wait_s=max_wait_s, created=self._now(), context_tokens=context_tokens,
         )
         self._sessions[session.id] = session
         self._forget_old()

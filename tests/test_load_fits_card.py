@@ -19,7 +19,7 @@ import pytest
 
 from crucible import accelerator
 from crucible.contextceiling import MIN_LOAD_CONTEXT
-from crucible.errors import ApiError
+from crucible.errors import ApiError, JobError
 from crucible.jobs.llm import LoadParams
 from crucible.manifests import load_manifest
 from crucible.memorybudget import MIB
@@ -157,3 +157,55 @@ def test_a_session_opening_on_its_resident_model_takes_that_models_context() -> 
     assert asyncio.run(_resident(ctx, other)) is False  # type: ignore[arg-type]
     assert other.context is None
 
+
+
+def test_a_minimum_under_what_the_card_affords_loads_at_what_it_affords(
+    loader, monkeypatch
+) -> None:
+    """`min_context` is a floor, not a target: a card that holds more gives more."""
+    job, built, ctx = loader(None)
+    _idle(monkeypatch, _free_for(DEFAULT // 2))
+    needs = job.requirements(MODEL, LoadParams(min_context=MIN_LOAD_CONTEXT + 512))
+    assert needs.fits_to_card and needs.forecast.fits
+    assert needs.context == _afforded(DEFAULT // 2)
+
+
+def test_a_minimum_the_card_cannot_give_is_refused_naming_it(loader, monkeypatch) -> None:
+    """BookForge's Simplify needs a few thousand tokens; a card that affords fewer than the
+    session's stated need refuses by name instead of loading a context its prompts outgrow."""
+    job, built, ctx = loader(None)
+    _idle(monkeypatch, _free_for(DEFAULT // 4))
+    need = DEFAULT // 2
+    with pytest.raises(ApiError) as refused:
+        job.requirements(MODEL, LoadParams(min_context=need))
+    assert refused.value.code == "insufficient_kv_cache"
+    assert f"at {need} tokens" in refused.value.message
+    assert built == []
+
+
+def test_a_minimum_over_the_default_starts_there(loader, monkeypatch) -> None:
+    job, built, ctx = loader(None)
+    _idle(monkeypatch, _free_for(DEFAULT * 2) + 64 * MIB)
+    needs = job.requirements(MODEL, LoadParams(min_context=DEFAULT + 1000))
+    assert needs.context >= DEFAULT + 1000
+
+
+def test_a_context_and_a_minimum_together_are_refused(loader, monkeypatch) -> None:
+    job, built, ctx = loader(None)
+    _idle(monkeypatch, _free_for(DEFAULT) + 64 * MIB)
+    with pytest.raises(ApiError) as refused:
+        job.requirements(MODEL, LoadParams(context=DEFAULT, min_context=4096))
+    assert refused.value.code == "invalid_params"
+
+
+def test_a_minimum_holds_after_the_eviction_too(loader) -> None:
+    """The card read once the resident has gone is fitted again, never under the floor:
+    one that holds less than the minimum refuses the load rather than starting short."""
+    after = _free_for(DEFAULT // 4)
+    card = Card(held_bytes=4608 * MIB, after_stop=[after, after])
+    job, built, ctx = loader(card)
+    with pytest.raises(JobError) as refused:
+        job._load(ctx, MODEL, LoadParams(min_context=DEFAULT // 2))  # type: ignore[arg-type]
+    assert refused.value.code == "insufficient_kv_cache"
+    assert f"at {DEFAULT // 2} tokens" in str(refused.value)
+    assert built == []

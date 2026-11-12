@@ -417,6 +417,16 @@ export interface SessionOptions {
    */
   readonly maxParamsB?: number;
   /**
+   * The least context, in tokens, the session's model must be started at: what its largest
+   * request needs, prompt and answer together (2.0.38+; wire `context_tokens`). The model loads at
+   * its default, or at this when it is more, or at the most the card affords below that, but never
+   * under this; a resident model started at less is loaded again. {@link CrucibleSession.context}
+   * says what it got. A card that cannot give this much ends the session `insufficient_kv_cache`,
+   * naming it; above the host's ceiling, `context_over_limit`. Needs `model`, `verb` or
+   * `maxParamsB` (`context_without_model`).
+   */
+  readonly contextTokens?: number;
+  /**
    * Close the session after this many seconds with nothing in flight, no item and no touch:
    * 10..86400, the server's default 300. It applies from the session's first item or touch on:
    * until then the server closes it `unused` 90 s after it opens, so send the first item as soon
@@ -1991,6 +2001,13 @@ export interface LoadVoiceOptions {
 export interface LoadModelOptions {
   /** Tokens: the context to start the engine with (`params.context`). */
   readonly context?: number;
+  /**
+   * In place of `context`: the least context in tokens the engine may start at
+   * (`params.min_context`, 2.0.38+). It starts at the model's default, or at this when it is more,
+   * or at the most the card affords below that, but never under this; a card that cannot give this
+   * much is refused `insufficient_kv_cache`.
+   */
+  readonly minContext?: number;
   /**
    * With no model: load the model this server registered for this verb (`params.verb`), one with a
    * size goal (generate, decide, embed, rerank). The job's

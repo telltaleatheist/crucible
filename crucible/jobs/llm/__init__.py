@@ -183,6 +183,17 @@ class LoadParams(BaseModel):
         "`context_over_limit`; loading the resident model at a new context is a "
         "reload.",
     )
+    min_context: int | None = Field(
+        default=None,
+        ge=1,
+        strict=True,
+        description="In place of `context`: the least context in tokens this load may "
+        "start at. The engine starts at the model's default, or at this when it is "
+        "more, or at the most the card affords below that, but never under this (nor "
+        "under 2048). A card that cannot give this much is refused "
+        "`insufficient_kv_cache`, naming it; above this host's ceiling it is refused "
+        "`context_over_limit`. Beside a `context`: `invalid_params`.",
+    )
     form: str | None = Field(
         default=None,
         min_length=1,
@@ -584,19 +595,26 @@ class EngineLaunch:
 
 
 def fit_to_card(
-    plan: "vram.KvPlan", plan_at: Callable[[int], "vram.KvPlan | None"]
+    plan: "vram.KvPlan",
+    plan_at: Callable[[int], "vram.KvPlan | None"],
+    floor: int = MIN_LOAD_CONTEXT,
 ) -> "vram.KvPlan":
     """A load that named no context, planned at the most this card affords when the
     model's default does not fit: the default is a preference, not something the caller
     asked for, so a ceiling pick that fits the verb's working context loads rather than
     being refused (Briefcase, 2026-10-20: qwen3.8-27b-4bit at 16384 on a 3090 Ti that
-    affords 14_247). Under MIN_LOAD_CONTEXT the plan is returned as it was, unfitting,
-    and refused by the caller with its sentence."""
+    affords 14_247). Under ``floor`` (MIN_LOAD_CONTEXT, or a load's ``min_context``)
+    the plan is returned unfitting, at the floor when the caller stated one, and refused
+    by the caller with its sentence."""
     if plan.fits:
         return plan
     affordable = plan.affordable_context
-    if affordable < MIN_LOAD_CONTEXT:
-        return plan
+    if affordable < floor:
+        if floor == MIN_LOAD_CONTEXT:
+            return plan
+        under = plan_at(floor)
+        assert under is not None and not under.fits, (plan, under)
+        return under
     fitted = plan_at(min(affordable, plan.context))
     assert fitted is not None and fitted.fits, (plan, fitted)
     return fitted
@@ -609,18 +627,37 @@ def _load_context(
     params: "LoadParams",
     form: str | None,
 ) -> int:
-    if params.context is None:
-        return manifest.context_for(backend.kind)
+    if params.context is not None and params.min_context is not None:
+        raise ApiError(
+            400,
+            "invalid_params",
+            f"load-model params give a context ({params.context}) and a min_context "
+            f"({params.min_context}); state the context to start at, or the least one "
+            "the load may start at, not both",
+        )
+    default = manifest.context_for(backend.kind)
+    stated = params.context
+    if stated is None and params.min_context is not None and params.min_context > default:
+        stated = params.min_context
+    if stated is None:
+        return default
     check_load_context(
         manifest,
         backend.kind,
         available_bytes=available_bytes(
             backend.gpu.vram_bytes, config.desktop_allowance_bytes
         ),
-        context=params.context,
+        context=stated,
         form=form,
     )
-    return params.context
+    return stated
+
+
+def fit_floor(params: "LoadParams") -> int:
+    """The least context a load that named no context may be fitted down to."""
+    if params.min_context is None:
+        return MIN_LOAD_CONTEXT
+    return max(MIN_LOAD_CONTEXT, params.min_context)
 
 
 @dataclass(frozen=True)
@@ -631,8 +668,10 @@ class LoadNeeds:
     installed: Any
     context: int
     # True when the request named no context: the load takes the manifest's default, or
-    # the most the card affords below it (fit_to_card). A stated context is held to.
+    # the most the card affords below it (fit_to_card), never under fit_floor. A stated
+    # context is held to.
     fits_to_card: bool
+    fit_floor: int
     state: Any
     forecast: Any
 
@@ -731,6 +770,7 @@ class LoadModelJobType:
             reclaimable_bytes=self._reclaimable(),
         )
         fits_to_card = params.context is None
+        floor = fit_floor(params)
         if forecast is not None and fits_to_card:
             forecast = fit_to_card(
                 forecast,
@@ -742,12 +782,13 @@ class LoadModelJobType:
                     desktop_allowance_bytes=self._config.desktop_allowance_bytes,
                     reclaimable_bytes=self._reclaimable(),
                 ),
+                floor,
             )
             context = forecast.context
         if forecast is not None and not forecast.fits:
             raise ApiError(409, "insufficient_kv_cache", forecast.sentence())
         return LoadNeeds(
-            manifest, spec, launch, installed, context, fits_to_card, state, forecast
+            manifest, spec, launch, installed, context, fits_to_card, floor, state, forecast
         )
 
     def plan_on_the_card(
@@ -757,6 +798,7 @@ class LoadModelJobType:
         context: int,
         fits_to_card: bool,
         say: Callable[[str], None],
+        floor: int = MIN_LOAD_CONTEXT,
     ) -> "vram.KvPlan | None":
         """The budget vLLM is started with, from the card as it is once the resident has
         been evicted and what it held has been handed back: what vLLM will find free when it
@@ -792,7 +834,7 @@ class LoadModelJobType:
         plan = at(context)
         assert plan is not None
         if fits_to_card:
-            plan = fit_to_card(plan, at)
+            plan = fit_to_card(plan, at, floor)
             if plan.fits and plan.context < context:
                 say(
                     f"{model}: loading at {plan.context:_} tokens, the most this card "
@@ -847,7 +889,8 @@ class LoadModelJobType:
                 needs.installed.path,
                 needs.launch.executable,
                 plan_on_the_card=lambda say: self.plan_on_the_card(
-                    model, needs.spec, needs.context, needs.fits_to_card, say
+                    model, needs.spec, needs.context, needs.fits_to_card, say,
+                    needs.fit_floor,
                 ),
                 context=needs.context,
                 timeout=params.timeout_s,

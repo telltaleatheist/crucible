@@ -1003,6 +1003,9 @@ export class CrucibleClient {
     if (given.model !== undefined) payload['model'] = requireText(given.model, 'model');
     if (given.verb !== undefined) payload['verb'] = requireText(given.verb, 'verb');
     if (given.maxParamsB !== undefined) payload['max_params_b'] = requireCeiling(given.maxParamsB);
+    if (given.contextTokens !== undefined) {
+      payload['context_tokens'] = requireCount(given.contextTokens, 'contextTokens');
+    }
     if (given.idleS !== undefined) payload['idle_s'] = requireSeconds(given.idleS, 'idleS', '300 s');
     if (given.maxWaitS !== undefined) {
       payload['max_wait_s'] = requireSeconds(given.maxWaitS, 'maxWaitS', 'an hour');
@@ -1378,6 +1381,9 @@ export class CrucibleClient {
   async loadModel(model: string | null, options?: LoadModelOptions): Promise<string> {
     const params: Record<string, unknown> = {};
     if (options?.context !== undefined) params['context'] = options.context;
+    if (options?.minContext !== undefined) {
+      params['min_context'] = requireCount(options.minContext, 'minContext');
+    }
     if (options?.form !== undefined) params['form'] = requireText(options.form, 'form');
     if (options?.verb !== undefined) params['verb'] = requireText(options.verb, 'verb');
     if (options?.maxParamsB !== undefined) params['max_params_b'] = requireCeiling(options.maxParamsB);

@@ -195,6 +195,19 @@ class SessionOpen(BaseModel):
         "with no size goal (`verb_not_sized`), beside a `model` (`model_with_ceiling`), "
         "and when nothing fits (`nothing_fits_ceiling`).",
     )
+    context_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        strict=True,
+        description="The least context, in tokens, the session's model must be started "
+        "at: what its largest request needs, prompt and answer together. The model is "
+        "loaded at its default, or at this when it is more, or at the most the card "
+        "affords below that, but never under this; a resident model started at less is "
+        "loaded again. The session's `context` says what it got. A card that cannot "
+        "give this much ends the session `insufficient_kv_cache`, naming it; above this "
+        "host's ceiling, `context_over_limit`. Needs a `model`, `verb` or "
+        "`max_params_b` (`context_without_model`).",
+    )
     idle_s: int = Field(
         default=DEFAULT_IDLE_S,
         ge=MIN_IDLE_S,
