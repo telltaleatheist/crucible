@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 2.0.38 — 2026-11-11
+
 - A queue session can now state the least context its model needs: `context_tokens` on the wire, `contextTokens` in the SDK's `session(...)`. The model loads at its default, or at the stated need when that is more, or at the most the card affords below that, but never under the need. A model already resident at less is loaded again. A card that cannot give that much ends the session `insufficient_kv_cache`, naming the number, so it never opens on a context its requests would outgrow. A need with no model, verb or ceiling to start at it is refused `context_without_model`. `load-model` takes the same floor as `params.min_context` (`minContext` in `loadModel`). Beside a `context` it is refused `invalid_params`. Asked for by BookForge, whose Simplify sends a paragraph at a time and needs a few thousand tokens, not the model's 16,384.
 
 ## 2.0.37 — 2026-11-11
