@@ -37,7 +37,12 @@ max_context = 131072
 [backends.cuda-linux.memory]
 weights_bytes = 4_564_522_271
 overhead_bytes = 3_516_504_474
-kv_bytes_per_token = 18_023
+# KV in vLLM 0.29's own layout (KvBlocks): 544-token blocks, each one page for the 6
+# full-attention layers (6,684,672 B, the 18 linear-attention layers' state padded to the
+# same page), and 6 state blocks a request (3 state groups x 2 in 'align' mode). Read from
+# config.json; qwen3.5-2b's engine log on owens-pc agrees (2026-10-01: block size 544,
+# 19.08x concurrency at 16,384 tokens in 4,724,621,312 B).
+kv_blocks = { tokens = 544, bytes = 6_684_672, state_blocks = 6 }
 basis = "computed"
 measured_at_context = 16384
 

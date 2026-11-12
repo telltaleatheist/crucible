@@ -25,7 +25,7 @@ from crucible.manifests import load_manifest
 from crucible.memorybudget import MIB
 from crucible.queuesessions import QueueSession
 from crucible.sessionqueue import _resident
-from crucible.vram import VLLM_CUDA_CONTEXT_BYTES, VLLM_SEQUENCE_SLACK_TOKENS
+from crucible.vram import VLLM_CUDA_CONTEXT_BYTES
 
 from .test_vllm_budget_after_eviction import (  # noqa: F401  (the fixture)
     FAKE_BACKEND,
@@ -40,11 +40,18 @@ DEFAULT = load_manifest(MODEL).context_for(FAKE_BACKEND.kind)
 
 
 def _free_for(tokens: int) -> int:
-    """The card's free memory that leaves a KV pool of exactly `tokens` (plus vLLM's
-    per-sequence slack) once the weights and vLLM's CUDA context are taken out."""
+    """The card's free memory that leaves exactly the KV pool vLLM requires for one
+    request of `tokens` once the weights and vLLM's CUDA context are taken out."""
     assert TERMS is not None
-    pool = TERMS.kv_bytes_per_token * (tokens + VLLM_SEQUENCE_SLACK_TOKENS)
+    pool = TERMS.kv_bytes(context=tokens, concurrency=1)
     return TERMS.fixed_bytes + pool + VLLM_CUDA_CONTEXT_BYTES
+
+
+def _afforded(tokens: int) -> int:
+    """What a pool sized for `tokens` holds: vLLM allocates whole blocks, so up to the
+    end of the last block."""
+    assert TERMS is not None
+    return TERMS.context_in(TERMS.kv_bytes(context=tokens, concurrency=1), concurrency=1)
 
 
 class Done:
@@ -67,7 +74,7 @@ def test_the_default_does_not_fit_so_it_loads_at_what_the_card_affords(
     needs = job.requirements(MODEL, LoadParams())
     assert needs.fits_to_card and needs.forecast.fits
     assert MIN_LOAD_CONTEXT <= needs.context < DEFAULT
-    assert abs(needs.context - DEFAULT // 2) <= 1
+    assert needs.context == _afforded(DEFAULT // 2)
 
     job._load(ctx, MODEL, LoadParams())  # type: ignore[arg-type]
 
@@ -100,7 +107,10 @@ def test_a_stated_context_is_held_to_and_refused_when_it_does_not_fit(
 
 def test_under_the_minimum_context_the_load_is_refused_by_name(loader, monkeypatch) -> None:
     job, built, ctx = loader(None)
-    _idle(monkeypatch, _free_for(MIN_LOAD_CONTEXT - 256))
+    assert TERMS is not None and TERMS.kv_blocks is not None
+    under = (MIN_LOAD_CONTEXT // TERMS.kv_blocks.tokens - 1) * TERMS.kv_blocks.tokens
+    assert _afforded(under) < MIN_LOAD_CONTEXT
+    _idle(monkeypatch, _free_for(under))
     with pytest.raises(ApiError) as refused:
         job.requirements(MODEL, LoadParams())
     assert refused.value.code == "insufficient_kv_cache"

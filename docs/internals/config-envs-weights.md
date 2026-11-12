@@ -740,8 +740,10 @@ and structured output (`mlx-lm-structured-output` on `server.py`,
   ceiling is the served context. It must be ≤ `trained_context` and ≥ the served
   context. Owen 2026-09-23: requesting more than this *"throws an error back to the
   app"*.
-- **Memory terms.** `engine_total = weights + overhead + kv_bytes_per_token × context
-  × concurrency`. The terms must add up to `memory_bytes_estimate` within
+- **Memory terms.** `engine_total = weights + overhead + KV(context, concurrency)`,
+  KV stated as `kv_bytes_per_token` (llama-server, MLX) or, on every vLLM block, as
+  vLLM's block layout `kv_blocks = { tokens, bytes, state_blocks }`; a vLLM block
+  stating a rate is a `ManifestError`. The terms must add up to `memory_bytes_estimate` within
   `MEMORY_TERMS_TOLERANCE` (5%). That tolerance catches GB/GiB mix-ups (7.4%) and
   computed-vs-measured KV errors (24%). `overhead_bytes = 0` is allowed.
   `basis` is `measured`, `computed` (a floor) or `declared`.

@@ -110,7 +110,7 @@ def spell_out(candidate: Candidate, work: "WorkingContext | None") -> str:
     if work is None or candidate.memory is None:
         return gib_text(need)
     terms = candidate.memory
-    kv = terms.kv_bytes_per_token * work.tokens * work.concurrency
+    kv = terms.kv_bytes(context=work.tokens, concurrency=work.concurrency)
     return (
         f"{gib_text(need)} — {gib_text(terms.weights_bytes)} weights + "
         f"{gib_text(terms.overhead_bytes)} overhead + {gib_text(kv)} KV for "

@@ -134,10 +134,15 @@ _BACKEND_OPTIONAL: dict[str, type] = {
 _MEMORY_REQUIRED: dict[str, type] = {
     "weights_bytes": int,
     "overhead_bytes": int,
-    "kv_bytes_per_token": int,
     "basis": str,
     "measured_at_context": int,
 }
+
+# How a block's KV is stated: vLLM's own block layout on a vLLM block, a per-token rate on
+# every other engine (MemoryTerms).
+_MEMORY_KV_RATE: dict[str, type] = {"kv_bytes_per_token": int}
+_MEMORY_KV_BLOCKS: dict[str, type] = {"kv_blocks": dict}
+_KV_BLOCKS_REQUIRED: dict[str, type] = {"tokens": int, "bytes": int, "state_blocks": int}
 
 MEMORY_BASES: frozenset[str] = frozenset({"measured", "computed", "declared"})
 
@@ -200,38 +205,107 @@ class ManifestError(CrucibleError):
 
 
 @dataclass(frozen=True)
+class KvBlocks:
+    """vLLM's KV pool as vLLM itself sizes it: whole blocks of ``tokens`` tokens and
+    ``bytes`` bytes each, drawn from one pool. A request at ``context`` takes
+    ceil(context / tokens) attention blocks plus ``state_blocks`` that do not grow with
+    its length (a hybrid model's linear-attention state: 2 per state group in vLLM's
+    'align' mamba cache mode, the one prefix caching selects), and the pool holds one
+    null block back for good (vllm/v1/core/kv_cache_utils.py, check_enough_kv_cache_memory).
+
+    A per-token rate cannot say this. On qwen3.8-27b-4bit (vLLM 0.29) the blocks are 784
+    tokens of 49 MiB and a request holds 6 of them before its first token, so a pool
+    planned at 86,251 B/token plus 1,024 tokens of slack (2026-11-11, 11,317 tokens in
+    1,070,797,895 B) was 15 + 6 + 1 blocks short of the 20 it bought, and vLLM refused it."""
+
+    tokens: int
+    bytes: int
+    state_blocks: int
+
+    def request_blocks(self, context: int) -> int:
+        return -(-context // self.tokens) + self.state_blocks
+
+    def pool_bytes(self, context: int, concurrency: int) -> int:
+        return self.bytes * (self.request_blocks(context) * concurrency + 1)
+
+    def context_in(self, pool_bytes: int, concurrency: int) -> int:
+        per_request = (pool_bytes // self.bytes - 1) // concurrency
+        return max(0, per_request - self.state_blocks) * self.tokens
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"tokens": self.tokens, "bytes": self.bytes, "state_blocks": self.state_blocks}
+
+
+@dataclass(frozen=True)
 class MemoryTerms:
+    """What a load holds: fixed weights and overhead, and KV that grows with context.
+    The KV is stated one of two ways, never both: ``kv_blocks``, vLLM's own block
+    layout (every vLLM block states it), or ``kv_bytes_per_token``, a rate (llama-server
+    and MLX, which allocate by the token)."""
 
     weights_bytes: int
     overhead_bytes: int
-    kv_bytes_per_token: int
+    kv_bytes_per_token: int | None
     basis: str
     measured_at_context: int
+    kv_blocks: KvBlocks | None = None
+
+    def __post_init__(self) -> None:
+        if (self.kv_bytes_per_token is None) == (self.kv_blocks is None):
+            raise ValueError(
+                "memory terms state exactly one of kv_bytes_per_token and kv_blocks, "
+                f"got {self.kv_bytes_per_token!r} and {self.kv_blocks!r}"
+            )
 
     @property
     def fixed_bytes(self) -> int:
         return self.weights_bytes + self.overhead_bytes
 
-    def bytes_for(self, *, context: int, concurrency: int) -> int:
+    def kv_bytes(self, *, context: int, concurrency: int) -> int:
+        """The KV pool ``concurrency`` requests of ``context`` tokens need."""
         if context <= 0:
             raise ValueError(f"context must be positive, got {context}")
         if concurrency <= 0:
             raise ValueError(f"concurrency must be positive, got {concurrency}")
-        return self.fixed_bytes + self.kv_bytes_per_token * context * concurrency
+        if self.kv_blocks is not None:
+            return self.kv_blocks.pool_bytes(context, concurrency)
+        assert self.kv_bytes_per_token is not None
+        return self.kv_bytes_per_token * context * concurrency
 
-    def max_context(self, *, available_bytes: int, concurrency: int) -> int:
+    def context_in(self, kv_bytes: int, *, concurrency: int) -> int:
+        """The longest context ``concurrency`` requests each get from a KV pool of
+        ``kv_bytes``."""
         if concurrency <= 0:
             raise ValueError(f"concurrency must be positive, got {concurrency}")
-        room = available_bytes - self.fixed_bytes
-        if room <= 0:
+        if kv_bytes <= 0:
             return 0
-        return room // (self.kv_bytes_per_token * concurrency)
+        if self.kv_blocks is not None:
+            return self.kv_blocks.context_in(kv_bytes, concurrency)
+        assert self.kv_bytes_per_token is not None
+        return kv_bytes // (self.kv_bytes_per_token * concurrency)
+
+    def bytes_for(self, *, context: int, concurrency: int) -> int:
+        return self.fixed_bytes + self.kv_bytes(context=context, concurrency=concurrency)
+
+    def max_context(self, *, available_bytes: int, concurrency: int) -> int:
+        return self.context_in(available_bytes - self.fixed_bytes, concurrency=concurrency)
+
+    def kv_words(self) -> str:
+        """How the KV is sized, for a sentence: its rate or its block layout."""
+        if self.kv_blocks is not None:
+            blocks = self.kv_blocks
+            return (
+                f"{blocks.tokens:_}-token blocks of {blocks.bytes / 1024**2:.1f} MiB, "
+                f"{blocks.state_blocks} state blocks a request ({self.basis})"
+            )
+        return f"{self.kv_bytes_per_token:_} B/token ({self.basis})"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "weights_bytes": self.weights_bytes,
             "overhead_bytes": self.overhead_bytes,
             "kv_bytes_per_token": self.kv_bytes_per_token,
+            "kv_blocks": None if self.kv_blocks is None else self.kv_blocks.to_dict(),
             "basis": self.basis,
             "measured_at_context": self.measured_at_context,
         }
@@ -1361,7 +1435,7 @@ def _backend_max_context(
 
 def _check_memory_values(where: str, table: dict[str, Any]) -> None:
     for key in ("weights_bytes", "kv_bytes_per_token"):
-        if table[key] <= 0:
+        if key in table and table[key] <= 0:
             raise ManifestError(f"{where}: {key} must be positive, got {table[key]}")
     if table["overhead_bytes"] < 0:
         raise ManifestError(
@@ -1399,24 +1473,57 @@ def _check_memory_agrees(where: str, terms: MemoryTerms, served: int, stated: in
             f"{drift:.1%} apart, past the {MEMORY_TERMS_TOLERANCE:.0%} a "
             f"parts-against-whole reading is allowed. One of the two is "
             f"wrong and the manifest does not say which; check for GB "
-            f"where GiB was meant, and for a kv_bytes_per_token computed "
-            f"from config.json on a backend whose card says otherwise"
+            f"where GiB was meant, and for KV terms computed from config.json "
+            f"on a backend whose card says otherwise"
         )
 
 
-def _parse_memory(where: str, block: dict[str, Any], served: int) -> MemoryTerms | None:
+def _parse_kv_blocks(where: str, table: Any) -> KvBlocks:
+    if not isinstance(table, dict):
+        raise ManifestError(f"{where}: must be a table")
+    check_table(where, table, _KV_BLOCKS_REQUIRED, error=ManifestError)
+    for key in ("tokens", "bytes"):
+        if table[key] <= 0:
+            raise ManifestError(f"{where}: {key} must be positive, got {table[key]}")
+    if table["state_blocks"] < 0:
+        raise ManifestError(
+            f"{where}: state_blocks cannot be negative, got {table['state_blocks']}"
+        )
+    return KvBlocks(
+        tokens=table["tokens"], bytes=table["bytes"], state_blocks=table["state_blocks"]
+    )
+
+
+def _parse_memory(
+    where: str, block: dict[str, Any], served: int, engine: str
+) -> MemoryTerms | None:
     table = block.get("memory")
     if table is None:
         return None
     memory_where = f"{where}.memory"
     if not isinstance(table, dict):
         raise ManifestError(f"{memory_where}: must be a table")
-    check_table(memory_where, table, _MEMORY_REQUIRED, error=ManifestError)
+    # vLLM allocates KV in whole blocks, and a hybrid model's blocks are hundreds of
+    # tokens with state blocks on top (KvBlocks): a rate cannot say what its pool needs.
+    kv = _MEMORY_KV_BLOCKS if engine == "vllm" else _MEMORY_KV_RATE
+    if engine == "vllm" and "kv_bytes_per_token" in table:
+        raise ManifestError(
+            f"{memory_where}: a vLLM block states its KV as kv_blocks = {{ tokens, bytes, "
+            "state_blocks }, not kv_bytes_per_token: vLLM sizes the pool in whole blocks "
+            "(its log's \"Setting attention block size to N tokens\"), and a rate "
+            "under-asks for a hybrid model's state blocks (KvBlocks in crucible/manifests.py)"
+        )
+    check_table(memory_where, table, {**_MEMORY_REQUIRED, **kv}, error=ManifestError)
     _check_memory_values(memory_where, table)
     terms = MemoryTerms(
         weights_bytes=table["weights_bytes"],
         overhead_bytes=table["overhead_bytes"],
-        kv_bytes_per_token=table["kv_bytes_per_token"],
+        kv_bytes_per_token=table.get("kv_bytes_per_token"),
+        kv_blocks=(
+            _parse_kv_blocks(f"{memory_where}.kv_blocks", table["kv_blocks"])
+            if "kv_blocks" in table
+            else None
+        ),
         basis=table["basis"],
         measured_at_context=table["measured_at_context"],
     )
@@ -1537,7 +1644,7 @@ def _parse_forms(
             bits=table["bits"],
             file=table["file"],
             memory_bytes_estimate=table["memory_bytes_estimate"],
-            memory=_parse_memory(form_where, table, served),
+            memory=_parse_memory(form_where, table, served, shared.engine),
         )
         _check_stated_bits(form_where, replace(shared, file=form.file, bits=form.bits))
         forms.append(form)
@@ -1577,7 +1684,7 @@ def _parse_backend(kind: str, block: Any, path: Path, model: dict[str, Any]) -> 
         engine_args=engine_args,
         context_default=backend_context,
         max_context=block_max,
-        memory=_parse_memory(where, block, served),
+        memory=_parse_memory(where, block, served, block["engine"]),
         file=block.get("file"),
         mmproj=block.get("mmproj"),
         serves=serves_here,

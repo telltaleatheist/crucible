@@ -132,6 +132,15 @@ Promoting them to fields costs no new measurement:
 pads the attention page up to the linear layers' recurrent state. No amount of
 reading `config.json` finds that.
 
+**Correction, 2026-11-11.** It does, and a rate was the wrong shape. vLLM allocates
+KV in whole blocks: on the 27B, 784-token blocks of 51,380,224 B (16 attention
+layers' pages, each padded to one linear-attention layer's state), 6 state blocks a
+request, and one null block held back. All of it follows from `config.json`, and it
+matches every load's own concurrency figure on owens-pc. 86,251 B/token was that
+layout averaged over 16,384 tokens. Shrunk to 11,317 it asked for 20 blocks where 22
+were needed, and vLLM refused the load. vLLM blocks now state `kv_blocks`
+(docs/internals/engines-and-capability.md, "Context ceilings").
+
 ## 3. A class declares its working context; a model does not
 
     translate, simplify   ~4k tokens, batched          a paragraph, independent

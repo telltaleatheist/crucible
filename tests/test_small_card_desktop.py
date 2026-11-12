@@ -53,9 +53,10 @@ def test_victorias_refusal_names_the_desktop_over_its_allowance_not_the_allowanc
     assert "the engine's budget is 5.43 GiB" in words or "the engine's budget is 5.44 GiB" in words
     assert "This card affords 0 tokens" in words
     # What it would take, so the person can act: 5.51 weights and overhead, 0.94 context,
-    # 0.40 for one 8192-token request with its slack.
-    assert "qwen3.5-4b-8bit needs 6.85 GiB free at 8192 tokens" in words
-    assert "0.48 GiB more than the card has" in words
+    # 0.37 for one 8192-token request: 16 blocks of 528 tokens, 6 state blocks and the
+    # null block, 16.5 MiB each.
+    assert "qwen3.5-4b-8bit needs 6.82 GiB free at 8192 tokens" in words
+    assert "0.45 GiB more than the card has" in words
 
 
 def test_the_need_it_names_is_the_need_it_holds_a_load_to():

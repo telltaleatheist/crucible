@@ -350,10 +350,13 @@ def test_the_vl_aliases_carry_the_tower_their_text_bases_do_not() -> None:
     )
 
 
-def test_the_nine_b_vl_leaves_about_1700_tokens_on_the_3090ti() -> None:
+def test_the_nine_b_vl_has_no_context_on_the_3090ti() -> None:
+    """68.6 MB is left once the weights and overhead are out: 3 of vLLM's 16.5 MiB blocks,
+    and a request holds 6 state blocks and the pool 1 null block before its first token.
+    A per-token rate once read that as about 1,700 tokens; vLLM would refuse it."""
     terms = load_manifest(ALIAS).spec(CUDA_LINUX).memory
     budget = 25_757_220_864 - 3 * GIB
-    assert terms.max_context(available_bytes=budget, concurrency=1) == 1_700
+    assert terms.max_context(available_bytes=budget, concurrency=1) == 0
     terms = load_manifest("qwen3.8-27b-4bit-vl").spec(CUDA_LINUX).memory
     assert terms.max_context(available_bytes=budget, concurrency=1) == 0
 

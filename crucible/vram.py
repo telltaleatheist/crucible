@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from .accelerator import AcceleratorState
 from .enginespec import VLLM_ENGINE, flag_value
-from .manifests import MODELS_DIR_ENV, BackendSpec, ManifestError
+from .manifests import MODELS_DIR_ENV, BackendSpec, ManifestError, MemoryTerms
 from .memorybudget import engine_budget_bytes, gib_text
 
 MAX_NUM_SEQS_FLAG = "--max-num-seqs"
@@ -17,15 +17,6 @@ MAX_NUM_SEQS_FLAG = "--max-num-seqs"
 # allowance leaves was refused there; on a 24 GiB card the allowance is always the
 # smaller term, which is why it never showed.
 VLLM_CUDA_CONTEXT_BYTES = 960 * 1024**2
-
-# What vLLM needs per in-flight request beyond context x bytes-per-token, in tokens of
-# KV. On Qwen3.5 (hybrid attention) vLLM 0.29 pads attention to 528-token blocks to
-# match the mamba page, and holds each request's linear-attention state inside the KV
-# pool. Victoria's RTX 3070, 2026-10-09, qwen3.5-4b-bside-4bit at 8192 tokens x 1 with a
-# pool of exactly 8192 x 40,337 B: "0.35 GiB KV cache is needed, which is larger than the
-# available KV cache memory (0.29 GiB)". One block of padding (528) and the state
-# (0.019 GiB, about 430 tokens at 46,581 B/token) fit in 1024.
-VLLM_SEQUENCE_SLACK_TOKENS = 1024
 
 
 def _gib(value: int) -> str:
@@ -55,9 +46,7 @@ class KvPlan:
     free_bytes: int
     desktop_allowance_bytes: int
     budget_bytes: int
-    fixed_bytes: int
-    kv_bytes_per_token: int
-    basis: str
+    terms: MemoryTerms
     context: int
     concurrency: int | None
     pool_bytes: int
@@ -67,8 +56,12 @@ class KvPlan:
         return self.pool_bytes >= self.request_kv_bytes
 
     @property
+    def fixed_bytes(self) -> int:
+        return self.terms.fixed_bytes
+
+    @property
     def affordable_context(self) -> int:
-        return max(0, self.pool_bytes // self.kv_bytes_per_token - VLLM_SEQUENCE_SLACK_TOKENS)
+        return self.terms.context_in(self.pool_bytes, concurrency=1)
 
     @property
     def free_binds(self) -> bool:
@@ -78,7 +71,9 @@ class KvPlan:
 
     @property
     def request_kv_bytes(self) -> int:
-        return self.kv_bytes_per_token * (self.context + VLLM_SEQUENCE_SLACK_TOKENS)
+        """The pool vLLM requires for one request at the plan's context: what its start-up
+        check (check_enough_kv_cache_memory) refuses a pool smaller than."""
+        return self.terms.kv_bytes(context=self.context, concurrency=1)
 
     @property
     def free_needed_bytes(self) -> int:
@@ -111,9 +106,8 @@ class KvPlan:
             f"cannot give {self.model_id} a KV cache at {self.context} tokens: "
             f"{budget_words}; {_gib(self.fixed_bytes)} of that is weights and overhead, "
             f"leaving {_gib(self.pool_bytes)} for KV where one request of {self.context} "
-            f"tokens needs {_gib(self.request_kv_bytes)} at {self.kv_bytes_per_token:_} "
-            f"B/token ({self.basis}), its {VLLM_SEQUENCE_SLACK_TOKENS} tokens of slack "
-            f"included. This card affords {self.affordable_context:_} tokens"
+            f"tokens needs {_gib(self.request_kv_bytes)} in {self.terms.kv_words()}. "
+            f"This card affords {self.affordable_context:_} tokens"
         )
         if self.free_binds:
             short = self.free_needed_bytes - self.free_bytes
@@ -130,8 +124,7 @@ class KvPlan:
             f"{self.model_id}: KV pool {_gib(self.pool_bytes)} of a "
             f"{_gib(self.budget_bytes)} budget ({_gib(self.free_bytes)} free, "
             f"{_gib(self.fixed_bytes)} weights+overhead), which is "
-            f"{self.affordable_context:_} tokens at {self.kv_bytes_per_token:_} "
-            f"B/token ({self.basis}){held}"
+            f"{self.affordable_context:_} tokens in {self.terms.kv_words()}{held}"
         )
 
     def flags(self) -> list[str]:
@@ -183,12 +176,7 @@ def plan_vllm_memory(
     room = max(0, budget - terms.fixed_bytes)
     concurrency = max_num_seqs(spec, model_id)
     if concurrency is not None:
-        room = min(
-            room,
-            terms.kv_bytes_per_token
-            * (context + VLLM_SEQUENCE_SLACK_TOKENS)
-            * concurrency,
-        )
+        room = min(room, terms.kv_bytes(context=context, concurrency=concurrency))
 
     return KvPlan(
         model_id=model_id,
@@ -196,9 +184,7 @@ def plan_vllm_memory(
         free_bytes=free_after_eviction,
         desktop_allowance_bytes=desktop_allowance_bytes,
         budget_bytes=budget,
-        fixed_bytes=terms.fixed_bytes,
-        kv_bytes_per_token=terms.kv_bytes_per_token,
-        basis=terms.basis,
+        terms=terms,
         context=context,
         concurrency=concurrency,
         pool_bytes=room,

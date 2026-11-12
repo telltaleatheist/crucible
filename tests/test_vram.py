@@ -4,8 +4,9 @@ import pytest
 
 from crucible.accelerator import AcceleratorState
 from crucible.engines import engine_load_args
-from crucible.manifests import BackendSpec, MemoryTerms, load_manifest
+from crucible.manifests import BackendSpec, KvBlocks, MemoryTerms, load_manifest
 from crucible.vram import (
+    VLLM_CUDA_CONTEXT_BYTES,
     engine_budget_bytes,
     max_num_seqs,
     plan_vllm_memory,
@@ -46,10 +47,14 @@ def spec(
     )
 
 
+# vLLM 0.29's KV layout for Qwen3.5-4B and -9B (the manifests' kv_blocks).
+FOUR_B_BLOCKS = KvBlocks(tokens=528, bytes=17_301_504, state_blocks=6)
+
 NINE_B = MemoryTerms(
     weights_bytes=18_038_862_643,
     overhead_bytes=1_476_395_008,
-    kv_bytes_per_token=40_337,
+    kv_bytes_per_token=None,
+    kv_blocks=FOUR_B_BLOCKS,
     basis="measured",
     measured_at_context=16384,
 )
@@ -129,13 +134,10 @@ def test_the_pool_never_exceeds_what_the_engine_could_reach():
         reclaimable_bytes=0,
     )
     assert plan is not None
-    from crucible.vram import VLLM_SEQUENCE_SLACK_TOKENS
-
-    # Each in-flight request's context, and the block padding and recurrent state vLLM
-    # keeps for it inside the pool.
-    assert plan.pool_bytes == (
-        NINE_B.kv_bytes_per_token * (4096 + VLLM_SEQUENCE_SLACK_TOKENS) * 16
-    )
+    # Each in-flight request's whole blocks and the state blocks vLLM keeps for it inside
+    # the pool, and the one null block the pool holds back.
+    blocks = 16 * (-(-4096 // 528) + 6) + 1
+    assert plan.pool_bytes == blocks * 17_301_504
 
 
 def test_one_request_at_its_full_context_gets_the_room_vllm_asks_for():
@@ -145,7 +147,7 @@ def test_one_request_at_its_full_context_gets_the_room_vllm_asks_for():
         model_id="qwen3.5-4b-bside-4bit",
         spec=spec(memory=MemoryTerms(
             weights_bytes=3_339_000_000, overhead_bytes=1_600_000_000,
-            kv_bytes_per_token=46_581, basis="measured", measured_at_context=8192,
+            kv_bytes_per_token=None, kv_blocks=FOUR_B_BLOCKS, basis="measured", measured_at_context=8192,
         ), args=("--max-num-seqs", "1")),
         context=8192,
         card=AcceleratorState(
@@ -158,6 +160,9 @@ def test_one_request_at_its_full_context_gets_the_room_vllm_asks_for():
     assert plan is not None and plan.fits
     needed, state = int(0.35 * GIB), int(0.019 * GIB)
     assert plan.pool_bytes >= needed + state
+    # vLLM's own check: the pool less its null block holds the request's blocks.
+    blocks = FOUR_B_BLOCKS.request_blocks(8192)
+    assert plan.pool_bytes - FOUR_B_BLOCKS.bytes >= blocks * FOUR_B_BLOCKS.bytes
 
 
 def test_a_block_that_states_no_concurrency_may_have_the_whole_budget():
@@ -220,7 +225,7 @@ def test_a_card_too_full_refuses_by_name_with_every_term_in_the_sentence():
     assert plan is not None
     assert not plan.fits
     said = plan.sentence()
-    for term in ("qwen3.5-9b", "16384", "40_337", "measured", "free", "budget"):
+    for term in ("qwen3.5-9b", "16384", "528-token blocks", "measured", "free", "budget"):
         assert term in said, f"the refusal does not name {term!r}: {said}"
 
 
@@ -281,11 +286,77 @@ def test_the_calibrated_terms_in_this_file_are_the_manifests_own():
     assert load_manifest("qwen3.5-9b").backends["cuda-linux"].memory == NINE_B
 
 
-def test_the_slope_is_measured_and_not_computed():
+def test_the_terms_are_measured_and_the_layout_is_vllms():
     terms = load_manifest("qwen3.5-9b").backends["cuda-linux"].memory
     assert terms is not None
     assert terms.basis == "measured"
-    assert terms.kv_bytes_per_token > 32_768
+    assert terms.kv_blocks == FOUR_B_BLOCKS
+
+
+@pytest.mark.parametrize(
+    ("model", "pool", "context", "concurrency"),
+    [
+        # Each load's own "Maximum concurrency for 16,384 tokens per request" on owens-pc.
+        ("qwen3.5-2b", 4_724_621_312, 16384, 19.08),
+        ("qwen3.5-4b", 9_802_918_407, 16384, 14.89),
+        ("qwen3.5-9b", 2_036_124_877, 16384, 3.08),
+        ("qwen3.5-9b", 1_735_183_565, 16384, 2.63),
+        ("qwen3.8-27b-4bit", 1_880_298_567, 16384, 1.33),
+        ("qwen3.8-27b-4bit", 1_655_903_303, 16384, 1.19),
+    ],
+)
+def test_the_layout_gives_the_concurrency_vllm_reported(model, pool, context, concurrency):
+    blocks = load_manifest(model).backends["cuda-linux"].memory.kv_blocks
+    assert blocks is not None
+    assert round((pool // blocks.bytes) / blocks.request_blocks(context), 2) == concurrency
+
+
+def test_the_27b_pool_vllm_refused_on_2026_11_11_affords_what_vllm_said():
+    """BookForge's Simplify, owens-pc 2026-11-11 23:03: qwen3.8-27b-4bit planned at 11,317
+    tokens in a pool of 1,070,797,895 B, and vLLM refused: "1.0 GiB KV cache is needed ...
+    available KV cache memory (0.95 GiB) ... the estimated maximum model length is 10192"."""
+    terms = load_manifest("qwen3.8-27b-4bit").backends["cuda-linux"].memory
+    assert terms is not None
+    pool = 1_070_797_895
+    assert terms.context_in(pool, concurrency=1) == 10_192
+    assert terms.kv_bytes(context=11_317, concurrency=1) > pool
+    assert terms.kv_bytes(context=10_192, concurrency=1) <= pool
+
+
+def test_a_27b_plan_on_that_card_starts_at_a_context_its_pool_holds():
+    terms = load_manifest("qwen3.8-27b-4bit").backends["cuda-linux"].memory
+    assert terms is not None
+    budget = terms.fixed_bytes + 1_070_797_895
+    plan = plan_vllm_memory(
+        model_id="qwen3.8-27b-4bit",
+        spec=spec(memory=terms),
+        context=16384,
+        card=AcceleratorState(
+            backend="cuda-linux", total_bytes=TOTAL,
+            free_bytes=budget + VLLM_CUDA_CONTEXT_BYTES,
+            compute_apps=(), detail="fixture",
+        ),
+        desktop_allowance_bytes=TOTAL - budget,
+        reclaimable_bytes=0,
+    )
+    assert plan is not None and not plan.fits
+    assert plan.affordable_context == 10_192
+    fitted = plan_vllm_memory(
+        model_id="qwen3.8-27b-4bit",
+        spec=spec(memory=terms),
+        context=plan.affordable_context,
+        card=AcceleratorState(
+            backend="cuda-linux", total_bytes=TOTAL,
+            free_bytes=budget + VLLM_CUDA_CONTEXT_BYTES,
+            compute_apps=(), detail="fixture",
+        ),
+        desktop_allowance_bytes=TOTAL - budget,
+        reclaimable_bytes=0,
+    )
+    assert fitted is not None and fitted.fits
+    blocks = terms.kv_blocks
+    assert blocks is not None
+    assert fitted.pool_bytes - blocks.bytes >= blocks.request_blocks(10_192) * blocks.bytes
 
 
 def test_the_budget_leaves_vllms_own_cuda_context_free_on_an_8_gib_card():
@@ -303,7 +374,7 @@ def test_the_budget_leaves_vllms_own_cuda_context_free_on_an_8_gib_card():
         model_id="qwen3.5-4b-8bit",
         spec=spec(memory=MemoryTerms(
             weights_bytes=5_120_000_000, overhead_bytes=1_600_000_000,
-            kv_bytes_per_token=40_337, basis="computed", measured_at_context=8192,
+            kv_bytes_per_token=None, kv_blocks=FOUR_B_BLOCKS, basis="computed", measured_at_context=8192,
         ), args=("--max-num-seqs", "4")),
         context=8192,
         card=eight,

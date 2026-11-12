@@ -751,10 +751,10 @@ def test_a_ceiling_is_the_smaller_of_what_is_served_and_what_memory_affords() ->
     }
     nine = one["qwen3.5-9b"]
     assert nine.served_context == 65536
-    assert nine.memory_context == 74_887
+    assert nine.memory_context == 88_176
     assert (nine.tokens, nine.bound_by) == (65536, "served")
     big = one["qwen3.8-27b-4bit"]
-    assert (big.tokens, big.bound_by, big.memory_context) == (32768, "served", 33_945)
+    assert (big.tokens, big.bound_by, big.memory_context) == (32768, "served", 38_416)
 
     two = {
         c.model: c

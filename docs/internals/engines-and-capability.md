@@ -209,7 +209,16 @@ first, then a smaller model.
 
 ### Context ceilings
 
-`engine_total = weights + overhead + kv_bytes_per_token × context × concurrency`.
+`engine_total = weights + overhead + KV(context, concurrency)`. KV is a rate,
+`kv_bytes_per_token × context × concurrency`, on llama-server and MLX, which allocate
+by the token. A vLLM block states `kv_blocks = { tokens, bytes, state_blocks }`
+instead, because vLLM allocates whole blocks: KV is `bytes × ((ceil(context / tokens)
++ state_blocks) × concurrency + 1)`, the `+ 1` being the null block the pool holds
+back (`MemoryTerms` and `KvBlocks` in `crucible/manifests.py`). On the Qwen3.5/3.8
+hybrids the blocks are 528 to 784 tokens and a request holds 6 state blocks before its
+first token, which a rate cannot say: qwen3.8-27b-4bit planned at 11,317 tokens on
+86,251 B/token plus 1,024 tokens of slack got 20 blocks where it needed 22, and vLLM
+refused it (owens-pc, 2026-11-11).
 The context and concurrency belong to the class's work, not to the model's
 `context_default`. `Candidate.context_ceiling` is the single ceiling function:
 the smaller of *served* (the block's `max_context`) and *memory* (what
@@ -354,7 +363,7 @@ the next night.
   resident's estimate or load-time measurement, not what it holds now, and on
   an 8 GiB card free plus it passed the idle card (Victoria's 3070,
   2026-10-11, yue2-3b resident: 0.875 planned, 6.95 GiB seen). The pool is capped at
-  `kv_bytes_per_token × context × max_num_seqs`, because bytes beyond that
+  `KV(context, max_num_seqs)`, because bytes beyond that
   cannot be used. `max_num_seqs` reads the flag with `enginespec.flag_value`,
   so the last one given wins, as it does in vLLM. A value that is not a whole
   number is a `ManifestError` that names the model and its manifest file.

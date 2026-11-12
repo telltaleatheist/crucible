@@ -112,9 +112,9 @@ def test_the_memory_validator_refuses_terms_that_disagree_with_the_estimate():
         },
     }
     with pytest.raises(ManifestError, match="parts-against-whole"):
-        manifests._parse_memory("m.toml [backends.cuda-linux]", block, 100)
+        manifests._parse_memory("m.toml [backends.cuda-linux]", block, 100, "llama-server")
     block["memory_bytes_estimate"] = 600
-    terms = manifests._parse_memory("m.toml [backends.cuda-linux]", block, 100)
+    terms = manifests._parse_memory("m.toml [backends.cuda-linux]", block, 100, "llama-server")
     assert terms.bytes_for(context=100, concurrency=1) == 600
 
 

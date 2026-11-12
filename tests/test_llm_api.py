@@ -752,7 +752,7 @@ def test_the_4bit_27b_actually_loads_on_a_free_24_gib_card(
     assert terms is not None
     total = FAKE_BACKEND.gpu.vram_bytes
     budget = total - DEFAULT_DESKTOP_ALLOWANCE_BYTES
-    pool = min(budget - terms.fixed_bytes, terms.kv_bytes_per_token * 16384 * 16)
+    pool = min(budget - terms.fixed_bytes, terms.kv_bytes(context=16384, concurrency=16))
     assert engines[0].args == [
         "--gpu-memory-utilization", "0.86",
         "--max-num-seqs", "16",
@@ -767,7 +767,7 @@ def test_the_4bit_27b_actually_loads_on_a_free_24_gib_card(
         "--tool-call-parser", "qwen3_coder",
         "--reasoning-parser", "qwen3",
     ]
-    assert pool > terms.kv_bytes_per_token * 16384
+    assert pool > terms.kv_bytes(context=16384, concurrency=1)
 
 
 def test_unknown_params_are_refused(
@@ -1870,8 +1870,8 @@ def test_a_stated_context_reaches_the_engine_the_plan_and_the_resident_row(
     terms = load_manifest(MODEL).spec(FAKE_BACKEND.kind).memory
     budget = FAKE_BACKEND.gpu.vram_bytes - DEFAULT_DESKTOP_ALLOWANCE_BYTES
     pool = int(_flag(args, "--kv-cache-memory-bytes"))
-    assert pool == min(budget - terms.fixed_bytes, terms.kv_bytes_per_token * 65536 * 16)
-    assert pool >= terms.kv_bytes_per_token * 65536
+    assert pool == min(budget - terms.fixed_bytes, terms.kv_bytes(context=65536, concurrency=16))
+    assert pool >= terms.kv_bytes(context=65536, concurrency=1)
     row = {r["id"]: r for r in llm_client.get("/v1/models", headers=auth).json()}[MODEL]
     assert row["max_model_len"] == 65536
     assert row["context_default"] == 16384
@@ -1904,7 +1904,7 @@ def test_a_context_over_the_ceiling_is_refused_before_anything_moves(
     assert details["requested"] == {"tokens": 40960, "concurrency": 1}
     assert details["ceiling"]["tokens"] == 32768
     assert details["ceiling"]["bound_by"] == "served"
-    assert details["ceiling"]["memory_context"] == 33_945
+    assert details["ceiling"]["memory_context"] == 38_416
     assert [c["model"] for c in details["ceilings"]] == [SMALL_BIG_MODEL]
     assert "40960" in error["message"] and "32768" in error["message"]
 

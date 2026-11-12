@@ -37,9 +37,13 @@ max_context = 131072
 [backends.cuda-linux.memory]
 weights_bytes = 9_216_572_511
 overhead_bytes = 3_516_504_474
-# 46,581 B/token: measured for this architecture on vLLM 0.29 (qwen3.5-4b-8bit on an
-# RTX 3070, 2026-10-09: 14,522 tokens in 0.63 GiB, the mamba page padding included).
-kv_bytes_per_token = 46_581
+# KV in vLLM 0.29's own layout (KvBlocks): 528-token blocks, each one page for the 8
+# full-attention layers (17,301,504 B, the 24 linear-attention layers' state padded to the
+# same page), and 6 state blocks a request (3 state groups x 2 in 'align' mode). Read from
+# config.json; the engine logs on owens-pc agree (qwen3.5-4b 2026-10-12: block size 528,
+# 14.89x at 16,384 tokens in 9,802,918,407 B; qwen3.5-9b 2026-11-10: 3.08x in
+# 2,036,124,877 B).
+kv_blocks = { tokens = 528, bytes = 17_301_504, state_blocks = 6 }
 basis = "computed"
 measured_at_context = 16384
 

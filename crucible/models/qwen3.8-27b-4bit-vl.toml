@@ -25,7 +25,13 @@ engine_args = [
 [backends.cuda-linux.memory]
 weights_bytes = 18_983_441_367
 overhead_bytes = 3_586_297_692
-kv_bytes_per_token = 86_251
+# KV in vLLM 0.29's own layout (KvBlocks): 784-token blocks, each one page for the 16
+# full-attention layers (51,380,224 B, the 48 linear-attention layers' state padded to the
+# same page), and 6 state blocks a request (3 state groups x 2 in 'align' mode). Read from
+# config.json; the engine log on owens-pc agrees (2026-11-10: block size 784, 1.33x at
+# 16,384 tokens in 1,880,298,567 B; 2026-11-11: 11,317 tokens refused in 1,070,797,895 B,
+# which holds 13 attention blocks, 10,192 tokens, as vLLM said).
+kv_blocks = { tokens = 784, bytes = 51_380_224, state_blocks = 6 }
 basis = "computed"
 measured_at_context = 16384
 

@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- A vLLM load squeezed under its model's default context now loads, where before vLLM could refuse it. BookForge's Simplify on owens-pc (2026-11-11) got qwen3.8-27b-4bit planned at 11,317 tokens in a 1.0 GiB pool, and vLLM refused it: "the estimated maximum model length is 10192". The plan priced KV at 86,251 B a token plus 1,024 tokens of slack. vLLM actually allocates whole blocks: 784 tokens of 49 MiB on that model, plus 6 state blocks for every request and one null block for the pool. Every vLLM manifest now states its layout as `kv_blocks = { tokens, bytes, state_blocks }`, read from config.json and matched against each model's own engine log. The plan sizes the pool exactly as vLLM's start-up check does. A vLLM block that states a per-token rate is refused by name. Side effect: the ceilings vLLM models report are now exact, and higher, because the old rate overcharged long contexts (the 27B on a 24 GB card goes from 33,945 to 38,416 tokens).
+
 ## 2.0.36 — 2026-11-06
 
 - `docs/API.md` no longer changes when FastAPI does. FastAPI 0.162 added two optional fields to its own `ValidationError`, so the generated-docs check failed on every push while nothing of Crucible's had moved. The reference states the fields every version requires.
