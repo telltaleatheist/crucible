@@ -417,11 +417,12 @@ export interface SessionOptions {
    */
   readonly maxParamsB?: number;
   /**
-   * The least context, in tokens, the session's model must be started at: what its largest
-   * request needs, prompt and answer together (2.0.38+; wire `context_tokens`). The model loads at
-   * its default, or at this when it is more, or at the most the card affords below that, but never
-   * under this; a resident model started at less is loaded again. {@link CrucibleSession.context}
-   * says what it got. A card that cannot give this much ends the session `insufficient_kv_cache`,
+   * The context, in tokens, the session's work measured: what its largest request needs, prompt
+   * and answer together (wire `context_tokens`). 2.0.39+: a model loaded for the session starts at
+   * this (at least 2048), not at its default, which leaves the card room for more requests in
+   * flight; a resident model started at this or more is kept, one started at less is loaded again.
+   * (2.0.38 treated it as a floor under the default.) {@link CrucibleSession.context} says what it
+   * got. A card that cannot give this much ends the session `insufficient_kv_cache`,
    * naming it; above the host's ceiling, `context_over_limit`. Needs `model`, `verb` or
    * `maxParamsB` (`context_without_model`).
    */

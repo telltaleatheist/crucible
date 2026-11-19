@@ -1,10 +1,11 @@
-"""A queue session states the least context its model must be started at
-(`context_tokens`), and the load that opens it is held to it (load-model `min_context`).
+"""A queue session states the context its work measured (`context_tokens`), and the load
+that opens it starts at it (load-model `context`); a resident model as long or longer is
+kept.
 
 bookforge pc 2, 2026-11-11: Simplify sends one paragraph at a time and needs a few
 thousand tokens, but a session could not say so. The server picked the model's default or
 the most the card afforded, and on owens-pc that load was sized wrong and failed. With the
-need stated, a tight card loads at what it affords at or above it, or refuses by name."""
+figure stated, the model starts at it, or the session is refused by name."""
 
 from __future__ import annotations
 
@@ -102,10 +103,26 @@ def _load_request(context_tokens: int | None, monkeypatch: pytest.MonkeyPatch) -
     return request
 
 
-def test_the_load_that_opens_it_carries_the_need_as_its_minimum(monkeypatch) -> None:
-    request = _load_request(6000, monkeypatch)
+def test_the_load_that_opens_it_starts_at_the_measured_context(monkeypatch) -> None:
+    """Owen, 2026-11-12: "lets measure every time. We dont need 16k if the paragraphs are
+    all small". The load starts at the session's figure, not the model's 16,384, so the
+    27B's pool holds more of Simplify's requests at once."""
+    request = _load_request(5166, monkeypatch)
     assert request.type == "load-model"
-    assert request.params == {"min_context": 6000}
+    assert request.params == {"context": 5166}
+
+
+def test_a_measured_context_under_the_engine_floor_loads_at_the_floor(monkeypatch) -> None:
+    assert _load_request(900, monkeypatch).params == {"context": 2048}
+
+
+def test_a_resident_started_longer_than_the_need_is_kept() -> None:
+    session = _sessions().create(
+        act="clean", client="bookforge", model=MODEL, idle_s=60, max_wait_s=60,
+        context_tokens=5166,
+    )
+    assert asyncio.run(_resident(_ctx(16_384), session)) is True
+    assert session.context == 16_384
 
 
 def test_a_session_with_no_stated_need_loads_as_before(monkeypatch) -> None:

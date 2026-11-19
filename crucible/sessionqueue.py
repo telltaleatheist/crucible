@@ -23,6 +23,7 @@ from typing import Any
 from . import clock
 from .admission import KEEPS_WAITING, AdmissionContext, JobRequest, Refusal, admit
 from .callqueue import IN, WAIT, card_was_held, load_ended, not_yet
+from .contextceiling import MIN_LOAD_CONTEXT
 from .errors import ApiError
 from .inflight import InFlight
 from .jobs.base import DONE
@@ -51,7 +52,8 @@ async def _resident(ctx: AdmissionContext, session: QueueSession) -> bool:
     is, the session takes the context that model was started at, which is what a client
     sizes its work to (a load that named no context may have been fitted under the
     model's default). Started under the session's ``context_tokens``, it is not: the
-    session loads it again, at least that long."""
+    session loads it again at that context. Started at that or more, it is kept: a
+    reload to a smaller context would cost the session time and buy it nothing."""
     async with ctx.residency.settled_for(f"opening session {session.id}"):
         resident = ctx.residency.resident_model
         if resident is None or resident.model_id != session.model:
@@ -85,7 +87,7 @@ async def _load_for(
             params=(
                 {}
                 if session.context_tokens is None
-                else {"min_context": session.context_tokens}
+                else {"context": max(MIN_LOAD_CONTEXT, session.context_tokens)}
             ),
             client=session.client,
             client_ref=f"opening session {session.id}",
