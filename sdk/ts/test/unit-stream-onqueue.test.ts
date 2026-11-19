@@ -195,7 +195,7 @@ test('onQueue hears every move while the stream waits, then the stream opens in 
   say('moved', { position: 1, of: 1 });
   await until(() => moves.length === 2, 'both moves');
   assert.equal(opens().length, 1, 'nothing opens the stream while its session waits');
-  say('opened', { opened_at: '2026-10-02T10:00:00+00:00', model: null, load_job: null });
+  say('opened', { opened_at: '2026-10-02T10:00:00+00:00', model: null, load_job: null, context: null });
   const session = await opening;
 
   assert.deepEqual(moves, [{ position: 2, of: 2 }, { position: 1, of: 1 }]);
@@ -280,7 +280,7 @@ test('a second open that fails gives the session back rather than holding the se
     });
   const opening = client().stream({ voice: 'deathstalker', language: 'en', onQueue: () => undefined });
   await until(() => feed !== null, 'the queue session to be followed');
-  say('opened', { opened_at: '2026-10-02T10:00:00+00:00', model: null, load_job: null });
+  say('opened', { opened_at: '2026-10-02T10:00:00+00:00', model: null, load_job: null, context: null });
   await assert.rejects(opening, /the voice would not load/);
   await until(() => leaves().length === 1, 'the opened session to be closed');
 });

@@ -174,7 +174,7 @@ after(async () => {
 beforeEach(() => {
   seen = [];
   feed = new Feed();
-  ticket = { session_id: 'ses-1', status: 'open', position: null, model: null };
+  ticket = { session_id: 'ses-1', status: 'open', position: null, model: null, context: null };
   extra = () => false;
 });
 
@@ -196,8 +196,8 @@ function watching(): boolean {
 }
 
 test('a session opened with a ceiling sends it and carries the model the server chose', async () => {
-  ticket = { session_id: 'ses-1', status: 'open', position: null, model: 'qwen3.5-4b' };
-  feed.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: 'qwen3.5-4b', load_job: null });
+  ticket = { session_id: 'ses-1', status: 'open', position: null, model: 'qwen3.5-4b', context: null };
+  feed.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: 'qwen3.5-4b', load_job: null, context: null });
   const session = await client().session({ act: 'generate', maxParamsB: 4 });
   try {
     assert.equal(session.model, 'qwen3.5-4b');
@@ -209,8 +209,8 @@ test('a session opened with a ceiling sends it and carries the model the server 
 });
 
 test('a session sends its verb beside its ceiling, and its act only labels', async () => {
-  ticket = { session_id: 'ses-1', status: 'open', position: null, model: 'qwen3.5-9b' };
-  feed.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: 'qwen3.5-9b', load_job: null });
+  ticket = { session_id: 'ses-1', status: 'open', position: null, model: 'qwen3.5-9b', context: null };
+  feed.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: 'qwen3.5-9b', load_job: null, context: null });
   const session = await client().session({ act: 'clean', verb: 'decide', maxParamsB: 9 });
   try {
     const opened = seen.filter((request) => request.path === '/v1/queue/sessions').at(-1);
@@ -221,10 +221,12 @@ test('a session sends its verb beside its ceiling, and its act only labels', asy
 });
 
 test('a session sends the context it needs as context_tokens', async () => {
-  ticket = { session_id: 'ses-1', status: 'open', position: null, model: 'qwen3.8-27b-4bit' };
-  feed.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: 'qwen3.8-27b-4bit', load_job: null });
+  ticket = { session_id: 'ses-1', status: 'open', position: null, model: 'qwen3.8-27b-4bit', context: 6000 };
+  feed.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: 'qwen3.8-27b-4bit', load_job: null, context: 6000 });
   const session = await client().session({ act: 'clean', model: 'qwen3.8-27b-4bit', contextTokens: 6000 });
   try {
+    // Opened at once: the ticket says the context its model started at.
+    assert.equal(session.context, 6000);
     const opened = seen.filter((request) => request.path === '/v1/queue/sessions').at(-1);
     assert.deepEqual(JSON.parse(opened?.body ?? '{}'), {
       act: 'clean',
@@ -246,7 +248,7 @@ test('a context need that is not a positive whole number is refused before anyth
 });
 
 test('a session the server opens at once is open when session() answers', async () => {
-  feed.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: null, load_job: null });
+  feed.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: null, load_job: null, context: null });
   const crucible = client();
   const session = await crucible.session({ act: 'analysis', idleS: 600, maxWaitS: 120 });
   try {
@@ -263,7 +265,7 @@ test('a session the server opens at once is open when session() answers', async 
 });
 
 test('a queued session reports each move and answers once it opens', async () => {
-  ticket = { session_id: 'ses-1', status: 'queued', position: 2, model: null };
+  ticket = { session_id: 'ses-1', status: 'queued', position: 2, model: null, context: null };
   const moves: QueuePosition[] = [];
   const opening = client().session({
     act: 'analysis',
@@ -274,10 +276,12 @@ test('a queued session reports each move and answers once it opens', async () =>
   feed.say('queued', { position: 2, of: 2 });
   feed.say('moved', { position: 1, of: 1 });
   await until(() => moves.length === 2, 'both moves');
-  feed.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: 'qwen3.5-9b', load_job: 'j0' });
+  feed.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: 'qwen3.5-9b', load_job: 'j0', context: 16384 });
   const session = await opening;
   try {
     assert.deepEqual(moves, [{ position: 2, of: 2 }, { position: 1, of: 1 }]);
+    // Opened after waiting: the `opened` event says the context its model started at.
+    assert.equal(session.context, 16384);
     // The background follow resumes after `opened`, not from the beginning.
     await until(() => seen.some((request) => request.lastEventId === '3'), 'the follow to resume after 3');
     assert.equal(JSON.parse(seen[0]?.body ?? '{}').model, 'qwen3.5-9b');
@@ -287,7 +291,7 @@ test('a queued session reports each move and answers once it opens', async () =>
 });
 
 test('a session waiting for a held card hears onWaiting, and only until it opens', async () => {
-  ticket = { session_id: 'ses-1', status: 'queued', position: 1, model: null };
+  ticket = { session_id: 'ses-1', status: 'queued', position: 1, model: null, context: null };
   const waits: CardWaitData[] = [];
   const opening = client().session({
     act: 'analysis',
@@ -308,7 +312,7 @@ test('a session waiting for a held card hears onWaiting, and only until it opens
   const { next_check_at: _dropped, ...older } = said;
   feed.say('waiting', older);
   await until(() => waits.length === 2, 'both waits');
-  feed.say('opened', { opened_at: '2026-10-02T10:01:00+00:00', model: 'qwen3.5-9b', load_job: 'j0' });
+  feed.say('opened', { opened_at: '2026-10-02T10:01:00+00:00', model: 'qwen3.5-9b', load_job: 'j0', context: null });
   const session = await opening;
   try {
     assert.deepEqual(waits[0], {
@@ -453,7 +457,7 @@ test('a session closed unused names why on the next request, and its client hear
 });
 
 test('a dropped follow reconnects with Last-Event-ID and still hears the end', async () => {
-  feed.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: null, load_job: null });
+  feed.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: null, load_job: null, context: null });
   const session = await client().session({ act: 'analysis' });
   await until(watching, 'the background follow');
   feed.drop();
@@ -476,7 +480,7 @@ test('the server stopping ends the session it holds', async () => {
 });
 
 test('a session that never opens throws its reason, and is not left in the line', async () => {
-  ticket = { session_id: 'ses-1', status: 'queued', position: 1, model: null };
+  ticket = { session_id: 'ses-1', status: 'queued', position: 1, model: null, context: null };
   const opening = client().session({ act: 'analysis', model: 'qwen3.5-9b' });
   await until(watching, 'the queued session to be followed');
   feed.say('queued', { position: 1, of: 1 });
@@ -498,7 +502,7 @@ test('a session that never opens throws its reason, and is not left in the line'
 });
 
 test('aborting the wait takes the session out of the line', async () => {
-  ticket = { session_id: 'ses-1', status: 'queued', position: 4, model: null };
+  ticket = { session_id: 'ses-1', status: 'queued', position: 4, model: null, context: null };
   const controller = new AbortController();
   const opening = client().session({ act: 'analysis', signal: controller.signal });
   await until(watching, 'the queued session to be followed');

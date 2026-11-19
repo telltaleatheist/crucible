@@ -100,7 +100,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
         line.join_session(session)
         await ctx.queue_pump.step()
         return {"session_id": session.id, "status": session.status,
-                "position": session.position, "model": session.model}
+                "position": session.position, "model": session.model,
+                "context": session.context}
 
     @private.get(
         "/queue/sessions/{session_id}", response_model=SessionState, responses=NOT_FOUND

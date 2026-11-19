@@ -112,7 +112,7 @@ class Fake {
 
   open(): void {
     this.status = 'open';
-    this.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: null, load_job: null });
+    this.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: null, load_job: null, context: null });
   }
 
   deletes(): number {
@@ -143,9 +143,9 @@ class Fake {
       if (this.ticket.status === 'queued') {
         this.say('queued', { position: this.ticket.position, of: this.ticket.position });
       } else {
-        this.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: null, load_job: null });
+        this.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: null, load_job: null, context: null });
       }
-      json(response, 202, { session_id: this.sessionId, model: null, ...this.ticket });
+      json(response, 202, { session_id: this.sessionId, model: null, context: null, ...this.ticket });
       return;
     }
     if (method === 'GET' && path === `${own}/events`) {

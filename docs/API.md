@@ -1097,6 +1097,7 @@ Ask for the server for a run of requests you cannot know in advance. It waits in
 | `status` | `'queued'` or `'open'` or `'closed'` | yes | — |  |
 | `position` | integer or null | yes | — |  |
 | `model` | string or null | yes | — | The model the session opens with resident: the one it named, or the one its `max_params_b` chose; null when it named neither (it opens on whatever is resident). |
+| `context` | integer or null | yes | — | The context, in tokens, its model was started at, when the session opened at once on a text model (status `open`); null while queued, where the `opened` event carries it, and for a session with no text model. |
 
 ### `GET /v1/queue/sessions/{session_id}`
 
@@ -1119,7 +1120,7 @@ Where the session stands: queued (and where), open (what it has run and has in f
 | `act` | string | yes | — |  |
 | `client` | string or null | yes | — |  |
 | `model` | string or null | yes | — |  |
-| `context` | integer or null | yes | — | The context, in tokens, its model was started at: set when it opens on a text model, and what a client sizes its work to. A load that names no context takes the model's default or, when the card cannot hold that, the most it affords (never under 2048); null while queued and for a session with no text model. |
+| `context` | integer or null | yes | — | The context, in tokens, its model was started at: set when it opens on a text model, and what a client sizes its work to. A session that stated `context_tokens` gets that figure (never under 2048), or a resident model already started longer; one that stated none gets the model's default or, when the card cannot hold that, the most it affords (never under 2048). Null while queued and for a session with no text model. |
 | `position` | integer or null | yes | — |  |
 | `idle_s` | integer | yes | — |  |
 | `max_wait_s` | integer | yes | — |  |
@@ -1158,7 +1159,7 @@ End your session (reason `client`): an open one closes and the card is settled b
 | `act` | string | yes | — |  |
 | `client` | string or null | yes | — |  |
 | `model` | string or null | yes | — |  |
-| `context` | integer or null | yes | — | The context, in tokens, its model was started at: set when it opens on a text model, and what a client sizes its work to. A load that names no context takes the model's default or, when the card cannot hold that, the most it affords (never under 2048); null while queued and for a session with no text model. |
+| `context` | integer or null | yes | — | The context, in tokens, its model was started at: set when it opens on a text model, and what a client sizes its work to. A session that stated `context_tokens` gets that figure (never under 2048), or a resident model already started longer; one that stated none gets the model's default or, when the card cannot hold that, the most it affords (never under 2048). Null while queued and for a session with no text model. |
 | `position` | integer or null | yes | — |  |
 | `idle_s` | integer | yes | — |  |
 | `max_wait_s` | integer | yes | — |  |
@@ -3454,7 +3455,7 @@ A queue session: one client's claim on the server for a run of requests. Not a T
 | `act` | string | yes | — |  |
 | `client` | string or null | yes | — |  |
 | `model` | string or null | yes | — |  |
-| `context` | integer or null | yes | — | The context, in tokens, its model was started at: set when it opens on a text model, and what a client sizes its work to. A load that names no context takes the model's default or, when the card cannot hold that, the most it affords (never under 2048); null while queued and for a session with no text model. |
+| `context` | integer or null | yes | — | The context, in tokens, its model was started at: set when it opens on a text model, and what a client sizes its work to. A session that stated `context_tokens` gets that figure (never under 2048), or a resident model already started longer; one that stated none gets the model's default or, when the card cannot hold that, the most it affords (never under 2048). Null while queued and for a session with no text model. |
 | `position` | integer or null | yes | — |  |
 | `idle_s` | integer | yes | — |  |
 | `max_wait_s` | integer | yes | — |  |
@@ -3482,6 +3483,7 @@ A queue session: one client's claim on the server for a run of requests. Not a T
 | `status` | `'queued'` or `'open'` or `'closed'` | yes | — |  |
 | `position` | integer or null | yes | — |  |
 | `model` | string or null | yes | — | The model the session opens with resident: the one it named, or the one its `max_params_b` chose; null when it named neither (it opens on whatever is resident). |
+| `context` | integer or null | yes | — | The context, in tokens, its model was started at, when the session opened at once on a text model (status `open`); null while queued, where the `opened` event carries it, and for a session with no text model. |
 
 ### `StartPairing`
 

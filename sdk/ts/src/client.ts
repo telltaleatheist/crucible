@@ -1025,13 +1025,17 @@ export class CrucibleClient {
     const id = str(ticket, 'session_id', 'session');
     const status = oneOf(str(ticket, 'status', 'session'), QUEUE_SESSION_STATUSES, 'session.status');
     const model = nullableStr(ticket, 'model', 'session');
+    const startedAt = nullableNum(ticket, 'context', 'session');
     if (signal !== undefined && signal.aborted) {
       // Aborted the instant the ticket arrived: the session is not wanted, open or not.
       await this.#leaveTheLine(id);
       throw signal.reason;
     }
-    const cursor = status === 'open' ? 0 : await this.#untilOpen(id, { onQueue, onWaiting }, signal);
-    return this.#bind(id, act, model, cursor);
+    const opened =
+      status === 'open'
+        ? { id: 0, context: startedAt }
+        : await this.#untilOpen(id, { onQueue, onWaiting }, signal);
+    return this.#bind(id, act, model, opened.context, opened.id);
   }
 
   /**
@@ -1072,12 +1076,12 @@ export class CrucibleClient {
     });
   }
 
-  /** Follow a session waiting in the line until it opens; the id of its `opened` event. */
+  /** Follow a session waiting in the line until it opens; its `opened` event's id and context. */
   async #untilOpen(
     sessionId: string,
     watch: LineWatch,
     signal: AbortSignal | undefined,
-  ): Promise<number> {
+  ): Promise<{ readonly id: number; readonly context: number | null }> {
     const following = signal === undefined ? new AbortController().signal : signal;
     let settled = false;
     try {
@@ -1092,7 +1096,7 @@ export class CrucibleClient {
             break;
           case 'opened':
             settled = true;
-            return event.id;
+            return { id: event.id, context: event.context };
           case 'removed':
             settled = true;
             throw sessionClosed(sessionId, event.reason, event.message, event.error);
@@ -1137,7 +1141,13 @@ export class CrucibleClient {
   }
 
   /** The client a session's items go through: this one, plus the session's header. */
-  #bind(sessionId: string, act: string, model: string | null, cursor: number): CrucibleSession {
+  #bind(
+    sessionId: string,
+    act: string,
+    model: string | null,
+    context: number | null,
+    cursor: number,
+  ): CrucibleSession {
     const watch = new AbortController();
     let resolve: (end: QueueSessionEnd) => void = () => undefined;
     const closed = new Promise<QueueSessionEnd>((settle) => {
@@ -1159,6 +1169,7 @@ export class CrucibleClient {
       sessionId,
       act,
       model,
+      context,
       closed,
       this.#sessionHooks(binding),
     );
@@ -2645,6 +2656,12 @@ export class CrucibleSession extends CrucibleClient {
    */
   readonly model: string | null;
   /**
+   * The context, in tokens, its model was started at: size work to this. The `contextTokens` it
+   * stated (never under 2048), or a resident model already started longer; without one, the
+   * model's default or the most the card affords under it. Null for a session with no text model.
+   */
+  readonly context: number | null;
+  /**
    * How the session ended, once it has: closed by {@link close}, idle, by an operator, at the
    * server's maximum hold, or the server stopping. Never rejects. A background follow of the
    * session's own stream is what resolves it; that follow ends with the session.
@@ -2659,6 +2676,7 @@ export class CrucibleSession extends CrucibleClient {
     id: string,
     act: string,
     model: string | null,
+    context: number | null,
     closed: Promise<QueueSessionEnd>,
     hooks: SessionHooks,
   ) {
@@ -2666,6 +2684,7 @@ export class CrucibleSession extends CrucibleClient {
     this.id = id;
     this.act = act;
     this.model = model;
+    this.context = context;
     this.closed = closed;
     this.#hooks = hooks;
   }
@@ -2736,7 +2755,7 @@ export interface LineWatch {
 
 type SessionFeedEvent =
   | { readonly id: number; readonly kind: 'queued' | 'moved'; readonly position: QueuePosition }
-  | { readonly id: number; readonly kind: 'opened' }
+  | { readonly id: number; readonly kind: 'opened'; readonly context: number | null }
   | { readonly id: number; readonly kind: 'waiting'; readonly waiting: CardWaitData }
   | { readonly id: number; readonly kind: 'closed'; readonly end: QueueSessionEnd }
   | {
@@ -2892,7 +2911,7 @@ function readSessionFrame(frame: SseFrame, what: string, previous: number): Sess
         position: { position: num(data, 'position', where), of: num(data, 'of', where) },
       };
     case 'opened':
-      return { id, kind: 'opened' };
+      return { id, kind: 'opened', context: nullableNum(data, 'context', where) };
     case 'waiting':
       return { id, kind: 'waiting', waiting: readCardWait(data, where) };
     case 'closed':

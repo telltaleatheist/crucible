@@ -328,6 +328,11 @@ class SessionTicket(_Open):
         "one its `max_params_b` chose; null when it named neither (it opens on whatever "
         "is resident)."
     )
+    context: int | None = Field(
+        description="The context, in tokens, its model was started at, when the session "
+        "opened at once on a text model (status `open`); null while queued, where the "
+        "`opened` event carries it, and for a session with no text model."
+    )
 
 
 class SessionState(_Open):
@@ -341,10 +346,11 @@ class SessionState(_Open):
     model: str | None
     context: int | None = Field(
         description="The context, in tokens, its model was started at: set when it opens "
-        "on a text model, and what a client sizes its work to. A load that names no "
-        "context takes the model's default or, when the card cannot hold that, the most "
-        "it affords (never under 2048); null while queued and for a session with no text "
-        "model."
+        "on a text model, and what a client sizes its work to. A session that stated "
+        "`context_tokens` gets that figure (never under 2048), or a resident model "
+        "already started longer; one that stated none gets the model's default or, when "
+        "the card cannot hold that, the most it affords (never under 2048). Null while "
+        "queued and for a session with no text model."
     )
     position: int | None
     idle_s: int

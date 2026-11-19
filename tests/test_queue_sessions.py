@@ -96,6 +96,9 @@ def test_on_an_idle_server_a_session_opens_at_once_and_its_client_closes_it(
     assert opened["status"] == "open" and opened["client"] == "briefcase"
     assert opened["act"] == "analysis" and opened["idle_s"] == 300
     assert opened["opened_at"] is not None and opened["idle_deadline"] is not None
+    # Opened at once, so the ticket already says the context it opened at (none here: no
+    # text model was named), as the state does.
+    assert ticket["context"] == opened["context"]
     assert opened["max_hold_deadline"] is None, "there is no maximum hold by default"
     activity = client.get("/v1/activity", headers=auth).json()
     assert activity["session"]["session_id"] == ticket["session_id"]
@@ -118,7 +121,7 @@ def test_a_session_waits_in_the_line_behind_a_busy_lane(
     holder = occupy_the_lane(client, auth)
     mine = as_client(auth, "briefcase")
     ticket = open_session(client, mine)
-    assert (ticket["status"], ticket["position"]) == ("queued", 1)
+    assert (ticket["status"], ticket["position"], ticket["context"]) == ("queued", 1, None)
     rows = client.get("/v1/queue", headers=auth).json()["items"]
     assert [(row["kind"], row["job_id"]) for row in rows] == [
         ("session", ticket["session_id"])
