@@ -465,6 +465,11 @@ JOB_DOCS: dict[str, JobDoc] = {
             "A model not installed yet is installed on submit where the server allows "
             "it: the submit answers 409 `installing`; submit again when it is done.",
             "`vocals` means every voice in the track, singing included.",
+            "A YuE2 instrumental: a separator checks it, it never fixes it. "
+            "`vocals-roformer` reliably says whether a seed sang (its `(vocals)` stem is "
+            "silent, in `separated.silent_stems`, when nothing was sung). A seed that sang "
+            "is rendered again with another seed. Removing the voice with a separator does "
+            "not fix the track: never keep a separator's instrumental stem in its place.",
             "`hop_s` trades time for quality: the separator runs on one window at a time "
             "(11 s; 8 s for `denoise-roformer` and `bleed-suppressor-roformer`), one every "
             "`hop_s` seconds, and averages where they overlap. The default (8) puts about "

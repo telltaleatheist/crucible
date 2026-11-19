@@ -662,9 +662,16 @@ named in `separated.silent_stems`; a stem missing for any other reason still fai
 name (`denoise_primary_stem_missing`). (Through 1.0.38 a freshly loaded separator could write FLAC despite the request, because
 audio-separator's model instance kept its load-time format; fixed 2026-09-25.)
 
-**Chaining a song into denoise (B-Sides).** Render with `"hold": true`, then name the song as
-denoise's input by reference — the bytes never leave the server — and release the hold when
-the stems are fetched:
+**Checking an instrumental for a voice: a separator finds it, it does not remove it (Owen,
+2026-11-19).** A YuE2 instrumental now and then sings on some seeds. `vocals-roformer` is a
+reliable way to find out whether a seed did: its `(vocals)` stem is silent (named in
+`separated.silent_stems`) when the render has no voice, and carries the voice when it has one.
+A seed that sang is rendered again with another seed; the render that passes is the one kept.
+**Removing the voice from an instrumental with a separator does not fix the track**: never keep
+a separator's instrumental stem in place of the render. A separator is the check, never the
+cure. Chaining the render into the check: render with `"hold": true`, then
+name the song as denoise's input by reference — the bytes never leave the server — and release
+the hold when the stems are fetched:
 
 ```json
 {"type": "audio", "model": "yue2-3b", "hold": true,
@@ -707,8 +714,9 @@ config (`<input>_(<stem>)_<checkpoint>.<ext>`):
 | `bleed-suppressor-roformer` (unwa, 97chris) | `(Instrumental)`, the instrumental cleaned | `(Bleed)`, the voice it took out | 8 s |
 | `denoise-roformer` (aufr33) | `(dry)`, the dry speech | `(other)`, what was taken out | 8 s |
 
-An instrumental-target model is the one to use when the instrumental is what is kept: its
-model was trained on the instrumental, where `vocals-roformer`'s instrumental is the mix minus
+An instrumental-target model is the one to use when the instrumental is what is kept from a
+recording that has a voice in it (never a YuE2 instrumental: re-roll its seed instead, as above):
+its model was trained on the instrumental, where `vocals-roformer`'s instrumental is the mix minus
 its vocals estimate. The bleed suppressor is a second pass: send it the instrumental another
 separator made, by reference to that denoise job's stem (`"hold": true` on the first job), and
 keep its `(Instrumental)`. Which stem is primary is checked on the LAST parenthesised label of

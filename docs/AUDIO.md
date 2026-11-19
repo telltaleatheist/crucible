@@ -178,6 +178,13 @@ yue2-music workflow, vendored in `crucible/jobs/audio/yue2music/`):
 The render's `effective_params.notes` carries YuE2's transfer report (how many notes moved)
 and the score it first planned.
 
+Some seeds still sing. To find out whether one did, run the render through `vocals-roformer`
+(a `denoise` job): a silent `(vocals)` stem, named in `separated.silent_stems`, means no voice.
+If it sang, render again with another seed. Removing the voice with a separator does not fix
+the track, so never keep the separator's instrumental stem instead: the separator is the check
+and never the fix (Owen, 2026-11-19; docs/API-CLI.md "Checking an
+instrumental for a voice").
+
 ### Planning lyrics: what an instrumental is planned from
 
 YuE2 plans an instrumental's score the way it plans a sung song's: from lyrics. It then
