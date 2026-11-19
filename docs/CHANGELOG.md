@@ -7,7 +7,10 @@ notes.
 
 ## Unreleased
 
+## 2.0.40 — 2026-11-19
+
 - A queue session's handle now says the context its model started at: `session.context` in the SDK, read from the open ticket (`context` on `POST /v1/queue/sessions` when it opens at once) or from the `opened` event when it waited. Before, a client had to `GET` the session's state after opening to learn it. Asked for by BookForge, which sizes its work to the figure.
+
 ## 2.0.39 — 2026-11-19
 
 - The docs now say how to check a YuE2 instrumental for a voice, and that a separator does not fix one. Owen, 2026-11-19: "the vocal sep is a reliable way of finding out if a seed has vocals in it, but it shouldnt be used to actually remove vocals". API-CLI.md, AUDIO.md and the `denoise` notes in API.md say: run `vocals-roformer` to find out whether a seed sang (its `(vocals)` stem is silent when nothing was), render a seed that sang again with another seed, and never keep a separator's instrumental stem in place of the render. Removing the voice with a separator does not fix the track.
