@@ -343,3 +343,31 @@ def test_a_queued_chat_whose_model_load_meets_a_held_card_waits_then_is_answered
         thread.join(timeout=60.0)
         assert out and out[0].status_code == 200, out
         assert len(engines) == 1
+
+
+def test_a_job_waiting_for_host_memory_is_listed_and_said_as_such(
+    client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2.0.41's `memory_busy` waits like `accelerator_busy`, and the queue's answer may
+    carry it (its schema named only the card's code, so listing it was a 500)."""
+    monkeypatch.setattr(line_module, "CARD_RECHECK_S", 3600.0)
+    store, line = client.app.state.store, client.app.state.line
+    echo = store.registry["echo"]
+    holder = occupy_the_lane(client, auth)
+    patient = client.post("/v1/jobs", json=body(), headers=auth).json()["job_id"]
+
+    def short_of_memory(model: str | None, params: dict[str, Any]) -> None:
+        raise ApiError(409, "memory_busy", "echo needs 7.0 GiB of memory.", {"model": "echo"})
+
+    monkeypatch.setattr(echo, "preflight", short_of_memory)
+    free_the_lane(client, auth, holder)
+    wait_for(lambda: line.get(patient) is not None
+             and line.get(patient).card_wait is not None, "the job to wait for memory")
+
+    answer = client.get("/v1/queue", headers=auth)
+    assert answer.status_code == 200, answer.text
+    waiting = answer.json()["items"][0]["waiting_for"]
+    assert waiting["code"] == "memory_busy"
+    said = [e for e in store.get(patient).events if e["event"] == "waiting"]
+    assert said[0]["data"]["message"].startswith("Waiting for room in memory: echo needs")
+    client.delete(f"/v1/jobs/{patient}", headers=auth)

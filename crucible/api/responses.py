@@ -149,13 +149,15 @@ class QueueWaitingFor(_Open):
     lane is free, but memory on the accelerator is held by a process this Crucible does
     not own; `message` is the guard's sentence naming the holder (pid, name and bytes, or
     the unattributed bytes), and the item is checked again at `next_check_at`.
+    `memory_busy`: the same, for host memory: the model's measured footprint does not fit
+    in what this machine has available until other programs let go.
     `keeping_calls_together`: it would take a resident model that keeps its calls
     together off the card, so that model's queued calls run first; `details` names the
     `model`, how many go `ahead` (`ahead_ids`) and whether its `turn_taken` already fixed
     them, and `next_check_at` is null. Either way it leaves the line `expired` when its
     `max_wait_s` runs out."""
 
-    code: Literal["accelerator_busy", "keeping_calls_together"]
+    code: Literal["accelerator_busy", "memory_busy", "keeping_calls_together"]
     message: str
     details: dict[str, Any] | None
     since: str
