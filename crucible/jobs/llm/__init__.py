@@ -756,6 +756,7 @@ class LoadModelJobType:
             need_bytes=spec.memory_bytes_estimate,
             owned_pids=self._residency.owned_pids(),
             reclaimable_bytes=self._reclaimable(),
+            reclaimable_ram_bytes=self._residency.reclaimable_ram_bytes(),
         )
         # A forecast, made before the eviction: whether this model can have a KV cache at
         # this context once the resident has gone, so a load that cannot is refused before

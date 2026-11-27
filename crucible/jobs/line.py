@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Callable, ClassVar
 
 from .. import clock, keeptogether
-from ..accelerator import WAITS_FOR_THE_CARD
+from ..accelerator import MEMORY_BUSY, WAITS_FOR_THE_CARD
 from ..errors import ApiError
 from ..events import QUEUE
 from ..keeptogether import KEEPING_CALLS_TOGETHER, Hold, Kept
@@ -30,6 +30,9 @@ from .base import TERMINAL_STATES, Job, JobFailure
 
 if TYPE_CHECKING:
     from .queue import JobStore
+
+# How a wait for room is said, by the refusal's code: the card, or host memory.
+WAITING_FOR = {MEMORY_BUSY: "Waiting for room in memory"}
 
 DEFAULT_MAX_WAIT_S = 3600
 MIN_MAX_WAIT_S = 10
@@ -443,8 +446,9 @@ class WaitingLine:
         said = {
             "code": refusal.code,
             "message": (
-                f"waiting for the accelerator, checked again every {CARD_RECHECK_S:g} s "
-                f"until {item.expires_at.isoformat()}: {refusal.message}"
+                f"{WAITING_FOR.get(refusal.code, 'Waiting for room on the graphics card')}: "
+                f"{refusal.message} Checked again every {CARD_RECHECK_S:g} s until "
+                f"{item.expires_at.isoformat()}."
             ),
             "details": refusal.details,
             "since": item.card_wait.since.isoformat(),

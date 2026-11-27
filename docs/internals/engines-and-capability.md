@@ -293,13 +293,20 @@ Every capability fit and every vLLM budget subtracts it.
 
 Crucible refuses by name and never evicts anybody else's process.
 
-- `cuda-linux`: a foreign compute app over 1 GiB is `accelerator_busy`. Free
-  memory below the estimate is `insufficient_memory`, and the message names both
-  numbers. Under WSL2 the compute-app list is **empty** even while a process in
-  the VM holds 17 GB (measured 2026-09-12), but `memory.free` is accurate. So
-  `unattributed_bytes` counts VRAM in use that no listed app accounts for,
-  beyond the allowance, and refuses it. It is clamped at zero, and Crucible's
-  own resident engine counts as reclaimable.
+- `cuda-linux`: **room, not solitude** (Owen, 2026-11-27: *"dots doesnt require
+  that much memory. it could have run with starcraft on in the background"*).
+  A load goes ahead whenever free memory (plus what Crucible's own resident
+  engine gives back) holds its estimate, whatever else is on the card. Another
+  program's memory matters only when it leaves too little room: then the load
+  waits for it (`accelerator_busy`), and the sentence names what the model
+  needs, what is free, and who holds the rest. A foreign compute app over 1 GiB
+  is named by pid. Under WSL2 the compute-app list is **empty** even while a
+  process in the VM holds 17 GB (measured 2026-09-12), and a Windows program (a
+  game) is never listed, but `memory.free` is accurate. So `unattributed_bytes`,
+  the VRAM in use that no listed app accounts for beyond the allowance, is how
+  those are named. It is clamped at zero. A model that would not fit even if
+  every other program let go, or one short of room with nothing else on the
+  card, is `insufficient_memory` by name with both numbers.
 - The child of Crucible's child is still Crucible's. narrator's launcher starts
   a serving child. On native Linux the owned set is expanded through `/proc` to
   every process whose **session or process-group leader** is an owned pid.
@@ -308,13 +315,41 @@ Crucible refuses by name and never evicts anybody else's process.
   from the same shell. A `/proc` that cannot be parsed refuses, as an
   unreadable driver does. `accelerator.proc_entries` is the one `/proc` walker;
   narrator's `processes_launched_by` reads `environ` through it.
-- The guard runs four checks in order: foreign holders, unattributed bytes
-  (`cuda-linux` only), then room (Mac: total less the allowance; everywhere
-  else: free plus what Crucible's own resident engine would give back).
+- **Measured, not declared** (`crucible/footprints.py`, Owen, 2026-11-27: *"how much
+  each model ACTUALLY takes in practice rather than in theory?"*). On every backend each
+  resident model is read every 5 s while it is resident: how far the card's used memory
+  rose from just before its load (cuda-linux and llama-windows), and what every process
+  its engine leads holds in host memory by the system's own count
+  (`crucible/procmemory.py`: Pss on Linux, the physical footprint on a Mac, which counts
+  Metal's allocations, the working set on Windows).
+  A residency that served work (a job on the lane, a call in flight, a stream open)
+  keeps its peaks in `<home>/footprints.json`, per model and per the estimate it loaded
+  under (one model at two widths is two shapes); an idle one keeps nothing. The figure
+  used is the largest of the last 3 served runs, so one reading thrown off by another
+  program opening or closing is outvoted. `card_guard` then weighs the card by that
+  figure, even when it is below the estimate, and says so in its sentence ("needs
+  12.0 GiB (the most its last loads here took)"); until a model has served here it is
+  weighed by its estimate.
+- **Host memory** is weighed the same way once measured (Owen: *"its also using 23 gb of
+  regular memory ... that should probably be part of the calculation too"*): the
+  measured figure against what the system has available (under WSL2, the guest's share,
+  the limit an engine there is killed at; natively, the machine's), plus what the resident
+  model gives back when it leaves (Owen: *"some systems wont have wsl. some systems will be
+  using a mac, or windows"*). Short of that, the load waits
+  (`memory_busy`, weather, listed in `WAITS_FOR_THE_CARD`, said "Waiting for room in
+  memory: ..."); more than the Linux has in all is `insufficient_host_memory` by name.
+  An unreadable `footprints.json` is `footprints_unreadable`, and its sentence says to
+  delete it. On a Mac the card and host memory are one pool: the measured footprint is
+  the pool's figure, weighed once against total less the allowance.
+- The guard's checks by backend: `cuda-linux` weighs room and names the other
+  programs only when room is short (`_refuse_unless_room_beside_others`); the
+  Mac weighs total less the allowance; `llama-windows` refuses a stray
+  `llama-server` and then weighs free plus what Crucible's own resident engine
+  would give back.
 - **`accelerator_busy` is weather; the rest is not** (2026-10-02, Owen's rule
-  that a transient fault is waited on with a sentence). The first two checks
-  (`_refuse_holders`, `_refuse_stray`, including a holder an earlier Crucible
-  left) refuse `accelerator_busy`, listed in `accelerator.WAITS_FOR_THE_CARD`
+  that a transient fault is waited on with a sentence). Room taken by other programs
+  (`_refuse_unless_room_beside_others`, including a holder an earlier Crucible
+  left) and a stray `llama-server` refuse `accelerator_busy`, listed in `accelerator.WAITS_FOR_THE_CARD`
   and so in `admission.KEEPS_WAITING`. Every card-loading job type runs the
   guard in `preflight`, so admission is where it is met: a request that may
   wait keeps its place in the line with the refusal recorded on the item

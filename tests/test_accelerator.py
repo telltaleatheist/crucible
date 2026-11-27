@@ -243,7 +243,25 @@ def test_the_process_table_reads_this_very_process(
     assert table[mine] == (os.getpgid(mine), os.getsid(mine))
 
 
-def test_a_foreign_process_over_a_gib_is_accelerator_busy(
+def test_a_foreign_process_beside_a_model_that_fits_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Room, not solitude (Owen, 2026-11-27): another program on the card stops nothing
+    the free memory can hold."""
+    fake_cuda(
+        monkeypatch,
+        apps=[ComputeApp(pid=12769, name="sgl-omni", used_bytes=17 * GIB)],
+        free_bytes=7 * GIB,
+    )
+    guard(
+        "cuda-linux",
+        model_id="qwen3.5-9b",
+        need_bytes=2 * GIB,
+        desktop_allowance_bytes=3 * GIB,
+    )
+
+
+def test_a_foreign_process_that_leaves_too_little_room_is_waited_for(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_cuda(
@@ -255,39 +273,55 @@ def test_a_foreign_process_over_a_gib_is_accelerator_busy(
         guard(
             "cuda-linux",
             model_id="qwen3.5-9b",
-            need_bytes=2 * GIB,
+            need_bytes=10 * GIB,
             desktop_allowance_bytes=3 * GIB,
         )
     error = caught.value
     assert error.status_code == 409
     assert error.code == "accelerator_busy"
-    assert "pid 12769" in error.message
-    assert "sgl-omni" in error.message
-    assert "17.0 GiB" in error.message
-    assert "never evicts" in error.message
+    assert error.message.startswith(
+        "qwen3.5-9b needs 10.0 GiB and the card has 7.0 GiB free of 24.0 GiB."
+    )
+    assert "pid 12769 (sgl-omni, 17.0 GiB)" in error.message
+    assert "never stops another program" in error.message
     assert error.details["processes"][0]["pid"] == 12769
+    assert error.details["needed_bytes"] == 10 * GIB
 
 
-def test_a_process_whose_memory_the_driver_hides_is_still_busy(
+def test_a_process_whose_memory_the_driver_hides_is_waited_for_when_room_is_short(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_cuda(
         monkeypatch,
         apps=[ComputeApp(pid=1460, name="[Insufficient Permissions]", used_bytes=None)],
-        free_bytes=22 * GIB,
+        free_bytes=4 * GIB,
     )
     with pytest.raises(ApiError) as caught:
         guard(
             "cuda-linux",
             model_id="qwen3.5-9b",
-            need_bytes=2 * GIB,
+            need_bytes=20 * GIB,
             desktop_allowance_bytes=3 * GIB,
         )
     assert caught.value.code == "accelerator_busy"
     assert "memory not reported" in caught.value.message
 
 
-def test_vram_nobody_admits_to_is_accelerator_busy(
+def test_dots_ocr_loads_beside_a_game_the_driver_will_not_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """owens-pc, 2026-11-27: StarCraft II on Windows held about 2.8 GiB past the desktop's
+    allowance, the card had 18.3 GiB free, and dots-ocr waited ten minutes for nothing."""
+    fake_cuda(monkeypatch, apps=[], free_bytes=int(18.3 * GIB))
+    guard(
+        "cuda-linux",
+        model_id="dots-ocr",
+        need_bytes=DOTS_NEEDS,
+        desktop_allowance_bytes=3 * GIB,
+    )
+
+
+def test_vram_nobody_admits_to_is_waited_for_when_it_leaves_too_little_room(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_cuda(monkeypatch, apps=[], free_bytes=7 * GIB)
@@ -295,12 +329,26 @@ def test_vram_nobody_admits_to_is_accelerator_busy(
         guard(
             "cuda-linux",
             model_id="qwen3.5-9b",
-            need_bytes=2 * GIB,
+            need_bytes=10 * GIB,
             desktop_allowance_bytes=3 * GIB,
         )
     assert caught.value.code == "accelerator_busy"
     assert "will not name" in caught.value.message
     assert caught.value.details["unattributed_bytes"] == (24 - 7 - 3) * GIB
+
+
+def test_a_model_that_would_not_fit_even_if_others_let_go_is_insufficient_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_cuda(monkeypatch, apps=[], free_bytes=17 * GIB)
+    with pytest.raises(ApiError) as caught:
+        guard(
+            "cuda-linux",
+            model_id="qwen3.8-27b",
+            need_bytes=23 * GIB,
+            desktop_allowance_bytes=3 * GIB,
+        )
+    assert caught.value.code == "insufficient_memory"
 
 
 def test_the_desktop_allowance_is_not_treated_as_a_job(
@@ -562,19 +610,16 @@ def test_crucibles_own_llama_server_child_is_not_a_stray(
     )
 
 
-def test_the_same_desktop_under_cuda_linux_is_still_refused(
+def test_the_same_desktop_under_cuda_linux_leaves_room_and_the_load_proceeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_cuda(monkeypatch, apps=WINDOWS_DESKTOP, free_bytes=20 * GIB)
-    with pytest.raises(ApiError) as caught:
-        guard(
-            "cuda-linux",
-            model_id="dots-ocr",
-            need_bytes=DOTS_NEEDS,
-            desktop_allowance_bytes=3 * GIB,
-        )
-    assert caught.value.code == "accelerator_busy"
-    assert "pid 1460" in caught.value.message
+    guard(
+        "cuda-linux",
+        model_id="dots-ocr",
+        need_bytes=DOTS_NEEDS,
+        desktop_allowance_bytes=3 * GIB,
+    )
 
 
 def test_a_llama_server_is_found_by_image_name_never_by_pid() -> None:

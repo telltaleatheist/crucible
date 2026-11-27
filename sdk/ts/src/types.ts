@@ -815,12 +815,13 @@ export interface CancelledData {
 export const TERMINAL_EVENTS = ['done', 'failed', 'cancelled', 'removed'] as const;
 
 /**
- * Why an item at the front waits although the lane is free: memory on the accelerator is held by a
- * process the server does not own (`accelerator_busy`). It is checked again at `nextCheckAt` and runs
- * the moment the memory is let go, or is removed `expired` when its wait runs out (docs/QUEUE.md).
+ * Why an item at the front waits although the lane is free: the room its model needs is held by
+ * programs the server does not own, on the card (`accelerator_busy`) or in host memory
+ * (`memory_busy`). It is checked again at `nextCheckAt` and runs the moment the memory is let go, or
+ * is removed `expired` when its wait runs out (docs/QUEUE.md).
  */
 export interface CardWaitData {
-  /** `accelerator_busy`. */
+  /** `accelerator_busy` or `memory_busy`. */
   readonly code: string;
   /** The server's sentence: how often it checks again, until when, and who holds the card. */
   readonly message: string;
@@ -837,19 +838,19 @@ export interface CardWaitData {
  * every minute while it does not (from 1.0.83), so a client watching for silence sees it is alive.
  */
 export interface QueueWaitingFor {
-  /** `accelerator_busy` or `keeping_calls_together`. */
+  /** `accelerator_busy`, `memory_busy` or `keeping_calls_together`. */
   readonly code: string;
   /**
-   * The server's sentence: for `accelerator_busy` the guard naming the holder (pid, name and
-   * memory, or the unattributed bytes); for `keeping_calls_together` the resident model whose
-   * queued calls go first.
+   * The server's sentence: for `accelerator_busy` and `memory_busy` what the model needs against
+   * what is free, and who holds the rest (pid, name and memory, or the unattributed bytes); for
+   * `keeping_calls_together` the resident model whose queued calls go first.
    */
   readonly message: string;
   /** For `keeping_calls_together`: `{model, ahead, ahead_ids, turn_taken}`. */
   readonly details: Readonly<Record<string, unknown>> | null;
   readonly since: string;
   /**
-   * When the card is checked again (`accelerator_busy`); null for `keeping_calls_together`,
+   * When the room is checked again (`accelerator_busy`, `memory_busy`); null for `keeping_calls_together`,
    * which waits for the calls ahead of it to run, not for a time.
    */
   readonly nextCheckAt: string | null;

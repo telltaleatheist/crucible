@@ -67,7 +67,7 @@ def due_now(line: Any, item_id: str) -> None:
 
 
 def test_only_a_held_card_waits_and_misconfiguration_does_not() -> None:
-    assert WAITS_FOR_THE_CARD == {"accelerator_busy"}
+    assert WAITS_FOR_THE_CARD == {"accelerator_busy", "memory_busy"}
     assert KEEPS_WAITING == BUSY | WAITS_FOR_THE_CARD
     for named in ("insufficient_memory", "card_lacks_feature", "accelerator_unreadable",
                   "insufficient_kv_cache"):
@@ -107,7 +107,7 @@ def test_a_job_at_the_front_waits_for_a_held_card_and_says_who_holds_it(
     assert len(said) == 1, "said once while the holder stayed the same"
     assert said[0]["data"]["code"] == "accelerator_busy"
     assert "pid 4242" in said[0]["data"]["message"]
-    assert "waiting for the accelerator" in said[0]["data"]["message"]
+    assert said[0]["data"]["message"].startswith("Waiting for room on the graphics card: ")
 
 
 def test_a_long_card_wait_is_said_again_every_minute_with_its_next_check(

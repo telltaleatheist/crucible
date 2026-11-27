@@ -314,11 +314,12 @@ def test_somebody_else_on_the_card_refuses_by_name(
         "probe_compute_apps",
         lambda: [ComputeApp(pid=44503, name="python", used_bytes=17 * GIB)],
     )
-    monkeypatch.setattr(accelerator, "probe_vram", lambda: (5 * GIB, 24 * GIB))
+    # Room, not solitude: only a holder that leaves too little room is waited for.
+    monkeypatch.setattr(accelerator, "probe_vram", lambda: (GIB // 4, 24 * GIB))
     response = submit(asr_client, auth, queue=False)
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "accelerator_busy"
-    assert "never evicts" in response.json()["error"]["message"]
+    assert "never stops another program" in response.json()["error"]["message"]
 
 
 @pytest.mark.parametrize("backend", [FAKE_BACKEND, FAKE_MAC_BACKEND], ids=lambda b: b.kind)

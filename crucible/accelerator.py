@@ -28,7 +28,10 @@ PROC = Path("/proc")
 FOREIGN_PROCESS_FLOOR_BYTES = 1 * GIB
 
 ACCELERATOR_BUSY = "accelerator_busy"
-WAITS_FOR_THE_CARD = frozenset({ACCELERATOR_BUSY})
+# Host memory held by other programs, where a model's measured footprint would fit once they
+# let go (crucible/jobs/template.py `refuse_unless_host_room`): weather, waited on the same way.
+MEMORY_BUSY = "memory_busy"
+WAITS_FOR_THE_CARD = frozenset({ACCELERATOR_BUSY, MEMORY_BUSY})
 """The guard's refusals that are weather, not misconfiguration: memory on the card is
 held by a process this Crucible does not own (another program, or an engine an earlier
 Crucible left running and has asked to stop). It frees when that process lets go, so a
@@ -673,69 +676,101 @@ def _not_ours(
     return [app for app in state.compute_apps if app.pid not in owned_pids]
 
 
-def _refuse_holders(
-    backend_kind: str, model_id: str, not_ours: list[ComputeApp]
-) -> None:
-    if backend_kind == LLAMA_WINDOWS:
-        holders = [app for app in not_ours if is_llama_server(app.name)]
-        opening = (
-            f"cannot load {model_id!r}: a llama-server this Crucible did not "
-            "start is still on the accelerator — "
-        )
-        closing = (
-            ". It is an engine child left behind by an earlier run; stop it, and a "
-            "request waiting in the line goes ahead once it has gone. Crucible never "
-            "evicts another process."
-        )
-    else:
-        holders = [
-            app
-            for app in not_ours
-            if app.used_bytes is None or app.used_bytes > FOREIGN_PROCESS_FLOOR_BYTES
-        ]
-        opening = f"cannot load {model_id!r}: the accelerator is held by "
-        closing = ". Crucible never evicts another process."
+def _refuse_stray_llama_server(model_id: str, not_ours: list[ComputeApp]) -> None:
+    holders = [app for app in not_ours if is_llama_server(app.name)]
     if not holders:
         return
     raise ApiError(
         409,
         ACCELERATOR_BUSY,
         *_left_behind(
-            opening + "; ".join(app.describe() for app in holders) + closing,
+            f"cannot load {model_id!r}: a llama-server this Crucible did not start is "
+            "still on the accelerator — "
+            + "; ".join(app.describe() for app in holders)
+            + ". It is an engine child left behind by an earlier run; stop it, and a "
+            "request waiting in the line goes ahead once it has gone. Crucible never "
+            "evicts another process.",
             {"model": model_id, "processes": _process_rows(holders)},
         ),
     )
 
 
-def _refuse_stray(
-    backend_kind: str,
-    model_id: str,
+def _others_on_the_card(
     state: AcceleratorState,
     desktop_allowance_bytes: int,
     reclaimable_bytes: int,
-) -> None:
-    if backend_kind != CUDA_LINUX:
-        return
+    not_ours: list[ComputeApp],
+) -> tuple[list[ComputeApp], int]:
+    """What other programs hold on the card: the foreign compute apps over the floor, and
+    the memory in use that nothing listed accounts for past the desktop's allowance. Under
+    WSL2 the compute-app list is empty even while a process in the VM holds 17 GB
+    (measured 2026-09-12), and a Windows program (a game) is never listed, so the second
+    is the honest figure for them."""
+    holders = [
+        app
+        for app in not_ours
+        if app.used_bytes is None or app.used_bytes > FOREIGN_PROCESS_FLOOR_BYTES
+    ]
     stray = unattributed_bytes(state, desktop_allowance_bytes, reclaimable_bytes)
-    if stray <= FOREIGN_PROCESS_FLOOR_BYTES:
+    return holders, stray if stray > FOREIGN_PROCESS_FLOOR_BYTES else 0
+
+
+def _refuse_unless_room_beside_others(
+    model_id: str,
+    need_bytes: int,
+    state: AcceleratorState,
+    desktop_allowance_bytes: int,
+    reclaimable_bytes: int,
+    not_ours: list[ComputeApp],
+    need_basis: str,
+) -> None:
+    """Room, not solitude (Owen, 2026-11-27: "dots doesnt require that much memory. it
+    could have run with starcraft on in the background"). Another program's memory stops a
+    load only when it leaves the model too little room; then the load waits for it
+    (`accelerator_busy`, weather) with a sentence that says so. With nothing else on the
+    card, a model the free memory cannot hold is `insufficient_memory` by name, and so is
+    one that would not fit even if every other program let go."""
+    room = state.free_bytes + reclaimable_bytes
+    if room >= need_bytes:
         return
-    raise ApiError(
-        409,
-        ACCELERATOR_BUSY,
-        *_left_behind(
-            f"cannot load {model_id!r}: {gib_text(stray)} of the "
-            f"{gib_text(state.total_bytes)} card is in use by a process "
-            "this host's driver will not name (under WSL2 the compute-app "
-            "list is empty even for processes inside the same VM). Crucible "
-            "never evicts another process.",
-            {
-                "model": model_id,
-                "unattributed_bytes": stray,
-                "used_bytes": state.used_bytes,
-                "desktop_allowance_bytes": desktop_allowance_bytes,
-            },
-        ),
+    holders, stray = _others_on_the_card(
+        state, desktop_allowance_bytes, reclaimable_bytes, not_ours
     )
+    unmeasured = any(app.used_bytes is None for app in holders)
+    held = stray + sum(app.used_bytes or 0 for app in holders)
+    if (holders or stray) and (unmeasured or room + held >= need_bytes):
+        reclaim = (
+            f" (counting the {gib_text(reclaimable_bytes)} Crucible's own resident model "
+            "gives back)"
+            if reclaimable_bytes
+            else ""
+        )
+        others = [app.describe() for app in holders]
+        if stray:
+            others.append(
+                f"{gib_text(stray)} by a program the driver will not name (on a Windows "
+                "PC, a game or another app; under WSL2 the driver names none)"
+            )
+        raise ApiError(
+            409,
+            ACCELERATOR_BUSY,
+            *_left_behind(
+                f"{model_id} needs {gib_text(need_bytes)}{need_basis} and the card has "
+                f"{gib_text(room)} free of {gib_text(state.total_bytes)}{reclaim}. "
+                f"Other programs hold the rest: {'; '.join(others)}. It loads as soon as "
+                "that much is free; Crucible never stops another program.",
+                {
+                    "model": model_id,
+                    "needed_bytes": need_bytes,
+                    "free_bytes": state.free_bytes,
+                    "reclaimable_bytes": reclaimable_bytes,
+                    "total_bytes": state.total_bytes,
+                    "unattributed_bytes": stray,
+                    "processes": _process_rows(holders),
+                },
+            ),
+        )
+    _refuse_unless_free(model_id, need_bytes, state, reclaimable_bytes, not_ours, need_basis)
 
 
 def _refuse_unless_the_mac_has_room(
@@ -771,6 +806,7 @@ def _refuse_unless_free(
     state: AcceleratorState,
     reclaimable_bytes: int,
     not_ours: list[ComputeApp],
+    need_basis: str = "",
 ) -> None:
     if state.free_bytes + reclaimable_bytes >= need_bytes:
         return
@@ -783,7 +819,7 @@ def _refuse_unless_free(
     raise ApiError(
         409,
         "insufficient_memory",
-        f"cannot load {model_id!r}: it needs {gib_text(need_bytes)} and "
+        f"cannot load {model_id!r}: it needs {gib_text(need_bytes)}{need_basis} and "
         f"this host has {gib_text(state.free_bytes)} free of "
         f"{gib_text(state.total_bytes)}{reclaim}",
         {
@@ -805,20 +841,25 @@ def guard(
     owned_pids: frozenset[int] = frozenset(),
     desktop_allowance_bytes: int = 0,
     reclaimable_bytes: int = 0,
+    need_basis: str = "",
 ) -> AcceleratorState:
+    """``need_basis`` says where ``need_bytes`` came from, in the sentence after the figure
+    (" (the most its last loads here took)" for a measured footprint); empty for an estimate."""
     try:
         state = read_state(backend_kind, desktop_allowance_bytes)
     except ProbeError as exc:
         raise _unreadable(model_id, exc) from None
     not_ours = _not_ours(backend_kind, model_id, state, owned_pids)
-    _refuse_holders(backend_kind, model_id, not_ours)
-    _refuse_stray(
-        backend_kind, model_id, state, desktop_allowance_bytes, reclaimable_bytes
-    )
-    if backend_kind == MLX_DARWIN:
+    if backend_kind == CUDA_LINUX:
+        _refuse_unless_room_beside_others(
+            model_id, need_bytes, state, desktop_allowance_bytes, reclaimable_bytes,
+            not_ours, need_basis,
+        )
+    elif backend_kind == MLX_DARWIN:
         _refuse_unless_the_mac_has_room(
             model_id, need_bytes, state, desktop_allowance_bytes
         )
     else:
+        _refuse_stray_llama_server(model_id, not_ours)
         _refuse_unless_free(model_id, need_bytes, state, reclaimable_bytes, not_ours)
     return state

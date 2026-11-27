@@ -249,6 +249,11 @@ def _services(
     )
     streams = StreamManager(residency)
     inflight = InFlight()
+    # A resident model's footprint is kept only from a residency that served work
+    # (crucible/footprints.py): a job on the lane, a call in flight, or a stream open.
+    residency.working = lambda: (
+        not store.lane_free or len(inflight) > 0 or streams.session is not None
+    )
     settings_history = settings_module.History()
     sessions.watch(
         _session_in_flight(store, line, inflight, streams),

@@ -606,6 +606,7 @@ class TtsJobType:
             need_bytes=plan.need_bytes,
             owned_pids=self._residency.owned_pids(),
             reclaimable_bytes=self._residency.reclaimable_bytes(excluding=manifest.id),
+            reclaimable_ram_bytes=self._residency.reclaimable_ram_bytes(excluding=manifest.id),
         )
         return plan, state
 

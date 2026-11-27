@@ -385,7 +385,7 @@ def test_a_survivor_is_named_by_the_guard_with_the_command_to_stop_it(
         accelerator, "probe_vram", lambda: (4 * memorybudget.GIB, 24 * memorybudget.GIB)
     )
     with pytest.raises(ApiError) as refusal:
-        accelerator.guard("cuda-linux", model_id="m", need_bytes=1)
+        accelerator.guard("cuda-linux", model_id="m", need_bytes=10 * memorybudget.GIB)
     message = refusal.value.message
     assert f"A previous Crucible left {orphan.pid} " in message
     assert "it was asked to stop at 20" in message

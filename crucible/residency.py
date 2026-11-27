@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterator
 
-from . import accelerator
+from . import accelerator, footprints, procmemory
 from .accelerator import (
     ProcessIdentity,
     ask_pid_to_stop,
@@ -22,7 +22,7 @@ from .accelerator import (
     process_alive,
     process_identity,
 )
-from .backend import CUDA_LINUX
+from .backend import CUDA_LINUX, LLAMA_WINDOWS
 from .cardkinds import (
     KIND_ALIGN,
     KIND_AUDIO,
@@ -554,6 +554,12 @@ class Residency:
         # to the card (vLLM's KV pool takes the free room, so qwen3.5-4b-bside's 13.4 GB
         # estimate held 19 GB). None where nothing was measured.
         self._measured: int | None = None
+        # The resident's footprint as it serves (crucible/footprints.py): what it holds on
+        # the card and in host memory at its highest, kept per machine once it has served.
+        self._watch: footprints.Watch | None = None
+        # Whether Crucible has work in flight: set by the app from its store, its calls and
+        # its streams; a footprint is kept only from a residency that served work.
+        self.working: Callable[[], bool] = lambda: False
         self._engine: SubprocessEngine | None = None
         self._session: WorkerSession | None = None
         self._dying: DyingResident | None = None
@@ -944,8 +950,63 @@ class Residency:
         estimate = self._resident.memory_bytes_estimate
         return estimate if self._measured is None else max(estimate, self._measured)
 
+    def reclaimable_ram_bytes(self, excluding: str | None = None) -> int:
+        """What unloading the resident would give back in host memory: what its processes
+        held at the last read (0 where nothing is read)."""
+        if self._resident is None or self._resident.id == excluding or self._watch is None:
+            return 0
+        held = self._watch.ram_now
+        return 0 if held is None else held
+
+    def _card_used_or_raise(self) -> int:
+        free, total = accelerator.probe_vram()
+        return total - free
+
+    def _resident_pids(self) -> frozenset[int]:
+        pids: frozenset[int] = frozenset()
+        if self._engine is not None:
+            pids |= self._engine.pids
+        if self._session is not None:
+            pids |= self._session.pids
+        return procmemory.with_children(pids)
+
+    def _watch_footprint(self, resident: Resident, card_before: int | None) -> None:
+        """Every backend is watched. The card is read where it is a card of its own
+        (``card_before`` is None on a Mac, whose one pool is the host memory read)."""
+
+        def say(message: str) -> None:
+            print(f"crucible: {message}", file=sys.stderr)
+
+        self._watch = footprints.Watch(
+            home=self._config.home,
+            model=resident.id,
+            estimate_bytes=resident.memory_bytes_estimate,
+            card_before=card_before,
+            card_used=self._card_used_or_raise,
+            pids=self._resident_pids,
+            working=lambda: self.working(),
+            say=say,
+        )
+        self._watch.start()
+
+    def _keep_footprint(self) -> None:
+        """Take the leaving resident's last reads, before its processes stop."""
+        watch, self._watch = self._watch, None
+        if watch is None:
+            return
+        try:
+            watch.finish()
+        except (OSError, ValueError) as exc:
+            print(
+                f"crucible: could not keep the footprint of the leaving model in "
+                f"{footprints.footprints_path(self._config.home)}: "
+                f"{type(exc).__name__}: {exc}; the next load of it is weighed by its "
+                "estimate and the runs kept before",
+                file=sys.stderr,
+            )
+
     def _card_used_bytes(self, say: Callable[[str], None]) -> int | None:
-        if self._config.backend_kind != CUDA_LINUX:
+        if self._config.backend_kind not in (CUDA_LINUX, LLAMA_WINDOWS):
             return None
         try:
             free, total = accelerator.probe_vram()
@@ -1002,6 +1063,7 @@ class Residency:
         self._session = occupant.session
         self._resident = resident
         self._measured = None if after is None else max(0, after - before)
+        self._watch_footprint(resident, before)
         at = "" if occupant.base_url is None else f" at {occupant.base_url}"
         say(f"{subject_id} is resident{at}")
         self._record_residents()
@@ -1018,6 +1080,7 @@ class Residency:
         resident = self._resident
         if resident is None or resident.id != subject_id:
             raise KeyError(subject_id)
+        self._keep_footprint()
         leaving = Occupant(resident, self._engine, self._session)
         self._resident = None
         self._measured = None

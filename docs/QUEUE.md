@@ -118,8 +118,10 @@ the card**, the same way it waits for the lane:
   between the check and the start) does not end the session `load_failed` or the call
   `queued_load_failed`; the item goes back to waiting for the card.
 - The wait is bounded by the request's own `max_wait_s`. When it runs out the item is
-  removed `expired`, and the message says it was waiting for the accelerator and who held
-  it.
+  removed `expired`, and the message says it was waiting for room on the card and who held
+  it. The waiting sentence leads with that: "Waiting for room on the graphics card: <model>
+  needs <n> GiB and the card has <n> GiB free of <n> GiB. Other programs hold the rest: ...
+  Checked again every 5 s until <time>."
 - `"queue": false` still refuses at once: `409 accelerator_busy`.
 
 The `waiting` event on a job's or a session's own stream carries the same five fields,

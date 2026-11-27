@@ -5,8 +5,10 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar, Generic, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from .. import accelerator, workers
+from .. import accelerator, footprints, procmemory, workers
+from ..backend import MLX_DARWIN
 from ..errors import ApiError, JobError
+from ..memorybudget import gib_text
 from ..manifests import fingerprint
 from .base import JobContext, ModelDescriptor
 
@@ -58,6 +60,79 @@ def run_model(model: str | None, job_type: str, noun: str = "a model") -> str:
     return model
 
 
+MEASURED = " (the most its last loads here took)"
+
+
+def measured_footprint(
+    config: "Config", model: str, need_bytes: int
+) -> footprints.Footprint | None:
+    """What ``model`` took on this machine the last times it served at this shape (the
+    estimate ``need_bytes`` names the shape); None before any."""
+    try:
+        return footprints.read(config.home, model, need_bytes)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        path = footprints.footprints_path(config.home)
+        raise ApiError(
+            500,
+            "footprints_unreadable",
+            f"this server cannot read what its models took when they last served ({path}: "
+            f"{type(exc).__name__}: {exc}). Delete that file: every load is weighed by its "
+            "estimate again, and the file is written afresh as models serve.",
+        ) from None
+
+
+def refuse_unless_host_room(model: str, need_bytes: int, reclaimable_bytes: int) -> None:
+    """Host memory, weighed like the card (Owen, 2026-11-27: "its also using 23 gb of
+    regular memory ... that should probably be part of the calculation too"). The figure is
+    what the model's processes held at their highest when it last served here; the room is
+    what this system has available (crucible/procmemory.py: under WSL2, the guest's share)
+    plus what the resident model gives back when it leaves. Short of room, the load waits
+    for other programs to let go (`memory_busy`); one that would not fit even in all of it
+    is refused by name."""
+    try:
+        available, total = procmemory.host_memory()
+    except accelerator.ProbeError as exc:
+        raise ApiError(
+            503,
+            "host_memory_unreadable",
+            f"cannot weigh {model!r} against this machine's memory: {exc}",
+        ) from None
+    room = available + reclaimable_bytes
+    if need_bytes <= room:
+        return
+    details = {
+        "model": model,
+        "needed_bytes": need_bytes,
+        "available_bytes": available,
+        "reclaimable_bytes": reclaimable_bytes,
+        "total_bytes": total,
+    }
+    if need_bytes > total:
+        raise ApiError(
+            409,
+            "insufficient_host_memory",
+            f"cannot load {model!r}: it held {gib_text(need_bytes)} of memory when it last "
+            f"served here, and {procmemory.memory_words()} has {gib_text(total)} in all; "
+            f"{procmemory.more_memory_fix()}",
+            details,
+        )
+    reclaim = (
+        f" (counting the {gib_text(reclaimable_bytes)} the resident model gives back)"
+        if reclaimable_bytes
+        else ""
+    )
+    raise ApiError(
+        409,
+        accelerator.MEMORY_BUSY,
+        f"{model} needs {gib_text(need_bytes)} of memory{MEASURED} and "
+        f"{procmemory.memory_words()} has {gib_text(room)} available of "
+        f"{gib_text(total)}{reclaim}. Other programs hold "
+        "the rest. It loads as soon as that much is free; Crucible never stops another "
+        "program.",
+        details,
+    )
+
+
 def card_guard(
     config: "Config",
     *,
@@ -65,15 +140,34 @@ def card_guard(
     need_bytes: int,
     owned_pids: frozenset[int],
     reclaimable_bytes: int = 0,
+    reclaimable_ram_bytes: int = 0,
 ) -> accelerator.AcceleratorState:
-    return accelerator.guard(
+    """The card, then host memory. Where this machine has measured what ``model`` took
+    when it last served at this shape (crucible/footprints.py), that is the figure weighed,
+    on the card and in host memory; until then the card is weighed by the estimate and host
+    memory is not weighed. On a Mac the card and host memory are one pool: the measured
+    host figure is the card's, and the pool is weighed once."""
+    measured = measured_footprint(config, model, need_bytes)
+    unified = config.backend_kind == MLX_DARWIN
+    card_need = need_bytes
+    basis = ""
+    card_figure = None
+    if measured is not None:
+        card_figure = measured.ram_bytes if unified else measured.card_bytes
+    if card_figure is not None:
+        card_need, basis = card_figure, MEASURED
+    state = accelerator.guard(
         config.backend_kind,
         model_id=model,
-        need_bytes=need_bytes,
+        need_bytes=card_need,
         owned_pids=owned_pids,
         desktop_allowance_bytes=config.desktop_allowance_bytes,
         reclaimable_bytes=reclaimable_bytes,
+        need_basis=basis,
     )
+    if not unified and measured is not None and measured.ram_bytes is not None:
+        refuse_unless_host_room(model, measured.ram_bytes, reclaimable_ram_bytes)
+    return state
 
 
 class ManifestCatalog(Generic[M]):
@@ -191,6 +285,7 @@ class ResidentWorker:
             need_bytes=need_bytes,
             owned_pids=self._residency.owned_pids(),
             reclaimable_bytes=self._residency.reclaimable_bytes(excluding=model),
+            reclaimable_ram_bytes=self._residency.reclaimable_ram_bytes(excluding=model),
         )
 
     def _session(
