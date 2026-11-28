@@ -49,6 +49,36 @@ def test_a_stopped_ownerless_engine_still_has_its_pairing_token(tmp_path: Path) 
     assert pairing_sync.engine_token(context) == "kept"
 
 
+@pytest.mark.parametrize("owner", [Owner.WSL_UNIT, Owner.FOUND])
+def test_a_stopped_guest_engine_is_checked_without_waking_wsl(tmp_path: Path, owner: Owner) -> None:
+    """Owen, 2026-11-27: with Crucible stopped, every status request from the tray read the
+    guest's pairing line through wsl.exe, which booted WSL straight back up after
+    `wsl --shutdown`. A stopped engine's token is the copy published on this host."""
+    runner = Scripted()
+    context = _context(tmp_path, runner)
+    context.presence = presence.Presence(Distro.PRESENT, Engine.STOPPED, "stopped from the menu", owner)
+    (tmp_path / "pairing").write_text("crucible://engine@127.0.0.1:7100/#published", encoding="utf-8")
+    operator_stop.record(tmp_path)
+
+    assert pairing_sync.engine_token(context) == "published"
+    assert runner.calls == []
+
+    operator_stop.clear(tmp_path)
+    pairing_sync.engine_token(context)
+    if owner is Owner.WSL_UNIT:
+        assert any("pairing" in " ".join(call) for call in runner.calls)
+
+
+def test_a_stopped_guest_engine_without_a_readable_pairing_file_says_so(tmp_path: Path) -> None:
+    runner = Scripted()
+    context = _context(tmp_path, runner)
+    context.presence = presence.Presence(Distro.PRESENT, Engine.STOPPED, "stopped", Owner.WSL_UNIT)
+    operator_stop.record(tmp_path)
+    assert pairing_sync.engine_token(context) is None
+    assert "stopped by the operator" in pairing_sync.engine_token_detail(context)
+    assert runner.calls == []
+
+
 def _cannot(tmp_path: Path, code: str) -> None:
     outcome.write(tmp_path, state=outcome.CANNOT, code=code, sentence="s", release="1.0.0", attempts=1)
 

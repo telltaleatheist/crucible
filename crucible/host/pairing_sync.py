@@ -39,8 +39,17 @@ def _stopped_engine_token(context: HostContext) -> str | None:
 
 
 def engine_token(context: HostContext) -> str | None:
+    """The bearer the controller door checks every request against.
+
+    A guest engine's comes from its pairing line, read through wsl.exe, which boots the
+    distro when it is not running. Once the operator has stopped the engine, the copy this
+    host published (``<home>/pairing``) is the stopped engine's token, and reading the
+    guest would start WSL again every time the tray asks for status: an operator could not
+    shut WSL down while the orchestrator ran (Owen, 2026-11-27, compacting WSL's disk)."""
     owner = context.presence.owner
     if owner in GUEST_OWNERS:
+        if operator_stop.is_stopped(context.home):
+            return _stopped_engine_token(context)
         return _guest_token(context)
     if owner is Owner.HOST_CHILD:
         return read_token(context.home)
@@ -51,6 +60,12 @@ def engine_token(context: HostContext) -> str | None:
 
 def engine_token_detail(context: HostContext) -> str:
     owner = context.presence.owner
+    if owner in GUEST_OWNERS and operator_stop.is_stopped(context.home):
+        return (
+            f"the engine here is owner={owner.value} and stopped by the operator, so its "
+            f"bearer comes from the pairing file in {context.home}, which could not be "
+            "read or would not parse. The host log says which."
+        )
     if owner in GUEST_OWNERS:
         return (
             f"the engine here is owner={owner.value} and its bearer comes from the "
