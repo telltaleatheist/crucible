@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 2.0.43 — 2026-11-28
+
 - A stopped Crucible on Windows no longer keeps waking WSL. With the engine stopped, each status request from the tray had the orchestrator read the guest's pairing line through `wsl.exe` to check the request's token, which booted WSL again seconds after `wsl --shutdown`, so WSL could not be shut down (to compact its disk, say) while the orchestrator ran. A stopped engine's token is now read from the pairing file the host already keeps. Found by Owen, compacting WSL's disk.
 
 ## 2.0.42 — 2026-11-27
